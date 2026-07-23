@@ -32,6 +32,27 @@ export interface FwavFrame {
   payload: Buffer;
 }
 
+/** Tracks one accepted stream epoch so RESET makes late frames harmless. */
+export class EpochTracker {
+  #epoch = 0;
+  #lastSequence = -1n;
+
+  get epoch(): number { return this.#epoch; }
+
+  reset(): number {
+    if (this.#epoch === 0xffff_ffff) fail('epoch cannot be incremented');
+    this.#epoch += 1;
+    this.#lastSequence = -1n;
+    return this.#epoch;
+  }
+
+  accept(frame: FwavFrame): void {
+    if (frame.epoch !== this.#epoch) fail('frame belongs to a stale epoch');
+    if (frame.sequence <= this.#lastSequence) fail('sequence is duplicate or stale');
+    this.#lastSequence = frame.sequence;
+  }
+}
+
 function fail(message: string): never {
   throw new Error(`FWAV ${message}`);
 }

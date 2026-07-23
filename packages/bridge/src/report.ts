@@ -4,6 +4,8 @@ import path from 'node:path';
 
 export type EvidenceClass = 'Fixture' | 'Loopback' | 'Open air';
 export type LiteralDirection = 'A → B' | 'B → A';
+export const MAX_QUEUE_BYTES = 256 * 1024;
+export const MAX_QUEUE_DURATION_MS = 5_000;
 
 export interface MachineReport {
   schemaVersion: 1;
@@ -34,7 +36,7 @@ export function validateMachineReport(candidate: unknown): MachineReport {
   const report = candidate as MachineReport;
   if (!report || report.schemaVersion !== 1) fail('schema version is unsupported');
   if (Number.isNaN(Date.parse(report.capturedAt))) fail('captured timestamp is invalid');
-  for (const [value, label] of Object.entries(report.machine ?? {})) nonEmpty(value, `machine ${label}`);
+  for (const [label, value] of Object.entries(report.machine ?? {})) nonEmpty(value, `machine ${label}`);
   if (!report.machine || Object.keys(report.machine).length !== 5) fail('machine identity is incomplete');
   if (!['Fixture', 'Loopback', 'Open air'].includes(report.evidenceClass)) fail('evidence class is invalid');
   if (!Number.isInteger(report.epoch) || report.epoch < 0) fail('epoch is invalid');
@@ -44,6 +46,8 @@ export function validateMachineReport(candidate: unknown): MachineReport {
   if (!audio || audio.contextSampleRate !== 48_000 || audio.captureSampleRate !== 48_000 || audio.channels !== 1 || audio.echoCancellation || audio.noiseSuppression || audio.autoGainControl) fail('audio settings are not qualifying');
   for (const [label, value] of Object.entries(report.queues ?? {})) finiteNonNegative(value, `queue ${label}`);
   if (!report.queues || Object.keys(report.queues).length !== 5) fail('queue evidence is incomplete');
+  if (report.queues.captureHighWaterBytes > MAX_QUEUE_BYTES || report.queues.playbackHighWaterBytes > MAX_QUEUE_BYTES) fail('queue byte bound is exceeded');
+  if (report.queues.captureHighWaterMs > MAX_QUEUE_DURATION_MS || report.queues.playbackHighWaterMs > MAX_QUEUE_DURATION_MS) fail('queue time bound is exceeded');
   if (!report.complete) fail('is not complete');
   if (!Array.isArray(report.results) || report.results.length === 0) fail('results are required');
   const keys = new Set<string>();
