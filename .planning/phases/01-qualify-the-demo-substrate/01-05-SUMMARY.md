@@ -17,8 +17,18 @@ tech-stack:
   added: []
   patterns: [immutable-deadline, fail-closed-evidence, validated-playback-boundary]
 key-files:
-  created: [packages/bridge/src/codecs/types.ts, packages/bridge/src/codecs/fixture.ts, packages/bridge/src/codecs/command.ts, packages/bridge/src/codecs/websocket.ts, apps/modem-ui/src/qualification.ts, scripts/qualify.mjs]
-  modified: [packages/bridge/src/server.ts, apps/modem-ui/src/main.ts, apps/modem-ui/src/style.css, package.json]
+  created:
+    - packages/bridge/src/codecs/types.ts
+    - packages/bridge/src/codecs/fixture.ts
+    - packages/bridge/src/codecs/command.ts
+    - packages/bridge/src/codecs/websocket.ts
+    - apps/modem-ui/src/qualification.ts
+    - scripts/qualify.mjs
+  modified:
+    - packages/bridge/src/server.ts
+    - apps/modem-ui/src/main.ts
+    - apps/modem-ui/src/style.css
+    - package.json
 key-decisions:
   - "Cyrinx gets one immutable 90-minute window; expiry or any hard gate miss transitions immediately to Quiet and Quiet failure is terminal."
   - "Fixture and loopback evidence remains human_needed; only two named Open air reports can write a selection."
@@ -35,6 +45,8 @@ status: complete
 
 ## Accomplishments
 
+- Primary verified artifacts include `packages/bridge/src/codecs/types.ts` and
+  `packages/bridge/src/server.ts`.
 - Added typed fixture, native batch-command, and browser-WebSocket codec adapters behind one bounded result contract.
 - Enforced a one-way 90-minute Cyrinx gate, immediate Quiet fallback, MTU/audio/airtime/queue/digest/exactly-once checks, and terminal unqualified state.
 - Routed bridge playback solely through FWAV validation and the pre-existing bounded browser playback queue; server reset increments its epoch and clears bridge playback accounting.
@@ -47,7 +59,7 @@ status: complete
 2. **Task 2: Enforce Cyrinx deadline, immediate Quiet fallback, and exact thresholds** — `67136ac` (test), `ca1b8db` (feat)
 3. **Task 3: Finish the qualification console and exact-evidence verifier** — `365eb6d` (test), `20b1f02` (feat), `3958cbe` (fix)
 
-## Verification
+## Automated Checks
 
 - `npm run check` passed under Node 22.23.1: dependency audit, lint, typecheck, 37 unit tests, five Chromium tests, production build, corpus drift check, fixture output, unqualified bare verifier, and Compose seam.
 - `node scripts/qualify.mjs verify` correctly rejects the fixture report as non-physical, missing exact hosts, incomplete corpus, and missing physical threshold evidence.
