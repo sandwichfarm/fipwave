@@ -186,6 +186,7 @@ export class CyrinxQualificationSession {
   #accepted:
     | { caseIndex: number; mode: CyrinxInstructionAction; acceptedAtMs: number }
     | undefined;
+  #pendingCompletionReason: CyrinxFallbackReason | null = null;
   #coldReceivePassed = false;
 
   constructor(role: 'A' | 'B') {
@@ -255,6 +256,7 @@ export class CyrinxQualificationSession {
     this.#assertBeforeDeadline(nowMs);
     const value = this.currentCase();
     if (!value || this.terminal) reject('qualification_instruction_unavailable');
+    if (this.#pendingCompletionReason !== null) reject('qualification_completion_not_acknowledged');
     if (this.#accepted) reject('qualification_instruction_already_accepted');
     if (caseId !== value.id || direction !== value.direction) reject('qualification_instruction_mismatch');
     const mode = actionFor(this.role, value.direction);
@@ -284,6 +286,7 @@ export class CyrinxQualificationSession {
 
   completeAccepted(mode: CyrinxInstructionAction, nowMs: number): void {
     this.#assertBeforeDeadline(nowMs);
+    if (this.#pendingCompletionReason !== null) reject('qualification_completion_not_acknowledged');
     const accepted = this.#accepted;
     if (!accepted || accepted.caseIndex !== this.#caseIndex) {
       reject('qualification_instruction_not_accepted');
@@ -291,6 +294,7 @@ export class CyrinxQualificationSession {
     if (accepted.mode !== mode) reject('qualification_instruction_mode_mismatch');
     const value = this.currentCase();
     if (!value) reject('qualification_instruction_unavailable');
+    this.#pendingCompletionReason = failureReasonForStage(this.#stage);
     if (mode === 'listen' && value.cold) this.#coldReceivePassed = true;
     this.#accepted = undefined;
     const nextIndex = accepted.caseIndex + 1;
@@ -304,21 +308,28 @@ export class CyrinxQualificationSession {
     this.#stage = stageForCase(nextIndex);
   }
 
+  acknowledgeAcceptedCompletion(): void {
+    if (this.#pendingCompletionReason === null) reject('qualification_completion_not_pending');
+    this.#pendingCompletionReason = null;
+  }
+
   abortCase(): void {
     this.#accepted = undefined;
   }
 
   operatorReset(nowMs: number): boolean {
     this.#accepted = undefined;
-    if (this.#codec !== 'cyrinx' || this.terminal || this.#stage === 'idle') return false;
+    const revocableComplete = this.#stage === 'complete' && this.#pendingCompletionReason !== null;
+    if (this.#codec !== 'cyrinx' || this.#stage === 'idle' || (this.terminal && !revocableComplete)) return false;
     return this.failCurrent(nowMs);
   }
 
   expire(nowMs: number): boolean {
+    const revocableComplete = this.#stage === 'complete' && this.#pendingCompletionReason !== null;
     if (
       this.#startedAtMs === null
       || this.#deadlineAtMs === null
-      || this.terminal
+      || (this.terminal && !revocableComplete)
       || this.#codec !== 'cyrinx'
     ) return false;
     const now = checkedNow(nowMs);
@@ -328,9 +339,10 @@ export class CyrinxQualificationSession {
   }
 
   forceDeadlineExpiry(nowMs: number): boolean {
+    const revocableComplete = this.#stage === 'complete' && this.#pendingCompletionReason !== null;
     if (
       this.#startedAtMs === null
-      || this.terminal
+      || (this.terminal && !revocableComplete)
       || this.#codec !== 'cyrinx'
     ) return false;
     return this.#activate('cyrinx_deadline_expired', checkedNow(nowMs));
@@ -338,9 +350,10 @@ export class CyrinxQualificationSession {
 
   activateFallback(reason: CyrinxFallbackReason, nowMs: number): boolean {
     if (!CYRINX_FALLBACK_REASONS.includes(reason)) reject('qualification_fallback_reason_invalid');
+    const revocableComplete = this.#stage === 'complete' && this.#pendingCompletionReason !== null;
     if (
       this.#startedAtMs === null
-      || this.terminal
+      || (this.terminal && !revocableComplete)
       || this.#codec !== 'cyrinx'
       || this.#fallbackReason !== null
     ) return false;
@@ -356,7 +369,9 @@ export class CyrinxQualificationSession {
   }
 
   failCurrent(nowMs: number): boolean {
-    return this.activateFallback(failureReasonForStage(this.#stage), nowMs);
+    if (this.terminal && this.#pendingCompletionReason === null) return false;
+    const reason = this.#pendingCompletionReason ?? failureReasonForStage(this.#stage);
+    return this.activateFallback(reason, nowMs);
   }
 
   markQuietFailed(): boolean {
@@ -388,7 +403,7 @@ export class CyrinxQualificationSession {
         state: this.#fallbackState,
         reasonCode: this.#fallbackReason,
       },
-      instruction: value && !this.terminal && !this.#accepted
+      instruction: value && !this.terminal && !this.#accepted && this.#pendingCompletionReason === null
         ? {
             action: actionFor(this.role, value.direction),
             caseId: value.id,
@@ -418,12 +433,14 @@ export class CyrinxQualificationSession {
   }
 
   #activate(reason: CyrinxFallbackReason, nowMs: number): boolean {
-    if (this.#fallbackReason !== null || this.terminal || this.#codec !== 'cyrinx') return false;
+    const revocableComplete = this.#stage === 'complete' && this.#pendingCompletionReason !== null;
+    if (this.#fallbackReason !== null || (this.terminal && !revocableComplete) || this.#codec !== 'cyrinx') return false;
     this.#fallbackReason = reason;
     this.#fallbackState = 'activated';
     this.#codec = 'quiet';
     this.#stage = 'quiet';
     this.#accepted = undefined;
+    this.#pendingCompletionReason = null;
     const elapsed = this.#elapsed(nowMs);
     this.#terminalElapsedMs = reason === 'cyrinx_deadline_expired'
       ? Math.max(CYRINX_DEADLINE_MS, elapsed)

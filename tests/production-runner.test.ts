@@ -85,6 +85,33 @@ async function openInbox(runner: ProductionRunner, expected: Record<string, unkn
   expect(await inbox.text()).toMatchObject({ kind: 'cyrinx-session', ...expected });
   return inbox;
 }
+type CyrinxInstructionSnapshot = Record<string, unknown> & {
+  instruction: { action: 'transmit' | 'listen'; caseId: string; direction: 'A → B' | 'B → A'; cold: boolean };
+};
+async function advanceCyrinxCase(
+  inbox: SocketInbox,
+  snapshot: CyrinxInstructionSnapshot,
+  sequence: bigint,
+): Promise<{ snapshot: Record<string, unknown>; sequence: bigint }> {
+  const instruction = snapshot.instruction;
+  inbox.socket.send(frame(MessageType.QUALIFICATION_CASE, 1, sequence++, {
+    action: 'accept_cyrinx_instruction',
+    caseId: instruction.caseId,
+    direction: instruction.direction,
+  }));
+  if (instruction.action === 'transmit') {
+    await inbox.binary();
+    inbox.socket.send(frame(MessageType.QUALIFICATION_CASE, 1, sequence++, {
+      action: 'playback_complete',
+      caseId: instruction.caseId,
+      direction: instruction.direction,
+    }));
+  } else {
+    inbox.socket.send(pcm(1, sequence++));
+    expect(await inbox.text()).toMatchObject({ kind: 'cyrinx-result', caseId: instruction.caseId, accepted: true });
+  }
+  return { snapshot: await inbox.text(), sequence };
+}
 
 function fakeCyrinxWorker(): CyrinxWorkerRuntime & {
   begin: ReturnType<typeof vi.fn<CyrinxWorkerRuntime['begin']>>;
@@ -412,6 +439,101 @@ describe('production runner', () => {
     inbox.socket.close();
   });
 
+  it.each([
+    ['completion mutation', 3],
+    ['completion write', 4],
+  ] as const)('persists a deadline transition that occurs exactly at the %s boundary', async (_boundary, boundaryCall) => {
+    const target = await reportPath('cyrinx-persist-boundary');
+    const startAt = 1_000;
+    const deadlineAt = startAt + CYRINX_DEADLINE_MS;
+    let boundaryCalls = 0;
+    let boundaryArmed = false;
+    const runner = await startProductionRunner({
+      machineId: 'persist-boundary',
+      role: 'A',
+      port: 0,
+      report: target,
+      tunEvidence: 'none',
+      uiDir: await fixtureUi(),
+      nowForTests: () => boundaryArmed && ++boundaryCalls >= boundaryCall ? deadlineAt : startAt,
+      cyrinxBuildForTests: async () => undefined,
+      cyrinxDigitalForTests: async () => undefined,
+      cyrinxWorkerForTests: fakeCyrinxWorker(),
+      cyrinxSettleForTests: async () => undefined,
+      cyrinxTimerForTests: { set: () => 1, clear: vi.fn() },
+    });
+    runners.push(runner);
+    const inbox = await openInbox(runner);
+    await runner.startCyrinx();
+    await inbox.text(); await inbox.text(); const cold = await inbox.text() as CyrinxInstructionSnapshot;
+    inbox.socket.send(frame(MessageType.QUALIFICATION_CASE, 1, 0n, {
+      action: 'accept_cyrinx_instruction',
+      caseId: cold.instruction.caseId,
+      direction: cold.instruction.direction,
+    }));
+    await inbox.binary();
+    boundaryArmed = true;
+    inbox.socket.send(frame(MessageType.QUALIFICATION_CASE, 1, 1n, {
+      action: 'playback_complete',
+      caseId: cold.instruction.caseId,
+      direction: cold.instruction.direction,
+    }));
+    expect(await inbox.text()).toMatchObject({
+      codec: 'quiet',
+      stage: 'quiet',
+      fallback: { reasonCode: 'cyrinx_deadline_expired' },
+    });
+    await vi.waitFor(async () => {
+      const report = JSON.parse(await readFile(target, 'utf8')) as MachineReport;
+      expect(report).toMatchObject({
+        codec: { id: 'quiet' },
+        qualification: {
+          deadline: { elapsedMs: CYRINX_DEADLINE_MS },
+          fallback: { reasonCode: 'cyrinx_deadline_expired' },
+        },
+      });
+    });
+    inbox.socket.close();
+  });
+
+  it.each([
+    ['build', 'cyrinx_build_failed'],
+    ['digital', 'cyrinx_digital_roundtrip_failed'],
+  ] as const)('preempts a blocked %s gate and acknowledges current-epoch RESET', async (blockedGate, reasonCode) => {
+    let gateSignal: AbortSignal | undefined;
+    const blocked = ({ signal }: { signal: AbortSignal }) => {
+      gateSignal = signal;
+      return new Promise<void>(() => undefined);
+    };
+    const runner = await startProductionRunner({
+      machineId: `blocked-${blockedGate}`,
+      role: 'A',
+      port: 0,
+      report: await reportPath(`blocked-${blockedGate}`),
+      tunEvidence: 'none',
+      uiDir: await fixtureUi(),
+      cyrinxBuildForTests: blockedGate === 'build' ? blocked : async () => undefined,
+      cyrinxDigitalForTests: blockedGate === 'digital' ? blocked : async () => undefined,
+      cyrinxWorkerForTests: fakeCyrinxWorker(),
+    });
+    runners.push(runner);
+    const inbox = await openInbox(runner);
+    inbox.socket.send(frame(MessageType.QUALIFICATION_CASE, 1, 0n, { action: 'start_cyrinx' }));
+    expect(await inbox.text()).toMatchObject({ stage: 'build' });
+    if (blockedGate === 'digital') expect(await inbox.text()).toMatchObject({ stage: 'digital' });
+    await vi.waitFor(() => expect(gateSignal).toBeDefined());
+
+    inbox.socket.send(resetFrame(1, 1n));
+    expect(decodeFrame(await inbox.binary())).toMatchObject({ type: MessageType.RESET, epoch: 2 });
+    expect(gateSignal?.aborted).toBe(true);
+    expect(await inbox.text()).toMatchObject({
+      epoch: 2,
+      codec: 'quiet',
+      fallback: { reasonCode },
+    });
+    inbox.socket.close();
+  });
+
   it('rejects browser-spoofed Cyrinx result/stage authority and never turns it into corpus evidence', async () => {
     const target = await reportPath('cyrinx-spoof');
     const runner = await startProductionRunner({
@@ -451,7 +573,10 @@ describe('production runner', () => {
       uiDir: await fixtureUi(),
       nowForTests: () => now,
       cyrinxBuildForTests: async () => { now += 1; },
-      cyrinxDigitalForTests: async (context) => { digitalContexts.push(context); now += 1; },
+      cyrinxDigitalForTests: async (context) => {
+        digitalContexts.push({ epoch: context.epoch, evidenceClass: context.evidenceClass, nowMs: context.nowMs });
+        now += 1;
+      },
       cyrinxWorkerForTests: worker,
     });
     runners.push(runner);
@@ -677,6 +802,150 @@ describe('production runner', () => {
     const closed = new Promise((resolve) => inbox.socket.once('close', resolve));
     releaseSettle?.();
     await closed;
+  });
+
+  it('does not let an out-of-order urgent frame overtake a safely received queued sequence', async () => {
+    const worker = fakeCyrinxWorker();
+    let releaseCapture: ((value: undefined) => void) | undefined;
+    worker.receiveCapture.mockImplementationOnce(() => new Promise((resolve) => { releaseCapture = resolve; }));
+    const runner = await startProductionRunner({
+      machineId: 'urgent-overtake',
+      role: 'B',
+      port: 0,
+      report: await reportPath('urgent-overtake'),
+      tunEvidence: 'none',
+      uiDir: await fixtureUi(),
+      cyrinxBuildForTests: async () => undefined,
+      cyrinxDigitalForTests: async () => undefined,
+      cyrinxWorkerForTests: worker,
+    });
+    runners.push(runner);
+    const inbox = await openInbox(runner);
+    await runner.startCyrinx();
+    await inbox.text(); await inbox.text(); await inbox.text();
+    inbox.socket.send(frame(MessageType.QUALIFICATION_CASE, 1, 0n, { action: 'accept_cyrinx_instruction', caseId: 'cyrinx-cold-a-to-b', direction: 'A → B' }));
+    await vi.waitFor(() => expect(worker.begin).toHaveBeenCalledOnce());
+    inbox.socket.send(pcm(1, 1n));
+    await vi.waitFor(() => expect(worker.receiveCapture).toHaveBeenCalledOnce());
+
+    inbox.socket.send(frame(MessageType.HELLO, 1, 5n));
+    inbox.socket.send(resetFrame(1, 4n));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(worker.reset).not.toHaveBeenCalled();
+
+    const closed = new Promise((resolve) => inbox.socket.once('close', resolve));
+    releaseCapture?.(undefined);
+    await closed;
+  });
+
+  it('reserves a valid urgent sequence synchronously so its duplicate cannot preempt twice', async () => {
+    const worker = fakeCyrinxWorker();
+    let releaseCapture: ((value: undefined) => void) | undefined;
+    worker.receiveCapture.mockImplementationOnce(() => new Promise((resolve) => { releaseCapture = resolve; }));
+    worker.reset.mockImplementation(() => { releaseCapture?.(undefined); });
+    const runner = await startProductionRunner({
+      machineId: 'urgent-duplicate',
+      role: 'B',
+      port: 0,
+      report: await reportPath('urgent-duplicate'),
+      tunEvidence: 'none',
+      uiDir: await fixtureUi(),
+      cyrinxBuildForTests: async () => undefined,
+      cyrinxDigitalForTests: async () => undefined,
+      cyrinxWorkerForTests: worker,
+    });
+    runners.push(runner);
+    const inbox = await openInbox(runner);
+    await runner.startCyrinx();
+    await inbox.text(); await inbox.text(); await inbox.text();
+    inbox.socket.send(frame(MessageType.QUALIFICATION_CASE, 1, 0n, { action: 'accept_cyrinx_instruction', caseId: 'cyrinx-cold-a-to-b', direction: 'A → B' }));
+    await vi.waitFor(() => expect(worker.begin).toHaveBeenCalledOnce());
+    inbox.socket.send(pcm(1, 1n));
+    await vi.waitFor(() => expect(worker.receiveCapture).toHaveBeenCalledOnce());
+
+    const closed = new Promise((resolve) => inbox.socket.once('close', resolve));
+    inbox.socket.send(frame(MessageType.ERROR, 1, 2n));
+    inbox.socket.send(frame(MessageType.ERROR, 1, 2n));
+    await closed;
+    expect(worker.reset).toHaveBeenCalledOnce();
+  });
+
+  it('revokes an unacknowledged final-case report when ERROR arrives during its durable write', async () => {
+    const target = await reportPath('final-write-error');
+    let releaseFinalWrite!: () => void;
+    let finalWriteStarted!: () => void;
+    let blocked = false;
+    const finalWriteGate = new Promise<void>((resolve) => { releaseFinalWrite = resolve; });
+    const finalWrite = new Promise<void>((resolve) => { finalWriteStarted = resolve; });
+    const runner = await startProductionRunner({
+      machineId: 'final-write-error',
+      role: 'A',
+      port: 0,
+      report: target,
+      tunEvidence: 'none',
+      uiDir: await fixtureUi(),
+      cyrinxBuildForTests: async () => undefined,
+      cyrinxDigitalForTests: async () => undefined,
+      cyrinxWorkerForTests: fakeCyrinxWorker(),
+      cyrinxSettleForTests: async () => undefined,
+      reportWriterForTests: async (file, report) => {
+        if (!blocked && report.qualification?.cyrinx.stage === 'complete') {
+          blocked = true;
+          finalWriteStarted();
+          await finalWriteGate;
+        }
+        return writeMachineReport(file, report);
+      },
+    });
+    runners.push(runner);
+    const inbox = await openInbox(runner);
+    await runner.startCyrinx();
+    await inbox.text(); await inbox.text();
+    let snapshot = await inbox.text() as CyrinxInstructionSnapshot;
+    let sequence = 0n;
+    for (let index = 0; index < 51; index += 1) {
+      const advanced = await advanceCyrinxCase(inbox, snapshot, sequence);
+      snapshot = advanced.snapshot as CyrinxInstructionSnapshot;
+      sequence = advanced.sequence;
+    }
+    const finalInstruction = snapshot.instruction;
+    inbox.socket.send(frame(MessageType.QUALIFICATION_CASE, 1, sequence++, {
+      action: 'accept_cyrinx_instruction',
+      caseId: finalInstruction.caseId,
+      direction: finalInstruction.direction,
+    }));
+    if (finalInstruction.action === 'transmit') {
+      await inbox.binary();
+      inbox.socket.send(frame(MessageType.QUALIFICATION_CASE, 1, sequence++, {
+        action: 'playback_complete',
+        caseId: finalInstruction.caseId,
+        direction: finalInstruction.direction,
+      }));
+    } else {
+      inbox.socket.send(pcm(1, sequence++));
+    }
+    await finalWrite;
+
+    inbox.socket.send(frame(MessageType.ERROR, 1, sequence++));
+    releaseFinalWrite();
+    expect(await inbox.text()).toMatchObject({
+      codec: 'quiet',
+      stage: 'quiet',
+      fallback: { reasonCode: 'cyrinx_corpus_failed' },
+    });
+    await vi.waitFor(async () => {
+      const report = JSON.parse(await readFile(target, 'utf8')) as MachineReport;
+      expect(report).toMatchObject({
+        codec: { id: 'quiet' },
+        complete: false,
+        qualification: {
+          cyrinx: { stage: 'quiet' },
+          fallback: { state: 'activated', reasonCode: 'cyrinx_corpus_failed' },
+        },
+      });
+    });
+    expect(inbox.texts).not.toContainEqual(expect.objectContaining({ kind: 'cyrinx-result', caseId: finalInstruction.caseId }));
+    inbox.socket.close();
   });
 
   it('turns an unexpected active owner disconnect into stable fallback and requires RESET on replacement', async () => {

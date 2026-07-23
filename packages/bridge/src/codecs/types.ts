@@ -24,6 +24,7 @@ export interface QualificationContext {
   evidenceClass: EvidenceClass;
   nowMs: number;
   deadLinkTimeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 export interface QueueEvidence {

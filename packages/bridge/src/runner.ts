@@ -29,7 +29,7 @@ export interface ProductionRunnerOptions {
   qualificationTrace?: Pick<NonNullable<MachineReport['qualification']>, 'deadline' | 'fallback'>;
   reportWriterForTests?: BridgeServerOptions['reportWriter'];
   nowForTests?: () => number;
-  cyrinxBuildForTests?: () => Promise<void>;
+  cyrinxBuildForTests?: BridgeServerOptions['cyrinxBuild'];
   cyrinxDigitalForTests?: BridgeServerOptions['cyrinxDigital'];
   cyrinxWorkerForTests?: BridgeServerOptions['cyrinxWorker'];
   cyrinxTimerForTests?: BridgeServerOptions['cyrinxTimer'];
@@ -104,7 +104,7 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
     executable: cyrinxExecutable,
     ...(options.nowForTests ? { now: options.nowForTests } : {}),
   });
-  const cyrinxDigital = options.cyrinxDigitalForTests ?? (async (context: { epoch: number; evidenceClass: MachineReport['evidenceClass']; nowMs: number }): Promise<void> => {
+  const cyrinxDigital: NonNullable<BridgeServerOptions['cyrinxDigital']> = options.cyrinxDigitalForTests ?? (async (context): Promise<void> => {
     const adapter = new NativeCommandCodecAdapter({ executable: cyrinxExecutable });
     for (const value of cyrinxDigitalCases()) {
       const result = await adapter.qualify(value, context);
@@ -128,7 +128,7 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
     codecAssetDir, codecAssets,
     ...(options.reportWriterForTests ? { reportWriter: options.reportWriterForTests } : {}),
     ...(options.nowForTests ? { now: options.nowForTests } : {}),
-    cyrinxBuild: options.cyrinxBuildForTests ?? (async () => { await execFileAsync(process.execPath, [path.join(PROJECT_ROOT, 'scripts', 'build-cyrinx.mjs')], { cwd: PROJECT_ROOT, timeout: 60_000, killSignal: 'SIGKILL' }); }),
+    cyrinxBuild: options.cyrinxBuildForTests ?? (async ({ signal }) => { await execFileAsync(process.execPath, [path.join(PROJECT_ROOT, 'scripts', 'build-cyrinx.mjs')], { cwd: PROJECT_ROOT, timeout: 60_000, killSignal: 'SIGKILL', signal }); }),
     cyrinxDigital,
     cyrinxWorker,
     ...(options.cyrinxTimerForTests ? { cyrinxTimer: options.cyrinxTimerForTests } : {}),

@@ -161,7 +161,7 @@ describe('bounded Cyrinx worker', () => {
   });
 
   it('keeps digital native acquisition diagnostic and never asserts physical cold or audio evidence', async () => {
-    const run: PinnedCommandRunner = vi.fn(async ({ command }) => {
+    const run = vi.fn<PinnedCommandRunner>(async ({ command }) => {
       if (command === 'encode') return { exitCode: 0, stdout: Buffer.alloc(CYRINX_FRAME_SAMPLES * 4), stderr: '', timedOut: false };
       return {
         exitCode: 0,
@@ -171,10 +171,11 @@ describe('bounded Cyrinx worker', () => {
       };
     });
     const adapter = new NativeCommandCodecAdapter({ executable: '/pinned/cyrinx', runner: run });
+    const abort = new AbortController();
 
     const result = await adapter.qualify(
       { ...qualificationCase, size: 256 },
-      { epoch: EPOCH, evidenceClass: 'Open air', nowMs: 0 },
+      { epoch: EPOCH, evidenceClass: 'Open air', nowMs: 0, signal: abort.signal },
     );
 
     expect(result).toMatchObject({
@@ -185,6 +186,7 @@ describe('bounded Cyrinx worker', () => {
       audioPassed: false,
     });
     expect(run).toHaveBeenCalledTimes(2);
+    expect(run.mock.calls.every(([request]) => request.signal === abort.signal)).toBe(true);
   });
 
   it('uses a continuous playback timeline including the local guard across cases', async () => {

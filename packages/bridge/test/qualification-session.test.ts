@@ -71,6 +71,7 @@ describe('runner-owned Cyrinx qualification session', () => {
         startAt + 3,
       );
       session.completeAccepted(accepted.mode, startAt + 4);
+      session.acknowledgeAcceptedCompletion();
     }
 
     expect(seen.slice(0, 2)).toEqual([
@@ -121,6 +122,7 @@ describe('runner-owned Cyrinx qualification session', () => {
     );
 
     roleA.completeAccepted('transmit', startAt + 4);
+    roleA.acknowledgeAcceptedCompletion();
     const reverseA = roleA.snapshot(1, startAt + 4).instruction!;
     expect(reverseA).toMatchObject({ direction: 'B → A', action: 'listen' });
   });
@@ -222,12 +224,67 @@ describe('runner-owned Cyrinx qualification session', () => {
     const outbound = roleA.snapshot(1, startAt + 3).instruction!;
     roleA.acceptInstruction(outbound.caseId, outbound.direction, startAt + 3);
     roleA.completeAccepted('transmit', startAt + 4);
+    roleA.acknowledgeAcceptedCompletion();
     expect(roleA.coldReceivePassed).toBe(false);
 
     const inbound = roleA.snapshot(1, startAt + 5).instruction!;
     roleA.acceptInstruction(inbound.caseId, inbound.direction, startAt + 5);
     roleA.completeAccepted('listen', startAt + 6);
+    roleA.acknowledgeAcceptedCompletion();
     expect(roleA.coldReceivePassed).toBe(true);
+  });
+
+  it('binds pre-ack failure to the completed case and revokes only an unacknowledged terminal success', () => {
+    const nonterminal = reachCases('A');
+    const first = nonterminal.snapshot(1, startAt + 3).instruction!;
+    nonterminal.acceptInstruction(first.caseId, first.direction, startAt + 3);
+    nonterminal.completeAccepted('transmit', startAt + 4);
+    expect(nonterminal.snapshot(1, startAt + 4)).toMatchObject({
+      stage: 'cold-b-to-a',
+      instruction: null,
+    });
+    expect(nonterminal.failCurrent(startAt + 5)).toBe(true);
+    expect(nonterminal.fallbackReason).toBe('cyrinx_cold_a_to_b_failed');
+
+    const terminal = reachCases('A');
+    for (;;) {
+      const instruction = terminal.snapshot(1, startAt + 3).instruction;
+      if (!instruction) break;
+      const accepted = terminal.acceptInstruction(instruction.caseId, instruction.direction, startAt + 3);
+      terminal.completeAccepted(accepted.mode, startAt + 4);
+      if (terminal.stage === 'complete') break;
+      terminal.acknowledgeAcceptedCompletion();
+    }
+    expect(terminal.stage).toBe('complete');
+    expect(terminal.failCurrent(startAt + 5)).toBe(true);
+    expect(terminal.snapshot(1, startAt + 5)).toMatchObject({
+      codec: 'quiet',
+      stage: 'quiet',
+      fallback: { reasonCode: 'cyrinx_corpus_failed' },
+    });
+
+    const expiredFinal = reachCases('A');
+    for (;;) {
+      const instruction = expiredFinal.snapshot(1, startAt + 3).instruction;
+      if (!instruction) break;
+      const accepted = expiredFinal.acceptInstruction(instruction.caseId, instruction.direction, startAt + 3);
+      expiredFinal.completeAccepted(accepted.mode, startAt + 4);
+      if (expiredFinal.stage === 'complete') break;
+      expiredFinal.acknowledgeAcceptedCompletion();
+    }
+    expect(expiredFinal.expire(startAt + CYRINX_DEADLINE_MS)).toBe(true);
+    expect(expiredFinal.fallbackReason).toBe('cyrinx_deadline_expired');
+
+    const committed = reachCases('A');
+    for (;;) {
+      const instruction = committed.snapshot(1, startAt + 3).instruction;
+      if (!instruction) break;
+      const accepted = committed.acceptInstruction(instruction.caseId, instruction.direction, startAt + 3);
+      committed.completeAccepted(accepted.mode, startAt + 4);
+      committed.acknowledgeAcceptedCompletion();
+    }
+    expect(committed.stage).toBe('complete');
+    expect(committed.failCurrent(startAt + 5)).toBe(false);
   });
 
   it('returns an isolated payload copy so workers cannot mutate the authoritative corpus', () => {

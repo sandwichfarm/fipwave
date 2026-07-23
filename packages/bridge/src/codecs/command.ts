@@ -60,9 +60,9 @@ export class NativeCommandCodecAdapter implements CodecAdapter {
       const runner = this.command.runner ?? runPinnedCommand;
       const metadata = Buffer.alloc(256); metadata.write('CYRX', 0, 'ascii'); metadata.writeUInt8(1, 4); metadata.writeUInt32LE(context.epoch, 5); metadata.writeUInt8(qualificationCase.direction === 'A → B' ? 0 : 1, 9); metadata.write(qualificationCase.id, 11, 64, 'utf8'); metadata.writeUInt32LE(qualificationCase.payload.byteLength, 75); Buffer.from(qualificationCase.digest, 'hex').copy(metadata, 79);
       const input = Buffer.alloc(4 + metadata.byteLength + qualificationCase.payload.byteLength); input.writeUInt32LE(qualificationCase.payload.byteLength, 0); metadata.copy(input, 4); Buffer.from(qualificationCase.payload).copy(input, 260);
-      const encoded = await runner({ executable: this.command.executable, command: 'encode', payload: input });
+      const encoded = await runner({ executable: this.command.executable, command: 'encode', payload: input, ...(context.signal ? { signal: context.signal } : {}) });
       if (encoded.exitCode !== 0 || encoded.timedOut || encoded.stdout.byteLength !== 249_856) throw new Error('native encode failed');
-      const response = await runner({ executable: this.command.executable, command: 'decode', payload: encoded.stdout });
+      const response = await runner({ executable: this.command.executable, command: 'decode', payload: encoded.stdout, ...(context.signal ? { signal: context.signal } : {}) });
       const body = Buffer.from(response.stdout); const expectedBytes = 289 + qualificationCase.payload.byteLength;
       if (response.exitCode !== 0 || response.timedOut || body.byteLength !== expectedBytes || body.toString('ascii', 0, 4) !== 'CYRR' || body.readUInt8(4) !== 1 || body.readUInt32LE(5) !== qualificationCase.payload.byteLength || body.readUInt32LE(9) !== 7 || body.readUInt32LE(13) !== 7 || !body.subarray(33, 289).equals(metadata) || !body.subarray(289).equals(Buffer.from(qualificationCase.payload))) throw new Error('native decode result is invalid');
       const digest = createHash('sha256').update(body.subarray(289)).digest('hex');
