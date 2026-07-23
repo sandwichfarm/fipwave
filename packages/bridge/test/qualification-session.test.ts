@@ -185,7 +185,7 @@ describe('runner-owned Cyrinx qualification session', () => {
     active.abortCase();
     expect(active.snapshot(3, startAt + 500_000)).toEqual({ ...terminal, epoch: 3 });
     expect(() => active.completeAccepted('listen', startAt + 500_001)).toThrow(
-      'qualification_instruction_not_accepted',
+      'qualification_session_terminal',
     );
   });
 
