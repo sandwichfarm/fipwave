@@ -24,7 +24,7 @@ function frame(type: MessageType, epoch: number, sequence: bigint, payload: obje
   return encodeFrame({ type, epoch, sequence, payload: Buffer.from(JSON.stringify(payload)) });
 }
 function audioSettings(epoch: number, sequence: bigint): Buffer {
-  return frame(MessageType.AUDIO_SETTINGS, epoch, sequence, { browserVersion: 'Chromium test', microphoneLabel: 'Test microphone', contextState: 'running', inputDeviceSampleRate: 44_100, contextSampleRate: 48_000, captureSampleRate: 48_000, channels: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false });
+  return frame(MessageType.AUDIO_SETTINGS, epoch, sequence, { browserVersion: 'Chromium test', microphoneLabel: 'Test microphone', contextState: 'running', inputDeviceSampleRate: 44_100, inputDeviceChannels: 2, contextSampleRate: 48_000, captureSampleRate: 48_000, channels: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false });
 }
 function qualificationResult(epoch: number, sequence: bigint, caseId: string, overrides: Record<string, unknown> = {}): Buffer {
   const digest = manifest.cases.find((entry) => entry.id === caseId)?.sha256; if (!digest) throw new Error(`missing test corpus case ${caseId}`);
@@ -63,7 +63,7 @@ describe('production runner', () => {
       expect(await ack).toEqual({ kind: 'qualification-result', caseId, epoch: 1, accepted: true });
     }
     const report = JSON.parse(await readFile(target, 'utf8')) as MachineReport;
-    expect(report).toMatchObject({ evidenceClass: 'Loopback', complete: true, machine: { hostName: 'laptop-b' }, audio: { microphoneLabel: 'Test microphone', contextState: 'running', inputDeviceSampleRate: 44_100, contextSampleRate: 48_000, captureSampleRate: 48_000 }, runner: { role: 'B' } });
+    expect(report).toMatchObject({ evidenceClass: 'Loopback', complete: true, machine: { hostName: 'laptop-b' }, audio: { microphoneLabel: 'Test microphone', contextState: 'running', inputDeviceSampleRate: 44_100, inputDeviceChannels: 2, contextSampleRate: 48_000, captureSampleRate: 48_000, channels: 1 }, runner: { role: 'B' } });
     expect(report.results).toHaveLength(25);
     expect(report.results.filter((entry) => entry.observed)).toHaveLength(24);
     expect(report.results.find((entry) => entry.caseId === 'a-to-b-256-20')).toMatchObject({ observed: false, receivedSha256: null, missing: 1 });

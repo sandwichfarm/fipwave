@@ -40,7 +40,7 @@ export interface MachineReport {
   evidenceClass: EvidenceClass;
   epoch: number;
   codec: { id?: string; commit: string; profile: string; audible?: boolean; advertisedMtu: number };
-  audio: { microphoneLabel?: string; contextState?: string; inputDeviceSampleRate?: number; contextSampleRate: number; captureSampleRate: number; channels: number; echoCancellation: boolean; noiseSuppression: boolean; autoGainControl: boolean };
+  audio: { microphoneLabel?: string; contextState?: string; inputDeviceSampleRate?: number; inputDeviceChannels?: number; contextSampleRate: number; captureSampleRate: number; channels: number; echoCancellation: boolean; noiseSuppression: boolean; autoGainControl: boolean };
   queues: { captureHighWaterBytes: number; captureHighWaterMs: number; playbackHighWaterBytes: number; playbackHighWaterMs: number; discontinuities: number };
   results: MachineResult[];
   complete: boolean;
@@ -151,10 +151,10 @@ export function validateMachineReport(candidate: unknown): MachineReport {
   if (!Number.isInteger(report.codec?.advertisedMtu) || report.codec.advertisedMtu <= 0) fail('advertised_mtu_invalid');
   const physical = report.evidenceClass === 'Open air';
   const legacyAudioKeys = ['contextSampleRate', 'captureSampleRate', 'channels', 'echoCancellation', 'noiseSuppression', 'autoGainControl'];
-  const physicalAudioKeys = ['microphoneLabel', 'contextState', 'inputDeviceSampleRate', ...legacyAudioKeys];
+  const physicalAudioKeys = ['microphoneLabel', 'contextState', 'inputDeviceSampleRate', 'inputDeviceChannels', ...legacyAudioKeys];
   if (!report.audio || !exactKeys(report.audio, physical ? physicalAudioKeys : legacyAudioKeys) && !exactKeys(report.audio, physicalAudioKeys)) fail('audio_evidence_incomplete');
   for (const [key, value] of Object.entries(report.audio)) {
-    if (key.endsWith('Rate') || key === 'channels') finiteNonNegative(value, `audio_${key}_invalid`);
+    if (key.endsWith('Rate') || key === 'channels' || key === 'inputDeviceChannels') finiteNonNegative(value, `audio_${key}_invalid`);
     else if (key === 'microphoneLabel' || key === 'contextState') nonEmpty(value, `audio_${key}_invalid`);
     else if (typeof value !== 'boolean') fail(`audio_${key}_invalid`);
   }
@@ -234,7 +234,18 @@ export function mergeSelection(expectedHosts: readonly [string, string], machine
   if (reports[0].runner?.role !== 'A' || reports[1].runner?.role !== 'B') add(reasons, 'ordered_roles_required');
   if (reports.some((report) => !report.runner || report.runner.machineId !== report.machine.hostName || report.runner.evidenceClass !== report.evidenceClass || !report.runner.reportTarget)) add(reasons, 'runner_authority_required');
   if (reports[0].machine.commit !== reports[1].machine.commit) add(reasons, 'build_mismatch');
-  if (reports.some((report) => !report.audio.microphoneLabel || report.audio.contextState !== 'running' || report.audio.inputDeviceSampleRate !== 44_100 && report.audio.inputDeviceSampleRate !== 48_000 || report.audio.contextSampleRate !== 48_000 || report.audio.captureSampleRate !== 48_000 || report.audio.channels !== 1 || report.audio.echoCancellation || report.audio.noiseSuppression || report.audio.autoGainControl)) add(reasons, 'audio_preflight_failed');
+  if (reports.some((report) =>
+    !report.audio.microphoneLabel
+    || report.audio.contextState !== 'running'
+    || (report.audio.inputDeviceSampleRate !== 44_100 && report.audio.inputDeviceSampleRate !== 48_000)
+    || (report.audio.inputDeviceChannels !== 1 && report.audio.inputDeviceChannels !== 2)
+    || report.audio.contextSampleRate !== 48_000
+    || report.audio.captureSampleRate !== 48_000
+    || report.audio.channels !== 1
+    || report.audio.echoCancellation
+    || report.audio.noiseSuppression
+    || report.audio.autoGainControl
+  )) add(reasons, 'audio_preflight_failed');
   if (reports.some((report) => report.queues.captureHighWaterBytes > MAX_QUEUE_BYTES || report.queues.playbackHighWaterBytes > MAX_QUEUE_BYTES || report.queues.captureHighWaterMs > MAX_QUEUE_DURATION_MS || report.queues.playbackHighWaterMs > MAX_QUEUE_DURATION_MS)) add(reasons, 'queue_bound_exceeded');
   if (reports.some((report) => report.queues.discontinuities !== 0)) add(reasons, 'queue_discontinuity');
   for (const report of reports) {

@@ -79,10 +79,14 @@ Complete-payload p95 airtime must be strictly less than one third of it
 accommodates the measured ~5.49 s Quiet 1,536-byte emission while remaining
 bounded. PCM byte caps and the zero-discontinuity requirement are unchanged.
 Physical audio evidence retains the observed microphone label, a `running`
-AudioContext state, the native `inputDeviceSampleRate`, actual mono 48 kHz
-AudioContext/codec-consumed PCM rates, and all three processing flags off.
+AudioContext state, native `inputDeviceSampleRate` and
+`inputDeviceChannels`, actual mono 48 kHz AudioContext/codec-consumed PCM
+rates, and all three processing flags off.
 Native input may be 44.1 or 48 kHz; the former is accepted only as the explicit
 WebAudio 44.1 → 48 kHz resampling boundary. Unknown or other native rates fail.
+Native input may be one or two channels; a two-channel device is accepted only
+as the explicit WebAudio downmix to the codec's required mono graph. Other
+native layouts fail.
 
 ## Deterministic checks (any development machine)
 

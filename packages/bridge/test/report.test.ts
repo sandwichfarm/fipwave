@@ -62,7 +62,7 @@ function report(hostName: string, role: 'A' | 'B', options: {
     evidenceClass,
     epoch: 3,
     codec: options.codec ?? { ...QUIET_CODEC },
-    audio: { microphoneLabel: 'Test microphone', contextState: 'running', inputDeviceSampleRate: 48_000, contextSampleRate: 48_000, captureSampleRate: 48_000, channels: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+    audio: { microphoneLabel: 'Test microphone', contextState: 'running', inputDeviceSampleRate: 48_000, inputDeviceChannels: 1, contextSampleRate: 48_000, captureSampleRate: 48_000, channels: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
     queues: { captureHighWaterBytes: 1, captureHighWaterMs: 1, playbackHighWaterBytes: 1, playbackHighWaterMs: 1, discontinuities: 0 },
     results,
     complete,
@@ -136,6 +136,13 @@ describe('canonical qualification reports', () => {
     const native441 = report('host-a', 'A'); native441.audio.inputDeviceSampleRate = 44_100;
     expect(mergeSelection(['host-a', 'host-b'], native441, report('host-b', 'B'))).toMatchObject({ decision: 'quiet' });
     const unsupported = report('host-a', 'A'); unsupported.audio.inputDeviceSampleRate = 32_000;
+    expect(mergeSelection(['host-a', 'host-b'], unsupported, report('host-b', 'B'))).toMatchObject({ decision: 'unqualified', reasonCodes: expect.arrayContaining(['audio_preflight_failed']) });
+  });
+
+  it('records controlled native stereo-to-mono downmixing and rejects other input channel layouts', () => {
+    const nativeStereo = report('host-a', 'A'); nativeStereo.audio.inputDeviceChannels = 2;
+    expect(mergeSelection(['host-a', 'host-b'], nativeStereo, report('host-b', 'B'))).toMatchObject({ decision: 'quiet' });
+    const unsupported = report('host-a', 'A'); unsupported.audio.inputDeviceChannels = 3;
     expect(mergeSelection(['host-a', 'host-b'], unsupported, report('host-b', 'B'))).toMatchObject({ decision: 'unqualified', reasonCodes: expect.arrayContaining(['audio_preflight_failed']) });
   });
 
