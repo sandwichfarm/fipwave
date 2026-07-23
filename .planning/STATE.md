@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: Qualify the Demo Substrate
 status: verifying
-stopped_at: Completed 01-07-PLAN.md
-last_updated: "2026-07-23T17:29:02.193Z"
+stopped_at: Completed 01-08-PLAN.md
+last_updated: "2026-07-23T17:41:59.136Z"
 last_activity: 2026-07-23
 last_activity_desc: Phase 01 execution started
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 10
-  completed_plans: 7
+  completed_plans: 8
 ---
 
 # Project State
@@ -32,7 +32,7 @@ Plan: 7 of 7
 Status: Phase complete — ready for verification
 Last activity: 2026-07-23 — Phase 01 execution started
 
-Progress: [███████░░░] 70%
+Progress: [████████░░] 80%
 
 ## Performance Metrics
 
@@ -64,6 +64,7 @@ Progress: [███████░░░] 70%
 | Phase 01 P05 | 11min | 3 tasks | 11 files |
 | Phase 01 P06 | 8min | 2 tasks | 9 files |
 | Phase 01 P07 | 42min | 3 tasks | 11 files |
+| Phase 01 P08 | 35min | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -85,6 +86,7 @@ Recent decisions affecting current work:
 - [Phase ?]: Fixture and loopback results remain human_needed; exact named Open air reports are required for a selection.
 - [Phase ?]: Docker/TUN preflight runs with network_mode none, no published ports, and source-plus-inspect authority evidence.
 - [Phase ?]: Production runner verifies the complete codec lock before serving only an exact browser asset allowlist.
+- [Phase ?]: Quiet uses fixed audible-7k-channel-0 with local onFinish plus guard scheduling only; canonical selection requires runner-stamped exact-host Open-air evidence.
 
 ### Pending Todos
 
@@ -103,6 +105,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-23T17:29:02.187Z
-Stopped at: Completed 01-07-PLAN.md
+Last session: 2026-07-23T17:41:59.131Z
+Stopped at: Completed 01-08-PLAN.md
 Resume file: None
