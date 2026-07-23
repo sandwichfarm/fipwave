@@ -3,6 +3,8 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { access } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 const root = path.resolve(import.meta.dirname, '..');
@@ -42,9 +44,37 @@ test('pinned Cyrinx batch binary has exact geometry and byte-perfect 256/1536 di
     assert.equal(encoded.stdout.byteLength, 62464 * 4);
     const decoded = run('decode', encoded.stdout);
     assert.equal(decoded.status, 0, decoded.stderr?.toString());
-    assert.equal(decoded.stdout.readUInt32LE(0), bytes);
-    assert.deepEqual(decoded.stdout.subarray(4, 4 + bytes), payload);
+    assert.equal(decoded.stdout.toString('ascii', 0, 4), 'CYRR');
+    assert.equal(decoded.stdout.readUInt8(4), 1);
+    assert.equal(decoded.stdout.readUInt32LE(5), bytes);
+    assert.equal(decoded.stdout.readUInt32LE(9), 7);
+    assert.equal(decoded.stdout.readUInt32LE(13), 7);
+    assert.ok(Number.isFinite(decoded.stdout.readDoubleLE(17)));
+    assert.deepEqual(decoded.stdout.subarray(25, 25 + 256), metadata(payload));
+    assert.deepEqual(decoded.stdout.subarray(281, 281 + bytes), payload);
   }
+});
+
+test('build fails closed for missing or altered pinned assets without touching the verified cache', async () => {
+  const isolated = await mkdtemp(path.join(tmpdir(), 'fipwave-cyrinx-assets-'));
+  const script = path.join(root, 'scripts', 'build-cyrinx.mjs');
+  const missing = spawnSync(process.execPath, [script], { cwd: root, env: { ...process.env, CYRINX_ASSET_DIR: isolated, CYRINX_BUILD_DIR: path.join(isolated, 'build') }, encoding: 'utf8' });
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stderr, /cyrinx_build_failed:asset_missing/);
+  const archive = await readFile(path.join(root, '.artifacts', 'codecs', 'cyrinx-ddbd0ce4.tar.gz'));
+  await writeFile(path.join(isolated, 'cyrinx-ddbd0ce4.tar.gz'), Buffer.concat([archive, Buffer.from([0]) ]));
+  const altered = spawnSync(process.execPath, [script], { cwd: root, env: { ...process.env, CYRINX_ASSET_DIR: isolated, CYRINX_BUILD_DIR: path.join(isolated, 'build') }, encoding: 'utf8' });
+  assert.notEqual(altered.status, 0);
+  assert.match(altered.stderr, /cyrinx_build_failed:asset_hash_mismatch/);
+});
+
+test('batch framing rejects invalid metadata identity and digest before modulation', () => {
+  const payload = Buffer.alloc(256, 9);
+  const badDigest = metadata(payload); badDigest[79] ^= 1;
+  const badEpoch = metadata(payload); badEpoch.writeUInt32LE(0, 5);
+  const badDirection = metadata(payload); badDirection[9] = 2;
+  const badCaseId = metadata(payload); badCaseId[11] = 0;
+  for (const value of [badDigest, badEpoch, badDirection, badCaseId]) assert.notEqual(run('encode', request(value, payload)).status, 0);
 });
 
 test('Cyrinx batch rejects malformed, truncated, oversize, and trailing input', async () => {
