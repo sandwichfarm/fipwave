@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
+import type { Duplex } from 'node:stream';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
@@ -139,7 +140,7 @@ function closeServer(server: Server, webSocketServer: WebSocketServer): Promise<
   });
 }
 
-function rejectUpgrade(socket: import('node:net').Socket): void {
+function rejectUpgrade(socket: Duplex): void {
   socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
   socket.destroy();
 }
