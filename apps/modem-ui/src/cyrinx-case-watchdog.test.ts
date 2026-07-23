@@ -25,7 +25,12 @@ afterEach(() => {
 
 describe('Cyrinx browser case watchdog', () => {
   it('allows one capture plus native timeout headroom while remaining an early-abandon bound', () => {
-    expect(CYRINX_BROWSER_CASE_TIMEOUT_MS).toBeGreaterThan(2_731 + 15_000);
+    const captureWindowMs = 2_731;
+    const nativeBoundMs = 15_000;
+    const schedulingHeadroomMs = CYRINX_BROWSER_CASE_TIMEOUT_MS - captureWindowMs - nativeBoundMs;
+
+    expect(CYRINX_BROWSER_CASE_TIMEOUT_MS).toBe(25_000);
+    expect(schedulingHeadroomMs).toBe(7_269);
     expect(CYRINX_BROWSER_CASE_TIMEOUT_MS).toBeLessThan(60_000);
   });
 

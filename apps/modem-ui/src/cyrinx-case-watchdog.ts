@@ -1,6 +1,6 @@
-// Covers the 2.731 s capture/playback window, the native 15 s command timeout,
-// and browser scheduling headroom without approaching the 90-minute gate.
-export const CYRINX_BROWSER_CASE_TIMEOUT_MS = 20_000;
+// 2.731 s capture + the 15 s native bound leaves 7.269 s of browser scheduling
+// headroom. The server's 4.5 s settle is an accepted-at barrier, not additive.
+export const CYRINX_BROWSER_CASE_TIMEOUT_MS = 25_000;
 
 export type CyrinxBrowserCaseMode = 'listen' | 'transmit';
 export type CyrinxBrowserDirection = 'A → B' | 'B → A';
