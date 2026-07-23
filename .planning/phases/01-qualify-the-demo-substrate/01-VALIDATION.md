@@ -3,7 +3,7 @@ phase: 01
 slug: qualify-the-demo-substrate
 status: approved
 nyquist_compliant: true
-wave_0_complete: false
+wave_0_complete: true
 created: 2026-07-23
 updated: 2026-07-23
 ---
@@ -49,13 +49,13 @@ updated: 2026-07-23
 
 ## Wave 0 Requirements
 
-- [ ] `.node-version` and dependency audit created by 01-01.
-- [ ] `package.json`, exact lockfile, TypeScript, Vite, Vitest, Playwright, and
+- [x] `.node-version` and dependency audit created by 01-01.
+- [x] `package.json`, exact lockfile, TypeScript, Vite, Vitest, Playwright, and
       ESLint configuration created by 01-02.
-- [ ] Full deterministic command surface created and executed by 01-02.
+- [x] Full deterministic command surface created and executed by 01-02.
 
-`wave_0_complete` remains `false` until execution installs the audited lockfile,
-creates configuration, and runs the Wave 0 commands.
+`wave_0_complete` is `true`: execution installed the audited lockfile, created
+the configuration, and ran the Wave 0 commands under the pinned Node runtime.
 
 ## Manual-Only Verification
 
@@ -73,6 +73,6 @@ task is explicitly manual-only and follows Plans 01-01 through 01-06.
 - [x] Only the final physical checkpoint is manual-only.
 - [x] No watch-mode flags.
 - [x] `nyquist_compliant: true`.
-- [x] `wave_0_complete: false` until execution.
+- [x] `wave_0_complete: true` after successful Wave 0 execution.
 
-**Approval:** plan-complete; execution pending
+**Approval:** plan-complete; Wave 0 execution verified

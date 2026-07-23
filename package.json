@@ -10,6 +10,7 @@
     "verify:dependencies": "node scripts/audit-dependencies.mjs --check-lock package-lock.json",
     "lint": "eslint . --max-warnings 0",
     "typecheck": "tsc --noEmit",
+    "test": "npm run test:unit",
     "test:unit": "vitest run",
     "test:browser": "playwright test --pass-with-no-tests",
     "test:skeleton": "vitest run tests/skeleton.test.ts",
