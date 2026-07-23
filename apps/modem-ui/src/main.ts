@@ -72,8 +72,10 @@ function frameForSettings(value: AppliedAudioEvidence): ArrayBuffer {
     microphoneLabel: value.microphoneLabel,
     contextState: value.contextState,
     contextSampleRate: value.contextSampleRate,
-    captureSampleRate: value.trackSampleRate,
-    channels: value.channelCount,
+    inputDeviceSampleRate: value.inputDeviceSampleRate,
+    captureSampleRate: value.captureSampleRate,
+    inputDeviceChannels: value.inputDeviceChannels,
+    channels: value.captureChannels,
     echoCancellation: value.echoCancellation,
     noiseSuppression: value.noiseSuppression,
     autoGainControl: value.autoGainControl,
@@ -196,7 +198,7 @@ function reportQuietSettings(): Promise<void> {
   const applied = quiet.applied;
   if (!applied) return Promise.reject(new Error('Quiet applied settings are unavailable'));
   if (!applied.contextState) return Promise.reject(new Error('Quiet AudioContext state is unavailable'));
-  return reportToBridge({ epoch, microphoneLabel: applied.microphoneLabel, permission: 'granted', contextState: applied.contextState, contextSampleRate: applied.contextSampleRate, trackSampleRate: applied.trackSampleRate, channelCount: applied.channelCount, echoCancellation: applied.echoCancellation, noiseSuppression: applied.noiseSuppression, autoGainControl: applied.autoGainControl, workletState: 'ready', bridgeState: 'connected' });
+  return reportToBridge({ epoch, microphoneLabel: applied.microphoneLabel, permission: 'granted', contextState: applied.contextState, contextSampleRate: applied.contextSampleRate, inputDeviceSampleRate: applied.inputDeviceSampleRate, captureSampleRate: applied.captureSampleRate, inputDeviceChannels: applied.inputDeviceChannels, captureChannels: applied.captureChannels, echoCancellation: applied.echoCancellation, noiseSuppression: applied.noiseSuppression, autoGainControl: applied.autoGainControl, workletState: 'ready', bridgeState: 'connected' });
 }
 
 async function reportQuietResult(received: ReceiveCaseEvidence): Promise<void> {
@@ -306,15 +308,17 @@ function render(): void {
   const evidenceCard = element('section');
   evidenceCard.className = 'card';
   evidenceCard.append(element('h2', 'Applied audio evidence'));
-  evidenceCard.append(element('p', 'Required: mono · 48 kHz-compatible · echo cancellation off · noise suppression off · auto gain control off.'));
+  evidenceCard.append(element('p', 'Required: observed 1/2-channel 44.1/48 kHz input · Web Audio codec PCM downmixed to mono at 48 kHz · echo cancellation off · noise suppression off · auto gain control off.'));
   const table = element('table');
   table.append(element('caption', 'Actual browser and bridge observations'));
   appendSetting(table, 'Microphone label', quiet.applied?.microphoneLabel ?? evidence?.microphoneLabel);
   appendSetting(table, 'Permission', quiet.applied ? 'granted' : evidence?.permission);
   appendSetting(table, 'Audio-context state', quiet.applied?.contextState ?? evidence?.contextState);
-  appendSetting(table, 'Context sample rate', quiet.applied?.contextSampleRate ?? evidence?.contextSampleRate);
-  appendSetting(table, 'Track sample rate', quiet.applied?.trackSampleRate ?? evidence?.trackSampleRate);
-  appendSetting(table, 'Channel count', quiet.applied?.channelCount ?? evidence?.channelCount);
+  appendSetting(table, 'Web Audio context sample rate', quiet.applied?.contextSampleRate ?? evidence?.contextSampleRate);
+  appendSetting(table, 'Input-device sample rate', quiet.applied?.inputDeviceSampleRate ?? evidence?.inputDeviceSampleRate);
+  appendSetting(table, 'Codec capture PCM sample rate', quiet.applied?.captureSampleRate ?? evidence?.captureSampleRate);
+  appendSetting(table, 'Input-device channels', quiet.applied?.inputDeviceChannels ?? evidence?.inputDeviceChannels);
+  appendSetting(table, 'Codec capture PCM channels', quiet.applied?.captureChannels ?? evidence?.captureChannels);
   appendSetting(table, 'Echo cancellation', quiet.applied?.echoCancellation ?? evidence?.echoCancellation);
   appendSetting(table, 'Noise suppression', quiet.applied?.noiseSuppression ?? evidence?.noiseSuppression);
   appendSetting(table, 'Automatic gain control', quiet.applied?.autoGainControl ?? evidence?.autoGainControl);

@@ -24,8 +24,10 @@ export interface AppliedQuietSettings {
   microphoneLabel: string;
   contextState: string | undefined;
   contextSampleRate: number | undefined;
-  trackSampleRate: number | undefined;
-  channelCount: number | undefined;
+  inputDeviceSampleRate: number | undefined;
+  captureSampleRate: number | undefined;
+  inputDeviceChannels: number | undefined;
+  captureChannels: number | undefined;
   echoCancellation: boolean | undefined;
   noiseSuppression: boolean | undefined;
   autoGainControl: boolean | undefined;
@@ -298,8 +300,10 @@ export class QuietClient {
     await loadClassicScript(runtime.document, '/codec-assets/quiet.js');
     const quiet = runtime.Quiet; if (!quiet) throw new Error('verified Quiet runtime did not load');
     const ready = new Promise<void>((resolve, reject) => quiet.init({ profilesPrefix: '/codec-assets/', memoryInitializerPrefix: '/codec-assets/', libfecPrefix: '/codec-assets/', onReady: resolve, onError: (reason) => reject(new Error(`Quiet initialization failed: ${reason}`)) }));
-    // init must register prefixes and its callback before Emscripten starts;
-    // libfec is then fetched as the configured dynamic library.
+    // init must register prefixes and its callback before Emscripten starts.
+    // Load the allowlisted libfec artifact in this disposable realm; Emscripten
+    // also receives the same verified URL as its dynamic-library prefix.
+    await loadClassicScript(runtime.document, '/codec-assets/libfec.js');
     await loadClassicScript(runtime.document, '/codec-assets/quiet-emscripten.js');
     await ready;
     await new Promise<void>((resolve, reject) => {
@@ -307,9 +311,9 @@ export class QuietClient {
     });
     const settings = this.#track?.getSettings() ?? {}; const flag = (value: unknown): boolean | undefined => typeof value === 'boolean' ? value : undefined;
     const quietContext = [...this.#contexts][0];
-    const applied: AppliedQuietSettings = { microphoneLabel: this.#track?.label || 'Unavailable', contextState: quietContext?.state, contextSampleRate: this.#contextSampleRate, trackSampleRate: settings.sampleRate, channelCount: settings.channelCount, echoCancellation: flag(settings.echoCancellation), noiseSuppression: flag(settings.noiseSuppression), autoGainControl: flag(settings.autoGainControl) };
+    const applied: AppliedQuietSettings = { microphoneLabel: this.#track?.label || 'Unavailable', contextState: quietContext?.state, contextSampleRate: this.#contextSampleRate, inputDeviceSampleRate: settings.sampleRate, captureSampleRate: quietContext?.sampleRate, inputDeviceChannels: settings.channelCount, captureChannels: 1, echoCancellation: flag(settings.echoCancellation), noiseSuppression: flag(settings.noiseSuppression), autoGainControl: flag(settings.autoGainControl) };
     this.#applied = applied;
-    if (applied.contextState !== 'running' || applied.contextSampleRate !== 48_000 || applied.trackSampleRate !== 48_000 || applied.channelCount !== 1 || applied.echoCancellation !== false || applied.noiseSuppression !== false || applied.autoGainControl !== false) { await this.reset(); throw new Error('Quiet applied microphone settings are incompatible'); }
+    if (applied.contextState !== 'running' || applied.contextSampleRate !== 48_000 || applied.captureSampleRate !== 48_000 || (applied.inputDeviceSampleRate !== 44_100 && applied.inputDeviceSampleRate !== 48_000) || (applied.inputDeviceChannels !== 1 && applied.inputDeviceChannels !== 2) || applied.captureChannels !== 1 || applied.echoCancellation !== false || applied.noiseSuppression !== false || applied.autoGainControl !== false) { await this.reset(); throw new Error('Quiet applied microphone settings are incompatible'); }
     return applied;
   }
 

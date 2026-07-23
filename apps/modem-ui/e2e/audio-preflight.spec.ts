@@ -37,10 +37,10 @@ test('shows only the arm action until fact-based preflight succeeds, then expose
 });
 
 test('blocks qualification for incompatible applied settings and gives one reset recovery action', async ({ page }) => {
-  await mockBrowserAudio(page, { settings: { channelCount: 2 } });
+  await mockBrowserAudio(page, { settings: { channelCount: 3 } });
   await page.goto('http://127.0.0.1:5173/');
   await page.getByRole('button', { name: 'Arm modem' }).click();
-  await expect(page.getByText(/Audio preflight failed: capture channel count is 2, not 1/)).toBeVisible();
+  await expect(page.getByText(/Audio preflight failed: input-device channel count is 3, not 1 or 2/)).toBeVisible();
   await expect(page.getByRole('button', { name: 'Start Cyrinx qualification' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Reset / re-arm' })).toBeVisible();
 });

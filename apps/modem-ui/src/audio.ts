@@ -13,8 +13,10 @@ export interface AppliedAudioEvidence {
   permission: PermissionState;
   contextState: string;
   contextSampleRate: number | undefined;
-  trackSampleRate: number | undefined;
-  channelCount: number | undefined;
+  inputDeviceSampleRate: number | undefined;
+  captureSampleRate: number | undefined;
+  inputDeviceChannels: number | undefined;
+  captureChannels: number | undefined;
   echoCancellation: boolean | undefined;
   noiseSuppression: boolean | undefined;
   autoGainControl: boolean | undefined;
@@ -126,8 +128,10 @@ export function evaluateAppliedSettings(evidence: AppliedAudioEvidence): AudioPr
     [evidence.permission === 'granted', `permission is ${evidence.permission}`],
     [evidence.contextState === 'running', `audio context state is ${observed(evidence.contextState)}, not running`],
     [evidence.contextSampleRate === SAMPLE_RATE, `context sample rate is ${observed(evidence.contextSampleRate)}, not ${SAMPLE_RATE}`],
-    [evidence.trackSampleRate === SAMPLE_RATE, `track sample rate is ${observed(evidence.trackSampleRate)}, not ${SAMPLE_RATE}`],
-    [evidence.channelCount === 1, `capture channel count is ${observed(evidence.channelCount)}, not 1`],
+    [evidence.captureSampleRate === SAMPLE_RATE, `codec capture sample rate is ${observed(evidence.captureSampleRate)}, not ${SAMPLE_RATE}`],
+    [evidence.inputDeviceSampleRate === 44_100 || evidence.inputDeviceSampleRate === SAMPLE_RATE, `input-device sample rate is ${observed(evidence.inputDeviceSampleRate)}, not 44100 or ${SAMPLE_RATE}`],
+    [evidence.captureChannels === 1, `codec capture channel count is ${observed(evidence.captureChannels)}, not 1`],
+    [evidence.inputDeviceChannels === 1 || evidence.inputDeviceChannels === 2, `input-device channel count is ${observed(evidence.inputDeviceChannels)}, not 1 or 2`],
     [evidence.echoCancellation === false, `echo cancellation is ${observed(evidence.echoCancellation)}`],
     [evidence.noiseSuppression === false, `noise suppression is ${observed(evidence.noiseSuppression)}`],
     [evidence.autoGainControl === false, `automatic gain control is ${observed(evidence.autoGainControl)}`],
@@ -147,8 +151,11 @@ function toEvidence(epoch: number, context: BrowserAudioContext, track: MediaStr
     permission: 'granted',
     contextState: context.state,
     contextSampleRate: context.sampleRate,
-    trackSampleRate: applied.sampleRate,
-    channelCount: applied.channelCount,
+    inputDeviceSampleRate: applied.sampleRate,
+    captureSampleRate: context.sampleRate,
+    inputDeviceChannels: applied.channelCount,
+    // pcm-capture.js consumes inputs[0][0] and emits one Float32 channel.
+    captureChannels: 1,
     echoCancellation: booleanSetting(applied.echoCancellation),
     noiseSuppression: booleanSetting(applied.noiseSuppression),
     autoGainControl: booleanSetting(applied.autoGainControl),

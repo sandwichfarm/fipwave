@@ -17,8 +17,10 @@ test('production Quiet route performs verified RESET, arm, teardown, and re-arm 
   await page.getByRole('button', { name: 'Arm modem' }).click();
   await expect(page.getByText('Audio preflight passed on this laptop.')).toBeVisible();
   await expect(page.getByText('Bridge delivery: Audio settings accepted for epoch 1')).toBeVisible();
+  await expect(page.getByRole('row', { name: 'Input-device sample rate 44100' })).toBeVisible();
+  await expect(page.getByRole('row', { name: 'Input-device channels 2' })).toBeVisible();
+  await expect(page.getByRole('row', { name: 'Codec capture PCM channels 1' })).toBeVisible();
   await expect(page.getByRole('cell', { name: '48000', exact: true })).toHaveCount(2);
-  await expect(page.getByRole('cell', { name: '1', exact: true })).toBeVisible();
 
   await page.getByRole('button', { name: 'Start Cyrinx qualification' }).click();
   await expect(page.getByText('Quiet armed · audible-7k-channel-0 · epoch 2')).toBeVisible({ timeout: 30_000 });
