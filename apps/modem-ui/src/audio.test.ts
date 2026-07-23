@@ -156,10 +156,10 @@ describe('PCM playback boundary', () => {
   });
 
   it('enforces byte and duration caps without partially admitting overflow', () => {
-    const queue = createPlaybackQueue({ maxBytes: 16, maxDurationMs: 1 });
+    const queue = createPlaybackQueue({ maxBytes: 24, maxDurationMs: 1 });
     const chunk = validatePcmPlaybackFrame(playbackFrame(), 1);
-    expect(queue.enqueue(chunk)).toMatchObject({ queuedBytes: 16 });
+    expect(queue.enqueue(chunk)).toMatchObject({ queuedBytes: 24 });
     expect(() => queue.enqueue(chunk)).toThrow('overflow');
-    expect(queue.metrics().queuedBytes).toBe(16);
+    expect(queue.metrics().queuedBytes).toBe(24);
   });
 });

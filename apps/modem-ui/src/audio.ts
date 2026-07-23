@@ -39,6 +39,8 @@ export interface PcmPlaybackChunk {
   samples: Float32Array;
   byteLength: number;
   durationMs: number;
+  /** Cyrinx's modem-only wire frame receives a local 300 ms all-zero guard tail. */
+  guardSamples?: number;
 }
 
 export interface PlaybackMetrics {
@@ -254,7 +256,10 @@ export function validatePcmPlaybackFrame(data: ArrayBuffer, expectedEpoch: numbe
   if (payloadBytes <= PCM_SAMPLE_INDEX_BYTES || (payloadBytes - PCM_SAMPLE_INDEX_BYTES) % Float32Array.BYTES_PER_ELEMENT !== 0) fail('PCM playback Float32 payload is unaligned');
   const payload = data.slice(FWAV_HEADER_BYTES + PCM_SAMPLE_INDEX_BYTES);
   const samples = new Float32Array(payload);
-  return { epoch, firstSampleIndex: view.getBigUint64(FWAV_HEADER_BYTES, true), sampleRate, channelCount: 1, samples, byteLength: payloadBytes, durationMs: samples.length / sampleRate * 1_000 };
+  const flags = view.getUint16(6, true);
+  if (flags !== 0 && flags !== 1) fail('PCM playback flags are unsupported');
+  if (flags === 1 && samples.length !== 62_464) fail('Cyrinx PCM frame has unexpected geometry');
+  return { epoch, firstSampleIndex: view.getBigUint64(FWAV_HEADER_BYTES, true), sampleRate, channelCount: 1, samples, byteLength: payloadBytes, durationMs: samples.length / sampleRate * 1_000, ...(flags === 1 ? { guardSamples: 14_400 } : {}) };
 }
 
 export function createPlaybackQueue(options: { maxBytes: number; maxDurationMs: number }): PcmPlaybackQueue {
@@ -292,14 +297,15 @@ export function enqueuePcmPlayback(chunk: PcmPlaybackChunk): PlaybackMetrics {
   assertCurrent(chunk.epoch);
   if (!currentContext || !currentQueue || currentContext.state !== 'running') fail('audio playback is not armed');
   currentQueue.enqueue(chunk);
-  const buffer = currentContext.createBuffer(2, chunk.samples.length, chunk.sampleRate);
-  buffer.copyToChannel(new Float32Array(Array.from(chunk.samples)), 0);
-  buffer.copyToChannel(new Float32Array(chunk.samples.length), 1);
+  const outputSamples = chunk.samples.length + (chunk.guardSamples ?? 0);
+  const buffer = currentContext.createBuffer(2, outputSamples, chunk.sampleRate);
+  const left = new Float32Array(outputSamples); left.set(chunk.samples); buffer.copyToChannel(left, 0);
+  buffer.copyToChannel(new Float32Array(outputSamples), 1);
   const source = currentContext.createBufferSource();
   source.buffer = buffer;
   source.connect(currentContext.destination);
   const startAt = Math.max(currentContext.currentTime, nextPlaybackTime);
-  nextPlaybackTime = startAt + chunk.samples.length / chunk.sampleRate;
+  nextPlaybackTime = startAt + outputSamples / chunk.sampleRate;
   scheduledSources.add(source);
   source.addEventListener('ended', () => scheduledSources.delete(source), { once: true });
   source.start(startAt);
