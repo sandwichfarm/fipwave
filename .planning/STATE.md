@@ -4,16 +4,16 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 01
 current_phase_name: Qualify the Demo Substrate
-status: executing
-stopped_at: Completed 01-06-PLAN.md
-last_updated: "2026-07-23T15:42:06.635Z"
+status: verifying
+stopped_at: Completed 01-07-PLAN.md
+last_updated: "2026-07-23T17:29:02.193Z"
 last_activity: 2026-07-23
 last_activity_desc: Phase 01 execution started
 progress:
   total_phases: 1
   completed_phases: 0
-  total_plans: 7
-  completed_plans: 6
+  total_plans: 10
+  completed_plans: 7
 ---
 
 # Project State
@@ -29,10 +29,10 @@ See: .planning/PROJECT.md (updated 2026-07-23)
 
 Phase: 01 (Qualify the Demo Substrate) — EXECUTING
 Plan: 7 of 7
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-07-23 — Phase 01 execution started
 
-Progress: [█████████░] 86%
+Progress: [███████░░░] 70%
 
 ## Performance Metrics
 
@@ -63,6 +63,7 @@ Progress: [█████████░] 86%
 | Phase 01-qualify-the-demo-substrate P04 | 4min | 3 tasks | 10 files |
 | Phase 01 P05 | 11min | 3 tasks | 11 files |
 | Phase 01 P06 | 8min | 2 tasks | 9 files |
+| Phase 01 P07 | 42min | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -83,6 +84,7 @@ Recent decisions affecting current work:
 - [Phase ?]: Cyrinx gets one immutable 90-minute qualification window; a hard miss or expiry immediately routes to Quiet, and Quiet failure is unqualified.
 - [Phase ?]: Fixture and loopback results remain human_needed; exact named Open air reports are required for a selection.
 - [Phase ?]: Docker/TUN preflight runs with network_mode none, no published ports, and source-plus-inspect authority evidence.
+- [Phase ?]: Production runner verifies the complete codec lock before serving only an exact browser asset allowlist.
 
 ### Pending Todos
 
@@ -101,6 +103,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-23T15:42:06.631Z
-Stopped at: Completed 01-06-PLAN.md
+Last session: 2026-07-23T17:29:02.187Z
+Stopped at: Completed 01-07-PLAN.md
 Resume file: None
