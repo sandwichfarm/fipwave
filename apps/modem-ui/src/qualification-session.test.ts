@@ -1,23 +1,27 @@
 import { describe, expect, it } from 'vitest';
+import { CyrinxQualificationSession, type CyrinxSessionSnapshot } from './qualification-session.js';
 
-import { CyrinxQualificationSession } from './qualification-session.js';
+const primary = (stage: CyrinxSessionSnapshot['stage'] = 'build'): CyrinxSessionSnapshot => ({ codec: 'cyrinx', stage, startedAtMs: 100, deadlineAtMs: 5_400_100, elapsedMs: 0 });
+const fallback = (codec: 'quiet' | 'unqualified' = 'quiet'): CyrinxSessionSnapshot => ({ codec, stage: codec === 'quiet' ? 'quiet' : 'unqualified', startedAtMs: 100, deadlineAtMs: 5_400_100, elapsedMs: 20, reasonCode: 'cyrinx_cold_a_to_b_failed' });
 
-describe('Cyrinx early-abandonment session', () => {
-  it('starts one immutable deadline before build and transitions to Quiet on the first failed ordered stage', () => {
-    const session = new CyrinxQualificationSession(() => 100);
-    expect(session.start()).toMatchObject({ codec: 'cyrinx', stage: 'build', startedAtMs: 100, deadlineAtMs: 5_400_100 });
-    expect(() => session.pass('cold-a-to-b')).toThrow('stage');
-    expect(session.fail('cyrinx_build_failed', 101)).toMatchObject({ codec: 'quiet', stage: 'quiet', reasonCode: 'cyrinx_build_failed', deadlineAtMs: 5_400_100 });
-    expect(session.start()).toMatchObject({ codec: 'quiet', reasonCode: 'cyrinx_build_failed' });
-    expect(session.failQuiet()).toMatchObject({ codec: 'unqualified', reasonCode: 'cyrinx_build_failed' });
+describe('runner-owned Cyrinx session display', () => {
+  it('accepts only an authoritative immutable deadline and starts Quiet once', () => {
+    const session = new CyrinxQualificationSession();
+    expect(session.canRequestStart).toBe(true);
+    session.apply(primary());
+    session.apply(fallback());
+    expect(session.shouldStartQuiet).toBe(true);
+    session.markQuietStarted();
+    expect(session.shouldStartQuiet).toBe(false);
+    expect(() => session.apply(primary('cold-b-to-a'))).toThrow('retry');
   });
 
-  it('expires at equality and requires the two cold directions before corpus', () => {
-    const session = new CyrinxQualificationSession(() => 0); session.start();
-    expect(session.pass('build', 1).stage).toBe('digital');
-    expect(session.pass('digital', 2).stage).toBe('cold-a-to-b');
-    expect(session.pass('cold-a-to-b', 3).stage).toBe('cold-b-to-a');
-    expect(session.pass('cold-b-to-a', 4).stage).toBe('corpus');
-    expect(session.expire(5_400_000)).toMatchObject({ codec: 'quiet', reasonCode: 'cyrinx_deadline_expired' });
+  it('rejects async-loss, deadline mutation, bad reason, and post-reset restart attempts', () => {
+    const session = new CyrinxQualificationSession(); session.apply(primary());
+    expect(() => session.apply({ ...primary(), deadlineAtMs: 5_400_101 })).toThrow('deadline');
+    expect(() => session.apply({ ...fallback(), reasonCode: 'operator_override' as never })).toThrow('reason');
+    session.apply(fallback()); session.markQuietStarted(); session.markQuietFailed();
+    expect(session.snapshot).toMatchObject({ codec: 'unqualified', reasonCode: 'cyrinx_cold_a_to_b_failed' });
+    expect(() => session.apply(primary())).toThrow('retry');
   });
 });

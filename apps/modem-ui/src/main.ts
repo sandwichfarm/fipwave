@@ -1,6 +1,7 @@
 import './style.css';
 import { armAudio, enqueuePcmPlayback, resetAudio, validatePcmPlaybackFrame, type AppliedAudioEvidence } from './audio.js';
 import { acceptBridgePlaybackFrame } from '../../../packages/bridge/src/codecs/websocket.js';
+import { CyrinxQualificationSession, type CyrinxSessionSnapshot } from './qualification-session.js';
 import {
   QUIET_PROFILE,
   QuietClient,
@@ -38,6 +39,7 @@ type GateState = 'not-started' | 'cyrinx-running';
 type CorpusRow = { direction: string; caseId: string; evidenceClass: 'Fixture' | 'Loopback' | 'Open air'; result: string; airtime: string };
 let gateState: GateState = 'not-started';
 let corpusRows: CorpusRow[] = [];
+const cyrinxSession = new CyrinxQualificationSession();
 
 type Pending<T> = { resolve(value: T): void; reject(error: Error): void; timer: number };
 let pendingSettings: Pending<void> | undefined;
@@ -139,9 +141,11 @@ function handleBridgeMessage(socket: WebSocket, event: MessageEvent): void {
       pending.resolve();
       return;
     }
-    if (message.kind === 'cyrinx-session' && (message.codec === 'cyrinx' || message.codec === 'quiet') && typeof message.deadlineAtMs === 'number') {
-      bridgeDelivery = message.codec === 'cyrinx' ? `Cyrinx gate started; deadline ${new Date(message.deadlineAtMs).toLocaleTimeString()}` : `Cyrinx rejected: ${typeof message.reasonCode === 'string' ? message.reasonCode : 'unknown reason'}; activating Quiet`;
-      if (message.codec === 'quiet') void startQuietFallback();
+    if (message.kind === 'cyrinx-session' && (message.codec === 'cyrinx' || message.codec === 'quiet' || message.codec === 'unqualified')) {
+      const snapshot = { codec: message.codec, stage: message.stage, startedAtMs: message.startedAtMs, deadlineAtMs: message.deadlineAtMs, elapsedMs: message.elapsedMs, ...(typeof message.reasonCode === 'string' ? { reasonCode: message.reasonCode } : {}) } as CyrinxSessionSnapshot;
+      cyrinxSession.apply(snapshot);
+      bridgeDelivery = snapshot.codec === 'cyrinx' ? `Cyrinx gate: ${snapshot.stage} · deadline ${new Date(snapshot.deadlineAtMs!).toLocaleTimeString()}` : `Cyrinx rejected: ${snapshot.reasonCode}; Quiet is runner-authorized`;
+      if (cyrinxSession.shouldStartQuiet) { cyrinxSession.markQuietStarted(); void startQuietFallback(); }
       render();
       return;
     }
@@ -398,7 +402,7 @@ async function arm(): Promise<void> {
 }
 
 function startQualification(): void {
-  if (uiState !== 'ready' || gateState === 'cyrinx-running') return;
+  if (uiState !== 'ready' || gateState === 'cyrinx-running' || !cyrinxSession.canRequestStart) return;
   gateState = 'cyrinx-running';
   if (!runnerConfig && developmentDiagnostic) {
     corpusRows = [{ direction: 'A → B', caseId: `fixture-epoch-${epoch}`, evidenceClass: 'Fixture', result: 'Byte-perfect loopback (non-physical)', airtime: '0 ms' }];
@@ -416,10 +420,11 @@ async function startQuietFallback(): Promise<void> {
   if (!runnerConfig) return;
   let quietEpoch = epoch;
   try {
-    // The runner establishes the epoch. Only after its RESET response do we
-    // close normal audio and arm Quiet against that exact returned value.
-    quietEpoch = await requestBridgeReset();
+    // Stop browser capture/playback before RESET so a late same-epoch callback
+    // cannot be accepted by the runner after it changes ownership.
+    await quiet.reset();
     await resetAudio();
+    quietEpoch = await requestBridgeReset();
     epoch = quietEpoch;
     evidence = undefined;
     await quiet.arm(epoch, runnerConfig.role);
@@ -437,6 +442,7 @@ async function startQuietFallback(): Promise<void> {
     uiState = message.includes('bridge') || message.includes('RESET') ? 'disconnected' : 'failed';
     failure = message;
     quietRuntime = `Quiet failed · epoch ${quietEpoch}`;
+    try { cyrinxSession.markQuietFailed(); } catch { /* terminal state is already authoritative */ }
   }
   render();
 }
@@ -477,7 +483,8 @@ async function reset(): Promise<void> {
     await resetAudio();
     epoch = nextEpoch;
     evidence = undefined;
-    gateState = 'not-started';
+    // Reset only changes audio/epoch. Cyrinx remains irreversible once the
+    // runner started it; re-arm therefore cannot restart the primary path.
     corpusRows = [];
     quietRuntime = 'Not armed';
     uiState = 'idle';
