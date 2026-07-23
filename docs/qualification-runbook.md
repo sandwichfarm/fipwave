@@ -73,7 +73,8 @@ checks is `unqualified` with precise reason codes.
 A physical Quiet selection additionally requires an activated Cyrinx → Quiet
 fallback with its immutable failure/expiry reason. A Cyrinx selection must not
 claim that fallback was activated. Both reports retain the runner-owned Cyrinx
-start, deadline, elapsed timing, cold-frame authority, and terminal stage.
+start, deadline, elapsed timing, `qualification.cyrinx.coldReceivePassed`, and
+`qualification.cyrinx.stage`.
 
 The canonical qualification timeout is runner-owned and fixed at 30,000 ms.
 Complete-payload p95 airtime must be strictly less than one third of it
@@ -145,9 +146,14 @@ at most one 2.731-second capture window: 64 contiguous 2,048-sample mono
 batches, with a per-case sample offset beginning at zero. FWAV header sequence
 remains globally monotonic for anti-replay and is not a sample offset.
 Because the corpus contains consecutive cases in each direction, the runner
-also holds every transmitter for a fixed 4.5-second case interval before it
-issues the next instruction. This keeps a faster playback completion from
-overtaking the opposite laptop's bounded capture and native decode window.
+holds both roles at each accepted case for a total fixed 4.5-second interval
+before it issues the next instruction. The interval begins when the runner
+accepts that case; it is not added after playback or native decode. This keeps
+a faster transmitter from overtaking the opposite laptop's bounded capture
+and decode window. Each browser also owns a 25-second per-case watchdog. A
+capture, playback, native operation, or authoritative handoff that has not
+advanced by then emits one failure and abandons the case instead of hanging
+the qualification.
 
 RESET stops local capture and audio before the runner changes epoch. It clears
 the active native case but does not restart Cyrinx or alter its original
