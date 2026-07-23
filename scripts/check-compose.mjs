@@ -26,7 +26,7 @@ function inspectDevice(entry) {
   return entry && typeof entry === 'object' && entry.PathOnHost === '/dev/net/tun' && entry.PathInContainer === '/dev/net/tun' ? '/dev/net/tun' : undefined;
 }
 function loopbackPorts(value, label) {
-  if (value === undefined) return [];
+  if (value === undefined || value === null) return [];
   if (!Array.isArray(value) && (typeof value !== 'object' || value === null)) fail(`${label} are invalid`);
   const entries = Array.isArray(value) ? value : Object.values(value).flat().map((binding) => `${binding?.HostIp ?? ''}:${binding?.HostPort ?? ''}`);
   if (entries.some((entry) => {
@@ -59,7 +59,11 @@ export function validateComposeTopology(rendered) {
   const devices = exactSet((service.devices ?? []).map(composeDevice).filter(Boolean), ['/dev/net/tun'], 'device');
   const capabilities = exactSet(service.cap_add, ['NET_ADMIN'], 'capabilities');
   const securityOptions = exactSet(service.security_opt, ['no-new-privileges:true'], 'security options');
-  if (service.privileged !== false) fail('privileged mode must be false');
+  // `docker compose config --format json` omits explicit false values. The
+  // repository source check below requires the declaration; the rendered
+  // topology can safely normalize Docker's omitted default to false and the
+  // exact host inspect verifies the effective value.
+  if (service.privileged !== undefined && service.privileged !== false) fail('privileged mode must be false');
   if (service.network_mode === 'host') fail('host network is forbidden');
   if (service.network_mode !== 'none') fail('network mode must be none');
   const publishedPorts = loopbackPorts(service.ports, 'published ports');
@@ -81,13 +85,14 @@ export function validateDockerInspect(inspected) {
 
 export function checkComposeSource(composeSource, dockerfileSource) {
   if (!dockerfileSource.includes(`FROM ${PINNED_IMAGE}`)) fail('Dockerfile image is not the pinned readable Alpine reference');
+  if (!/^\s+privileged:\s+false\s*$/m.test(composeSource)) fail('privileged mode must be explicitly false');
   const topology = {
     services: {
       'tun-preflight': {
         devices: /^\s+devices:\s*\n\s+-\s+\/dev\/net\/tun:\/dev\/net\/tun\s*$/m.test(composeSource) ? ['/dev/net/tun:/dev/net/tun'] : [],
         cap_add: /^\s+cap_add:\s*\n\s+-\s+NET_ADMIN\s*$/m.test(composeSource) ? ['NET_ADMIN'] : [],
         security_opt: /^\s+security_opt:\s*\n\s+-\s+no-new-privileges:true\s*$/m.test(composeSource) ? ['no-new-privileges:true'] : [],
-        privileged: /^\s+privileged:\s+false\s*$/m.test(composeSource) ? false : undefined,
+        privileged: false,
         network_mode: /^\s+network_mode:\s+none\s*$/m.test(composeSource) ? 'none' : undefined,
       },
     },
@@ -111,7 +116,12 @@ async function main() {
     }
     return;
   }
-  if (inspectIndex >= 0) fail('--inspect-json requires --compose-json');
+  if (inspectIndex >= 0) {
+    const inspectPath = args[inspectIndex + 1];
+    if (!inspectPath) fail('--inspect-json requires a path');
+    console.log(JSON.stringify(validateDockerInspect(JSON.parse(await readFile(inspectPath, 'utf8')))));
+    return;
+  }
   const [composeSource, dockerfileSource] = await Promise.all([
     readFile(path.join(root, 'compose.preflight.yml'), 'utf8'),
     readFile(path.join(root, 'docker', 'preflight.Dockerfile'), 'utf8'),
