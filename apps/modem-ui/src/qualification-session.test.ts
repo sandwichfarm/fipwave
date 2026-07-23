@@ -24,4 +24,35 @@ describe('runner-owned Cyrinx session display', () => {
     expect(session.snapshot).toMatchObject({ codec: 'unqualified', reasonCode: 'cyrinx_cold_a_to_b_failed' });
     expect(() => session.apply(primary())).toThrow('retry');
   });
+
+  it('keeps the first runner fallback through timeout, reset/re-arm, and late messages', () => {
+    const session = new CyrinxQualificationSession();
+    session.apply(primary('cold-a-to-b'));
+    session.apply({
+      ...fallback(),
+      reasonCode: 'cyrinx_deadline_expired',
+      elapsedMs: 5_400_000,
+    });
+    session.markQuietStarted();
+
+    // A local RESET/re-arm is not authority to make another Cyrinx attempt.
+    expect(session.canRequestStart).toBe(false);
+    expect(session.shouldStartQuiet).toBe(false);
+
+    // Delayed old-stage and competing-reason messages must fail closed.
+    expect(() => session.apply(primary('corpus'))).toThrow('retry');
+    expect(() => session.apply({
+      ...fallback('unqualified'),
+      reasonCode: 'cyrinx_corpus_failed',
+      elapsedMs: 5_400_000,
+    })).toThrow('first failure reason');
+
+    session.markQuietFailed();
+    expect(session.snapshot).toMatchObject({
+      codec: 'unqualified',
+      stage: 'unqualified',
+      reasonCode: 'cyrinx_deadline_expired',
+      deadlineAtMs: 5_400_100,
+    });
+  });
 });
