@@ -108,7 +108,7 @@ export function qualificationReason(error: unknown, fallback = 'invalid_machine_
 }
 function nonEmpty(value: unknown, reasonCode: string): asserts value is string { if (typeof value !== 'string' || value.trim() === '') fail(reasonCode); }
 function finiteNonNegative(value: unknown, reasonCode: string): asserts value is number { if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) fail(reasonCode); }
-function integerNonNegative(value: unknown, reasonCode: string): asserts value is number { if (!Number.isInteger(value) || (value as number) < 0) fail(reasonCode); }
+function integerNonNegative(value: unknown, reasonCode: string): asserts value is number { if (!Number.isSafeInteger(value) || (value as number) < 0) fail(reasonCode); }
 function digest(value: unknown, reasonCode: string): asserts value is string { if (typeof value !== 'string' || !/^[a-f0-9]{64}$/i.test(value)) fail(reasonCode); }
 function exactKeys(value: object, keys: readonly string[]): boolean {
   const actual = Object.keys(value).sort(); const expected = [...keys].sort();
@@ -168,15 +168,26 @@ export function validateMachineReport(candidate: unknown): MachineReport {
     nonEmpty(report.codec.id, 'codec_id_required');
     if (typeof report.codec.audible !== 'boolean') fail('codec_audibility_required');
     const qualification = report.qualification;
-    if (!qualification || qualification.deadLinkTimeoutMs !== QUALIFICATION_DEAD_LINK_TIMEOUT_MS || qualification.cyrinxDeadlineMs !== CYRINX_DEADLINE_MS) fail('qualification_policy_invalid');
+    if (!qualification || !exactKeys(qualification, ['deadLinkTimeoutMs', 'cyrinxDeadlineMs', 'deadline', 'physicalGate', 'fallback']) || qualification.deadLinkTimeoutMs !== QUALIFICATION_DEAD_LINK_TIMEOUT_MS || qualification.cyrinxDeadlineMs !== CYRINX_DEADLINE_MS) fail('qualification_policy_invalid');
     const deadline = qualification.deadline;
     if (!deadline || !exactKeys(deadline, ['startedAtMs', 'deadlineAtMs', 'elapsedMs'])) fail('qualification_deadline_invalid');
-    for (const value of [deadline.startedAtMs, deadline.deadlineAtMs, deadline.elapsedMs]) if (value !== null) finiteNonNegative(value, 'qualification_deadline_invalid');
-    if ((deadline.startedAtMs === null) !== (deadline.deadlineAtMs === null) || (deadline.startedAtMs !== null && deadline.deadlineAtMs! - deadline.startedAtMs !== CYRINX_DEADLINE_MS)) fail('qualification_deadline_invalid');
+    const deadlineValues = [deadline.startedAtMs, deadline.deadlineAtMs, deadline.elapsedMs];
+    const allNull = deadlineValues.every((value) => value === null);
+    const allStamped = deadlineValues.every((value) => value !== null);
+    if (!allNull && !allStamped) fail('qualification_deadline_invalid');
+    if (allStamped) {
+      for (const value of deadlineValues) integerNonNegative(value, 'qualification_deadline_invalid');
+      if (deadline.deadlineAtMs! - deadline.startedAtMs! !== CYRINX_DEADLINE_MS) fail('qualification_deadline_invalid');
+    }
     if (!['pending', 'failed', 'passed'].includes(qualification.physicalGate)) fail('physical_gate_invalid');
-    if (!qualification.fallback || qualification.fallback.codecId !== 'quiet' || !['available', 'activated', 'failed'].includes(qualification.fallback.state)) fail('fallback_state_invalid');
+    if (!qualification.fallback || !exactKeys(qualification.fallback, ['codecId', 'state', 'reasonCode']) || qualification.fallback.codecId !== 'quiet' || !['available', 'activated', 'failed'].includes(qualification.fallback.state)) fail('fallback_state_invalid');
     if (qualification.fallback.state === 'available' && qualification.fallback.reasonCode !== null) fail('fallback_state_invalid');
     if (qualification.fallback.state !== 'available' && (!CYRINX_FALLBACK_REASONS.includes(qualification.fallback.reasonCode as typeof CYRINX_FALLBACK_REASONS[number]))) fail('fallback_state_invalid');
+    if (qualification.fallback.state !== 'available' && !allStamped) fail('fallback_timing_invalid');
+    if (allStamped) {
+      const expired = deadline.elapsedMs! >= CYRINX_DEADLINE_MS;
+      if (qualification.fallback.reasonCode === 'cyrinx_deadline_expired' ? !expired : expired) fail('fallback_timing_invalid');
+    }
   }
   for (const result of report.results) {
     if (result.epoch !== report.epoch) fail('stale_epoch');
@@ -261,8 +272,11 @@ export function mergeSelection(expectedHosts: readonly [string, string], machine
   if (reports.some((report) => report.codec.id !== firstCodec.id || report.codec.commit !== firstCodec.commit || report.codec.profile !== firstCodec.profile || report.codec.audible !== firstCodec.audible || report.codec.advertisedMtu !== firstCodec.advertisedMtu)) add(reasons, 'codec_mismatch');
   const selected = exactCodec(firstCodec);
   if (!selected) add(reasons, 'unsupported_codec');
-  if (selected === 'quiet' && reports.some((report) => report.qualification?.fallback.state !== 'activated' || !report.qualification.fallback.reasonCode)) add(reasons, 'quiet_fallback_not_activated');
-  if (selected === 'cyrinx' && reports.some((report) => report.qualification?.fallback.state === 'activated')) add(reasons, 'unexpected_fallback_activation');
+  if (selected === 'quiet') {
+    if (reports.some((report) => report.qualification?.fallback.state === 'failed')) add(reasons, 'quiet_fallback_failed');
+    if (reports.some((report) => report.qualification?.fallback.state !== 'activated' || !report.qualification.fallback.reasonCode)) add(reasons, 'quiet_fallback_not_activated');
+  }
+  if (selected === 'cyrinx' && reports.some((report) => report.qualification?.fallback.state !== 'available' || report.qualification.fallback.reasonCode !== null)) add(reasons, 'unexpected_fallback_activation');
   if (reports.some((report) => report.qualification?.deadline.startedAtMs === null || report.qualification?.deadline.deadlineAtMs === null || report.qualification?.deadline.elapsedMs === null)) add(reasons, 'cyrinx_deadline_evidence_required');
   if (reports.some((report) => report.codec.audible !== true)) add(reasons, 'audible_profile_required');
   if (reports.some((report) => report.codec.advertisedMtu < 1357)) add(reasons, 'minimum_mtu_required');
@@ -281,7 +295,7 @@ export function mergeSelection(expectedHosts: readonly [string, string], machine
     }
     const good = sameDirection.filter(qualifying);
     if (good.filter((result) => result.size === 256).length < 19 || good.filter((result) => result.size === 1536).length < 5) add(reasons, 'corpus_incomplete');
-    if (!good.some((result) => result.coldAcquired)) add(reasons, 'cold_acquisition_failed');
+    if (selected !== 'cyrinx' && !good.some((result) => result.coldAcquired)) add(reasons, 'cold_acquisition_failed');
     const timeout = report.qualification?.deadLinkTimeoutMs;
     if (timeout !== QUALIFICATION_DEAD_LINK_TIMEOUT_MS || p95(good.map((result) => result.airtimeMs)) >= QUALIFICATION_DEAD_LINK_TIMEOUT_MS / 3) add(reasons, 'airtime_budget_exceeded');
     if (report.qualification?.physicalGate !== 'passed' || !report.complete) add(reasons, 'physical_gate_failed');
