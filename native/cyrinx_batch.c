@@ -10,6 +10,8 @@
 #define PAYLOAD_BYTES 1792u
 #define FRAME_SAMPLES 62464u
 #define PCM_BYTES (FRAME_SAMPLES * 4u)
+#define MAX_CAPTURE_SAMPLES 144000u
+#define MAX_CAPTURE_BYTES (MAX_CAPTURE_SAMPLES * 4u)
 
 static int little_endian(void) { const uint16_t value = 1; return *((const uint8_t *)&value) == 1; }
 static void put_u32le(uint8_t *out, uint32_t value) { out[0] = (uint8_t)value; out[1] = (uint8_t)(value >> 8); out[2] = (uint8_t)(value >> 16); out[3] = (uint8_t)(value >> 24); }
@@ -70,17 +72,17 @@ static int encode(void) {
 }
 
 static int decode(void) {
-  uint8_t *input = malloc(PCM_BYTES), payload[PAYLOAD_BYTES], result[4 + 1 + 4 + 4 + 4 + 8 + METADATA_BYTES];
+  uint8_t *input = malloc(MAX_CAPTURE_BYTES), payload[PAYLOAD_BYTES], result[4 + 1 + 4 + 4 + 4 + 4 + 4 + 8 + METADATA_BYTES];
   uint8_t block_valid[7]; size_t input_bytes; uint32_t application_bytes; int ok = 0, total = 0, index; double evm = 0.0;
   cyrinx_bulk_config cfg = config(); cyrinx_bulk_geometry geo = {0}; long written;
-  if (!input) return 1; input_bytes = read_all(input, PCM_BYTES);
-  if (input_bytes != PCM_BYTES || cyrinx_bulk_compute_geometry(&cfg, &geo) != 0) { free(input); return 1; }
-  written = cyrinx_bulk_demodulate_with_block_validity(&cfg, (const float *)input, geo.frame_samples, payload, sizeof(payload), &ok, &total, &evm, block_valid, sizeof(block_valid)); free(input);
+  if (!input) return 1; input_bytes = read_all(input, MAX_CAPTURE_BYTES);
+  if (input_bytes < PCM_BYTES || input_bytes % 4 != 0 || cyrinx_bulk_compute_geometry(&cfg, &geo) != 0) { free(input); return 1; }
+  written = cyrinx_bulk_demodulate_with_block_validity(&cfg, (const float *)input, input_bytes / 4, payload, sizeof(payload), &ok, &total, &evm, block_valid, sizeof(block_valid)); free(input);
   if (written != PAYLOAD_BYTES || ok != 7 || total != 7) return 1;
   for (index = 0; index < 7; index++) if (block_valid[index] != 1) return 1;
   application_bytes = get_u32le(payload + 75); if (!valid_metadata(payload, payload + METADATA_BYTES, application_bytes)) return 1;
-  memcpy(result, "CYRR", 4); result[4] = 1; put_u32le(result + 5, application_bytes); put_u32le(result + 9, (uint32_t)ok); put_u32le(result + 13, (uint32_t)total); memcpy(result + 17, &evm, sizeof(evm));
-  memcpy(result + 25, payload, METADATA_BYTES);
+  memcpy(result, "CYRR", 4); result[4] = 1; put_u32le(result + 5, application_bytes); put_u32le(result + 9, (uint32_t)ok); put_u32le(result + 13, (uint32_t)total); put_u32le(result + 17, 0); put_u32le(result + 21, (uint32_t)((geo.frame_samples * 1000 + cfg.sr - 1) / cfg.sr)); memcpy(result + 25, &evm, sizeof(evm));
+  memcpy(result + 33, payload, METADATA_BYTES);
   if (fwrite(result, 1, sizeof(result), stdout) != sizeof(result) || fwrite(payload + METADATA_BYTES, 1, application_bytes, stdout) != application_bytes) return 1;
   return fflush(stdout) == 0 ? 0 : 1;
 }

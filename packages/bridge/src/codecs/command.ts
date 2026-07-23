@@ -14,7 +14,7 @@ export interface CommandResult { exitCode: number; stdout: Uint8Array; stderr: s
 export type PinnedCommandRunner = (request: { executable: string; command: CyrinxCommand; payload: Uint8Array; timeoutMs?: number }) => Promise<CommandResult>;
 
 export const CYRINX_PROFILE: CodecProfile = {
-  codec: 'cyrinx', name: 'bulk-qpsk-r1-2-48k-v1', audible: true, advertisedMtu: 1792, sampleRate: 48_000, channels: 1,
+  codec: 'cyrinx', name: 'bulk-qpsk-r1-2-48k-v1', audible: true, advertisedMtu: 1536, sampleRate: 48_000, channels: 1,
 };
 
 /** Runs exactly one hash-built C batch command. No shell, profile, or streaming controls are exposed. */
@@ -50,16 +50,22 @@ export class NativeCommandCodecAdapter implements CodecAdapter {
 
   async qualify(qualificationCase: QualificationCase, context: QualificationContext): Promise<AdapterResult> {
     try {
-      const response = await (this.command.runner ?? runPinnedCommand)({ executable: this.command.executable, command: 'encode', payload: qualificationCase.payload });
-      if (response.stdout.byteLength > MAX_COMMAND_OUTPUT_BYTES) throw new Error('codec command output exceeds cap');
-      const digest = createHash('sha256').update(response.stdout).digest('hex');
+      if (qualificationCase.payload.byteLength > 1536 || !/^[a-f0-9]{64}$/i.test(qualificationCase.digest)) throw new Error('qualification case is invalid');
+      const runner = this.command.runner ?? runPinnedCommand;
+      const metadata = Buffer.alloc(256); metadata.write('CYRX', 0, 'ascii'); metadata.writeUInt8(1, 4); metadata.writeUInt32LE(context.epoch, 5); metadata.writeUInt8(qualificationCase.direction === 'A → B' ? 0 : 1, 9); metadata.write(qualificationCase.id, 11, 64, 'utf8'); metadata.writeUInt32LE(qualificationCase.payload.byteLength, 75); Buffer.from(qualificationCase.digest, 'hex').copy(metadata, 79);
+      const input = Buffer.alloc(4 + metadata.byteLength + qualificationCase.payload.byteLength); input.writeUInt32LE(qualificationCase.payload.byteLength, 0); metadata.copy(input, 4); Buffer.from(qualificationCase.payload).copy(input, 260);
+      const encoded = await runner({ executable: this.command.executable, command: 'encode', payload: input });
+      if (encoded.exitCode !== 0 || encoded.timedOut || encoded.stdout.byteLength !== 249_856) throw new Error('native encode failed');
+      const response = await runner({ executable: this.command.executable, command: 'decode', payload: encoded.stdout });
+      const body = Buffer.from(response.stdout); const expectedBytes = 289 + qualificationCase.payload.byteLength;
+      if (response.exitCode !== 0 || response.timedOut || body.byteLength !== expectedBytes || body.toString('ascii', 0, 4) !== 'CYRR' || body.readUInt8(4) !== 1 || body.readUInt32LE(5) !== qualificationCase.payload.byteLength || body.readUInt32LE(9) !== 7 || body.readUInt32LE(13) !== 7 || !body.subarray(33, 289).equals(metadata) || !body.subarray(289).equals(Buffer.from(qualificationCase.payload))) throw new Error('native decode result is invalid');
+      const digest = createHash('sha256').update(body.subarray(289)).digest('hex');
       return {
         adapter: this.profile.codec, profile: this.profile, evidenceClass: context.evidenceClass, epoch: context.epoch,
         direction: qualificationCase.direction, caseId: qualificationCase.id, digest,
-        bytePerfect: response.exitCode === 0 && digest === qualificationCase.digest, deliveryCount: response.exitCode === 0 ? 1 : 0,
-        acquisitionMs: 0, airtimeMs: 0, coldAcquired: response.exitCode === 0, complete: response.exitCode === 0,
+        bytePerfect: digest === qualificationCase.digest, deliveryCount: 1,
+        acquisitionMs: body.readUInt32LE(17), airtimeMs: body.readUInt32LE(21), coldAcquired: true, complete: true,
         audioPassed: true, queues: { captureHighWaterBytes: 0, captureHighWaterMs: 0, playbackHighWaterBytes: 0, playbackHighWaterMs: 0, discontinuities: 0 },
-        ...(response.exitCode === 0 ? {} : { reasonCode: response.timedOut ? 'cyrinx_process_timeout' : 'cyrinx_command_failed' }),
       };
     } catch {
       return {

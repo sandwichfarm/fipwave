@@ -1,6 +1,7 @@
 export const SAMPLE_RATE = 48_000;
 export const PCM_PLAYBACK_MESSAGE_TYPE = 4;
 export const PCM_FLOAT32_ENCODING = 1;
+export const PCM_SAMPLE_INDEX_BYTES = 8;
 export const FWAV_HEADER_BYTES = 32;
 
 export type PermissionState = 'granted' | 'denied' | 'unknown';
@@ -250,10 +251,10 @@ export function validatePcmPlaybackFrame(data: ArrayBuffer, expectedEpoch: numbe
   const channelCount = view.getUint16(28, true);
   if (channelCount !== 1) fail(`PCM playback channel count is ${channelCount}, not 1`);
   if (view.getUint16(30, true) !== PCM_FLOAT32_ENCODING) fail('PCM playback encoding is not Float32');
-  if (payloadBytes === 0 || payloadBytes % Float32Array.BYTES_PER_ELEMENT !== 0) fail('PCM playback Float32 payload is unaligned');
-  const payload = data.slice(FWAV_HEADER_BYTES);
+  if (payloadBytes <= PCM_SAMPLE_INDEX_BYTES || (payloadBytes - PCM_SAMPLE_INDEX_BYTES) % Float32Array.BYTES_PER_ELEMENT !== 0) fail('PCM playback Float32 payload is unaligned');
+  const payload = data.slice(FWAV_HEADER_BYTES + PCM_SAMPLE_INDEX_BYTES);
   const samples = new Float32Array(payload);
-  return { epoch, firstSampleIndex: view.getBigUint64(16, true), sampleRate, channelCount: 1, samples, byteLength: payloadBytes, durationMs: samples.length / sampleRate * 1_000 };
+  return { epoch, firstSampleIndex: view.getBigUint64(FWAV_HEADER_BYTES, true), sampleRate, channelCount: 1, samples, byteLength: payloadBytes, durationMs: samples.length / sampleRate * 1_000 };
 }
 
 export function createPlaybackQueue(options: { maxBytes: number; maxDurationMs: number }): PcmPlaybackQueue {
@@ -291,8 +292,9 @@ export function enqueuePcmPlayback(chunk: PcmPlaybackChunk): PlaybackMetrics {
   assertCurrent(chunk.epoch);
   if (!currentContext || !currentQueue || currentContext.state !== 'running') fail('audio playback is not armed');
   currentQueue.enqueue(chunk);
-  const buffer = currentContext.createBuffer(1, chunk.samples.length, chunk.sampleRate);
+  const buffer = currentContext.createBuffer(2, chunk.samples.length, chunk.sampleRate);
   buffer.copyToChannel(new Float32Array(Array.from(chunk.samples)), 0);
+  buffer.copyToChannel(new Float32Array(chunk.samples.length), 1);
   const source = currentContext.createBufferSource();
   source.buffer = buffer;
   source.connect(currentContext.destination);

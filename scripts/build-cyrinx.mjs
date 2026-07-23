@@ -21,6 +21,8 @@ const sourceFiles = Object.freeze([
 ]);
 
 function fail(reason) { throw new Error(`cyrinx_build_failed:${reason}`); }
+const resolvedBuildRoot = path.resolve(buildRoot);
+if (resolvedBuildRoot === path.parse(resolvedBuildRoot).root || resolvedBuildRoot === root || resolvedBuildRoot === path.resolve(assets) || resolvedBuildRoot.split(path.sep).filter(Boolean).length < 4) fail('build_root_unsafe');
 function command(file, args, options = {}) {
   const result = spawnSync(file, args, { cwd: root, encoding: 'utf8', ...options });
   if (result.error || result.status !== 0) fail(`${file}:${result.error?.message ?? result.stderr?.trim() ?? result.status}`);

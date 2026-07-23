@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
 
-import { encodeFrame, MessageType, PcmEncoding } from '../packages/bridge/src/protocol.js';
+import { encodeFrame, encodePcmPayload, MessageType, PcmEncoding } from '../packages/bridge/src/protocol.js';
 import { writeMachineReport, type MachineReport, type TunEvidence } from '../packages/bridge/src/report.js';
 import { startProductionRunner, type ProductionRunner } from '../packages/bridge/src/runner.js';
 import manifest from '../fixtures/corpus/manifest.json' with { type: 'json' };
@@ -18,7 +18,7 @@ async function fixtureUi(): Promise<string> {
 }
 async function reportPath(name: string): Promise<string> { return path.join(await mkdtemp(path.join(tmpdir(), `fipwave-${name}-`)), 'machine.json'); }
 function pcm(epoch: number, sequence: bigint): Buffer {
-  return encodeFrame({ type: MessageType.PCM_CAPTURE, epoch, sequence, sampleRate: 48_000, channels: 1, encoding: PcmEncoding.FLOAT32_LE, payload: Buffer.alloc(4) });
+  return encodeFrame({ type: MessageType.PCM_CAPTURE, epoch, sequence, sampleRate: 48_000, channels: 1, encoding: PcmEncoding.FLOAT32_LE, payload: encodePcmPayload(0n, Buffer.alloc(4)) });
 }
 function frame(type: MessageType, epoch: number, sequence: bigint, payload: object = {}): Buffer {
   return encodeFrame({ type, epoch, sequence, payload: Buffer.from(JSON.stringify(payload)) });

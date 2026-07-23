@@ -10,7 +10,7 @@ export const MAX_QUEUE_DURATION_MS = 10_000;
 export const QUALIFICATION_DEAD_LINK_TIMEOUT_MS = 30_000;
 export const CYRINX_DEADLINE_MS = 90 * 60 * 1_000;
 export const QUIET_CODEC = Object.freeze({ id: 'quiet', commit: '72782542a41f1b615a02c2ab43a0edb56edb6ce4', profile: 'audible-7k-channel-0', audible: true, advertisedMtu: 1357 });
-export const CYRINX_CODEC = Object.freeze({ id: 'cyrinx', commit: 'ddbd0ce4f78963403f96b0100eb49950b544aef8', profile: 'bulk-qpsk-r1-2-48k-v1', audible: true, advertisedMtu: 1792 });
+export const CYRINX_CODEC = Object.freeze({ id: 'cyrinx', commit: 'ddbd0ce4f78963403f96b0100eb49950b544aef8', profile: 'bulk-qpsk-r1-2-48k-v1', audible: true, advertisedMtu: 1536 });
 
 export interface MachineResult {
   epoch: number;

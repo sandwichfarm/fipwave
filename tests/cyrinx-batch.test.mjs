@@ -49,9 +49,11 @@ test('pinned Cyrinx batch binary has exact geometry and byte-perfect 256/1536 di
     assert.equal(decoded.stdout.readUInt32LE(5), bytes);
     assert.equal(decoded.stdout.readUInt32LE(9), 7);
     assert.equal(decoded.stdout.readUInt32LE(13), 7);
-    assert.ok(Number.isFinite(decoded.stdout.readDoubleLE(17)));
-    assert.deepEqual(decoded.stdout.subarray(25, 25 + 256), metadata(payload));
-    assert.deepEqual(decoded.stdout.subarray(281, 281 + bytes), payload);
+    assert.equal(decoded.stdout.readUInt32LE(17), 0);
+    assert.equal(decoded.stdout.readUInt32LE(21), 1302);
+    assert.ok(Number.isFinite(decoded.stdout.readDoubleLE(25)));
+    assert.deepEqual(decoded.stdout.subarray(33, 33 + 256), metadata(payload));
+    assert.deepEqual(decoded.stdout.subarray(289, 289 + bytes), payload);
   }
 });
 
@@ -82,7 +84,9 @@ test('Cyrinx batch rejects malformed, truncated, oversize, and trailing input', 
   const encoded = run('encode', request(metadata(payload), payload));
   assert.equal(encoded.status, 0, encoded.stderr?.toString());
   assert.notEqual(run('decode', encoded.stdout.subarray(0, -4)).status, 0);
-  assert.notEqual(run('decode', Buffer.concat([encoded.stdout, Buffer.from([0])])).status, 0);
+  assert.notEqual(run('decode', Buffer.alloc(144001 * 4)).status, 0);
+  const leadingAndTrailing = Buffer.concat([Buffer.alloc(2048 * 4), encoded.stdout, Buffer.alloc(2048 * 4)]);
+  assert.equal(run('decode', leadingAndTrailing).status, 0);
   const malformed = metadata(payload); malformed.write('NOPE', 0, 'ascii');
   assert.notEqual(run('encode', request(malformed, payload)).status, 0);
   assert.notEqual(run('encode', request(metadata(Buffer.alloc(1537)), Buffer.alloc(1537))).status, 0);

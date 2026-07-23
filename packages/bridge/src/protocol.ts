@@ -4,6 +4,8 @@ export const FWAV_VERSION = 1;
 export const HEADER_BYTES = 32;
 export const MAX_MESSAGE_BYTES = 256 * 1024;
 export const MAX_PAYLOAD_BYTES = MAX_MESSAGE_BYTES - HEADER_BYTES;
+/** PCM carries its signal timeline here; FWAV sequence remains transport anti-replay only. */
+export const PCM_SAMPLE_INDEX_BYTES = 8;
 
 export enum MessageType {
   HELLO = 1,
@@ -30,6 +32,16 @@ export interface FwavFrame {
   channels?: number;
   encoding?: PcmEncoding;
   payload: Buffer;
+}
+
+export function encodePcmPayload(firstSampleIndex: bigint, samples: Buffer): Buffer {
+  if (firstSampleIndex < 0n || firstSampleIndex > 0xffff_ffff_ffff_ffffn) fail('PCM first sample index is out of range');
+  const payload = Buffer.alloc(PCM_SAMPLE_INDEX_BYTES + samples.byteLength);
+  payload.writeBigUInt64LE(firstSampleIndex, 0); samples.copy(payload, PCM_SAMPLE_INDEX_BYTES); return payload;
+}
+export function decodePcmPayload(payload: Buffer, channels: number): { firstSampleIndex: bigint; samples: Buffer } {
+  if (payload.byteLength <= PCM_SAMPLE_INDEX_BYTES || (payload.byteLength - PCM_SAMPLE_INDEX_BYTES) % (Float32Array.BYTES_PER_ELEMENT * channels) !== 0) fail('PCM payload is not sample-index aligned');
+  return { firstSampleIndex: payload.readBigUInt64LE(0), samples: Buffer.from(payload.subarray(PCM_SAMPLE_INDEX_BYTES)) };
 }
 
 /** Tracks one accepted stream epoch so RESET makes late frames harmless. */
@@ -86,7 +98,7 @@ function validateFrame(frame: FwavFrame): Required<Pick<FwavFrame, 'flags' | 'sa
     if (sampleRate === 0) fail('sample rate must be declared for PCM');
     if (channels === 0) fail('channel count must be declared for PCM');
     if (encoding !== PcmEncoding.FLOAT32_LE) fail('PCM encoding is unsupported');
-    if (frame.payload.byteLength % (Float32Array.BYTES_PER_ELEMENT * channels) !== 0) fail('PCM payload is not frame aligned');
+    decodePcmPayload(frame.payload, channels);
   } else if (sampleRate !== 0 || channels !== 0 || encoding !== PcmEncoding.NONE) {
     fail('non-PCM messages must not declare PCM format');
   }

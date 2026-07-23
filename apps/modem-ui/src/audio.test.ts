@@ -23,18 +23,19 @@ function settings(overrides: Record<string, unknown> = {}) {
 
 function playbackFrame(options: { epoch?: number; sampleRate?: number; channels?: number; payload?: Float32Array } = {}) {
   const payload = options.payload ?? new Float32Array([0, 0.25, -0.25, 0]);
-  const frame = new ArrayBuffer(32 + payload.byteLength);
+  const frame = new ArrayBuffer(32 + 8 + payload.byteLength);
   const view = new DataView(frame);
   new Uint8Array(frame, 0, 4).set([0x46, 0x57, 0x41, 0x56]);
   view.setUint8(4, 1);
   view.setUint8(5, 4);
-  view.setUint32(8, payload.byteLength, true);
+  view.setUint32(8, 8 + payload.byteLength, true);
   view.setUint32(12, options.epoch ?? 1, true);
   view.setBigUint64(16, 12n, true);
   view.setUint32(24, options.sampleRate ?? 48_000, true);
   view.setUint16(28, options.channels ?? 1, true);
   view.setUint16(30, 1, true);
-  new Float32Array(frame, 32).set(payload);
+  view.setBigUint64(32, 0n, true);
+  new Float32Array(frame, 40).set(payload);
   return frame;
 }
 
