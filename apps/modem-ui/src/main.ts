@@ -1,5 +1,6 @@
 import './style.css';
-import { armAudio, resetAudio, type AppliedAudioEvidence } from './audio.js';
+import { armAudio, enqueuePcmPlayback, resetAudio, validatePcmPlaybackFrame, type AppliedAudioEvidence } from './audio.js';
+import { acceptBridgePlaybackFrame } from '../../../packages/bridge/src/codecs/websocket.js';
 
 type UiState = 'idle' | 'requesting' | 'ready' | 'failed' | 'disconnected';
 
@@ -11,6 +12,7 @@ let epoch = 1;
 let evidence: AppliedAudioEvidence | undefined;
 let uiState: UiState = 'idle';
 let failure = '';
+let bridge: WebSocket | undefined;
 
 const labels: Record<UiState, string> = {
   idle: 'Idle', requesting: 'Requesting', ready: 'Ready', failed: 'Failed', disconnected: 'Disconnected',
@@ -49,10 +51,21 @@ function frameForSettings(value: AppliedAudioEvidence): ArrayBuffer {
 
 function reportToBridge(value: AppliedAudioEvidence): Promise<void> {
   return new Promise((resolve, reject) => {
-    const bridge = new WebSocket(`ws://${window.location.host}/bridge`);
+    bridge?.close();
+    bridge = new WebSocket(`ws://${window.location.host}/bridge`);
     bridge.binaryType = 'arraybuffer';
-    bridge.addEventListener('open', () => bridge.send(frameForSettings(value)), { once: true });
-    bridge.addEventListener('message', () => { bridge.close(); resolve(); }, { once: true });
+    bridge.addEventListener('open', () => bridge?.send(frameForSettings(value)), { once: true });
+    bridge.addEventListener('message', (event) => {
+      if (event.data instanceof ArrayBuffer) {
+        try {
+          acceptBridgePlaybackFrame(event.data, value.epoch, { validate: validatePcmPlaybackFrame, enqueue: enqueuePcmPlayback });
+        } catch (error) {
+          reject(error instanceof Error ? error : new Error('Local bridge playback rejected.'));
+        }
+        return;
+      }
+      resolve();
+    });
     bridge.addEventListener('error', () => reject(new Error('Local bridge disconnected.')), { once: true });
   });
 }
@@ -151,6 +164,7 @@ async function arm(): Promise<void> {
 }
 
 async function reset(): Promise<void> {
+  bridge?.close(); bridge = undefined;
   epoch = await resetAudio();
   evidence = undefined; uiState = 'requesting'; failure = ''; render();
   await arm();

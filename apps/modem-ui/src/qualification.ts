@@ -8,6 +8,7 @@ export type GateDecision = {
 
 export interface GateOptions { expectedEpoch: number; deadLinkTimeoutMs: number; nowMs?: number; }
 export interface SelectionOptions { expectedHosts: readonly [string, string]; evidenceClass?: EvidenceClass; }
+export interface CyrinxRunState { activeCodec: 'idle' | 'cyrinx' | 'quiet' | 'unqualified'; deadlineAtMs: number | undefined; reasonCodes: string[]; }
 
 const VALID_DIRECTIONS: readonly LiteralDirection[] = ['A → B', 'B → A'];
 const QUALIFYING_SMALL = 19;
@@ -55,6 +56,53 @@ export class QualificationGate {
   reject(reason: string): GateDecision {
     this.#decision = { decision: 'rejected', reasonCodes: [reason] };
     return this.#decision;
+  }
+}
+
+/**
+ * Owns the one-way Cyrinx → Quiet → unqualified state transition. The deadline
+ * is created before any Cyrinx command runs and is intentionally never reset.
+ */
+export class CyrinxQualificationRun {
+  #state: CyrinxRunState = { activeCodec: 'idle', deadlineAtMs: undefined, reasonCodes: [] };
+  #cyrinxGate: QualificationGate;
+  #quietGate: QualificationGate;
+
+  constructor(private readonly options: GateOptions) {
+    this.#cyrinxGate = new QualificationGate(options);
+    this.#quietGate = new QualificationGate(options);
+  }
+
+  start(nowMs: number): CyrinxRunState {
+    if (this.#state.activeCodec === 'idle') {
+      this.#state = { activeCodec: 'cyrinx', deadlineAtMs: nowMs + 90 * 60 * 1_000, reasonCodes: [] };
+    }
+    return this.#state;
+  }
+
+  accept(result: AdapterResult, nowMs: number): CyrinxRunState {
+    if (this.#state.activeCodec === 'idle') return { activeCodec: 'unqualified', deadlineAtMs: undefined, reasonCodes: ['cyrinx_not_started'] };
+    if (this.#state.activeCodec === 'unqualified') return this.#state;
+    if (this.#state.activeCodec === 'cyrinx') {
+      if (nowMs >= (this.#state.deadlineAtMs ?? 0)) return this.fallback('cyrinx_deadline_expired');
+      if (result.adapter !== 'cyrinx') return this.fallback('cyrinx_adapter_mismatch');
+      const decision = this.#cyrinxGate.accept(result);
+      if (decision.decision === 'rejected') return this.fallback(decision.reasonCodes[0] ?? 'cyrinx_gate_failed');
+      return this.#state;
+    }
+    if (result.adapter !== 'quiet') return this.unqualified('quiet_adapter_mismatch');
+    const decision = this.#quietGate.accept(result);
+    return decision.decision === 'rejected' ? this.unqualified(decision.reasonCodes[0] ?? 'quiet_gate_failed') : this.#state;
+  }
+
+  private fallback(reason: string): CyrinxRunState {
+    this.#state = { activeCodec: 'quiet', deadlineAtMs: this.#state.deadlineAtMs, reasonCodes: [reason] };
+    return this.#state;
+  }
+
+  private unqualified(reason: string): CyrinxRunState {
+    this.#state = { activeCodec: 'unqualified', deadlineAtMs: this.#state.deadlineAtMs, reasonCodes: [reason] };
+    return this.#state;
   }
 }
 

@@ -5,6 +5,7 @@ import type { Duplex } from 'node:stream';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
+import { decodeFrame, encodeFrame, EpochTracker, MessageType } from './protocol.js';
 
 export const LOOPBACK_HOST = '127.0.0.1';
 export const HEADER_BYTES = 32;
@@ -37,6 +38,8 @@ export interface ParsedAudioSettingsFrame {
 
 export interface BridgeServer {
   port: number;
+  sendPcmPlayback(frame: Buffer): void;
+  reset(): number;
   close(): Promise<void>;
 }
 
@@ -196,6 +199,27 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     response.end('Not found');
   });
   const webSocketServer = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });
+  const clients = new Set<WebSocket>();
+  const epochs = new EpochTracker();
+  epochs.reset();
+  let queuedPlaybackBytes = 0;
+
+  const reset = (): number => {
+    queuedPlaybackBytes = 0;
+    const epoch = epochs.reset();
+    const resetFrame = encodeFrame({ type: MessageType.RESET, epoch, sequence: 0n, payload: Buffer.alloc(0) });
+    for (const client of clients) if (client.readyState === client.OPEN) client.send(resetFrame);
+    return epoch;
+  };
+  const sendPcmPlayback = (frame: Buffer): void => {
+    const parsed = decodeFrame(frame);
+    if (parsed.type !== MessageType.PCM_PLAYBACK) fail('bridge only forwards PCM_PLAYBACK frames');
+    if (parsed.epoch !== epochs.epoch) fail('bridge rejects stale PCM playback epoch');
+    if (queuedPlaybackBytes + frame.byteLength > MAX_MESSAGE_BYTES) fail('bridge playback queue overflow');
+    queuedPlaybackBytes += frame.byteLength;
+    for (const client of clients) if (client.readyState === client.OPEN) client.send(frame);
+    queuedPlaybackBytes -= frame.byteLength;
+  };
 
   server.on('upgrade', (request: IncomingMessage, socket, head) => {
     const port = (server.address() as import('node:net').AddressInfo | null)?.port;
@@ -210,6 +234,8 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   });
 
   webSocketServer.on('connection', (socket) => {
+    clients.add(socket);
+    socket.once('close', () => clients.delete(socket));
     socket.on('message', (rawData, isBinary) => {
       void handleFrame(socket, rawData, isBinary, options.artifactDir);
     });
@@ -229,5 +255,5 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     fail('bridge did not bind a TCP loopback address');
   }
 
-  return { port: address.port, close: () => closeServer(server, webSocketServer) };
+  return { port: address.port, sendPcmPlayback, reset, close: () => closeServer(server, webSocketServer) };
 }
