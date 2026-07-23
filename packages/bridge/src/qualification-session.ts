@@ -229,7 +229,8 @@ export class CyrinxQualificationSession {
 
   currentCase(): CyrinxQualificationCase | undefined {
     if (this.#caseIndex === null) return undefined;
-    return ORDERED_CASES[this.#caseIndex];
+    const value = ORDERED_CASES[this.#caseIndex];
+    return value ? { ...value, payload: Buffer.from(value.payload) } : undefined;
   }
 
   acceptInstruction(
@@ -307,7 +308,11 @@ export class CyrinxQualificationSession {
       || this.#fallbackReason !== null
     ) return false;
     const now = checkedNow(nowMs);
-    if (this.#deadlineAtMs !== null && now >= this.#deadlineAtMs) {
+    const elapsed = this.#elapsed(now);
+    if (
+      this.#deadlineAtMs !== null
+      && (now >= this.#deadlineAtMs || elapsed >= CYRINX_DEADLINE_MS)
+    ) {
       return this.#activate('cyrinx_deadline_expired', now);
     }
     return this.#activate(reason, now);
@@ -327,6 +332,7 @@ export class CyrinxQualificationSession {
 
   snapshot(epoch: number, nowMs: number): CyrinxSessionSnapshot {
     if (!Number.isSafeInteger(epoch) || epoch < 0) reject('qualification_epoch_invalid');
+    this.expire(nowMs);
     const elapsedMs = this.#startedAtMs === null
       ? null
       : this.#terminalElapsedMs ?? this.#elapsed(nowMs);
@@ -346,7 +352,7 @@ export class CyrinxQualificationSession {
         state: this.#fallbackState,
         reasonCode: this.#fallbackReason,
       },
-      instruction: value && !this.terminal
+      instruction: value && !this.terminal && !this.#accepted
         ? {
             action: actionFor(this.role, value.direction),
             caseId: value.id,

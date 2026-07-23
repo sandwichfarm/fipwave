@@ -104,6 +104,8 @@ describe('runner-owned Cyrinx qualification session', () => {
 
     roleA.acceptInstruction(instructionA.caseId, instructionA.direction, startAt + 3);
     roleB.acceptInstruction(instructionB.caseId, instructionB.direction, startAt + 3);
+    expect(roleA.snapshot(1, startAt + 3).instruction).toBeNull();
+    expect(roleB.snapshot(1, startAt + 3).instruction).toBeNull();
     expect(roleA.canReceiveCapture()).toBe(false);
     expect(roleB.canReceiveCapture()).toBe(true);
     expect(() => roleA.completeAccepted('listen', startAt + 4)).toThrow(
@@ -201,5 +203,12 @@ describe('runner-owned Cyrinx qualification session', () => {
     roleA.acceptInstruction(inbound.caseId, inbound.direction, startAt + 5);
     roleA.completeAccepted('listen', startAt + 6);
     expect(roleA.coldReceivePassed).toBe(true);
+  });
+
+  it('returns an isolated payload copy so workers cannot mutate the authoritative corpus', () => {
+    const session = reachCases();
+    const first = session.currentCase()!;
+    first.payload[0] = first.payload[0] === 0 ? 1 : 0;
+    expect(session.currentCase()!.payload[0]).not.toBe(first.payload[0]);
   });
 });
