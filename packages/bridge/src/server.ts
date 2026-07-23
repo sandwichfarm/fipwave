@@ -263,6 +263,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   let audio: BrowserAudio | undefined; let generation = 1; let writeTail: Promise<unknown> = Promise.resolve();
   let results = new Map<string, BrowserResult>(); let failureReasons = new Set<string>();
   let owner: WebSocket | undefined; let epochClaimed = false; let reconnectAllowed = false;
+  let cyrinxExpiryTimer: ReturnType<typeof setTimeout> | undefined;
   for (const type of [MessageType.PCM_CAPTURE, MessageType.PCM_PLAYBACK, MessageType.QUALIFICATION_CASE, MessageType.QUALIFICATION_RESULT, MessageType.ERROR, MessageType.RESET]) queues.set(type, { frames: [], bytes: 0, overflowed: false });
   const refreshState = () => { for (const [type, queue] of queues) state.queueCounts[queueName(type)] = queue.frames.length; };
   const clearQueues = () => { for (const queue of queues.values()) { queue.frames = []; queue.bytes = 0; queue.overflowed = false; } refreshState(); };
@@ -325,7 +326,15 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     const startedAtMs = options.now?.() ?? Date.now();
     authority.codec = { ...CYRINX_CODEC }; authority.qualification = { ...authority.qualification, deadline: { startedAtMs, deadlineAtMs: startedAtMs + CYRINX_DEADLINE_MS, elapsedMs: 0 }, fallback: { codecId: 'quiet', state: 'available', reasonCode: null } };
     await persist();
-    try { await options.cyrinxBuild?.(); }
+    const expire = async (): Promise<void> => {
+      if (!authority || authority.codec.id !== 'cyrinx' || authority.qualification.fallback.state !== 'available') return;
+      const now = options.now?.() ?? Date.now(); authority.codec = { ...QUIET_CODEC }; authority.qualification = { ...authority.qualification, deadline: { ...authority.qualification.deadline, elapsedMs: Math.max(CYRINX_DEADLINE_MS, now - startedAtMs) }, fallback: { codecId: 'quiet', state: 'activated', reasonCode: 'cyrinx_deadline_expired' } }; await persist();
+    };
+    cyrinxExpiryTimer = setTimeout(() => { void expire(); }, CYRINX_DEADLINE_MS);
+    try {
+      await options.cyrinxBuild?.();
+      if ((options.now?.() ?? Date.now()) >= startedAtMs + CYRINX_DEADLINE_MS) { await expire(); return { codec: 'quiet', reasonCode: 'cyrinx_deadline_expired', deadlineAtMs: startedAtMs + CYRINX_DEADLINE_MS }; }
+    }
     catch {
       const now = options.now?.() ?? Date.now(); authority.codec = { ...QUIET_CODEC }; authority.qualification = { ...authority.qualification, deadline: { ...authority.qualification.deadline, elapsedMs: Math.max(0, now - startedAtMs) }, fallback: { codecId: 'quiet', state: 'activated', reasonCode: 'cyrinx_build_failed' } }; await persist(); return { codec: 'quiet', reasonCode: 'cyrinx_build_failed', deadlineAtMs: startedAtMs + CYRINX_DEADLINE_MS };
     }
@@ -404,5 +413,5 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   });
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(options.port, LOOPBACK_HOST, () => { server.off('error', reject); resolve(); }); });
   const address = server.address(); if (!address || typeof address === 'string') { await closeServer(server, webSocketServer); fail('bridge did not bind a TCP loopback address'); }
-  return { port: address.port, sendPcmPlayback, startCyrinx, reset, close: async () => { for (const client of clients) client.terminate(); await writeTail; await closeServer(server, webSocketServer); }, state: () => ({ ...state, queueCounts: { ...state.queueCounts }, overflowedQueues: [...state.overflowedQueues], stampedResults: state.stampedResults.map((result) => ({ ...result })) }) };
+  return { port: address.port, sendPcmPlayback, startCyrinx, reset, close: async () => { if (cyrinxExpiryTimer) clearTimeout(cyrinxExpiryTimer); for (const client of clients) client.terminate(); await writeTail; await closeServer(server, webSocketServer); }, state: () => ({ ...state, queueCounts: { ...state.queueCounts }, overflowedQueues: [...state.overflowedQueues], stampedResults: state.stampedResults.map((result) => ({ ...result })) }) };
 }
