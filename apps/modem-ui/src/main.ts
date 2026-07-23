@@ -46,7 +46,7 @@ let gateState: GateState = 'not-started';
 let corpusRows: CorpusRow[] = [];
 const cyrinxSession = new CyrinxQualificationSession();
 type CyrinxCaptureCase = CyrinxBrowserCase & { generation: number; baseSampleIndex?: number; nextSampleIndex: number };
-type CyrinxTransmitCase = CyrinxBrowserCase & { generation: number };
+type CyrinxTransmitCase = CyrinxBrowserCase & { generation: number; completionSent: boolean };
 let captureCase: CyrinxCaptureCase | undefined;
 let captureGeneration = 0;
 let transmitCase: CyrinxTransmitCase | undefined;
@@ -223,8 +223,8 @@ function handleBridgeMessage(socket: WebSocket, event: MessageEvent): void {
             const frame = encodeControlFrame({ type: 5, epoch: activeTransmit.epoch, sequence: bridgeSequence, payload });
             socket.send(frame);
             bridgeSequence += 1n;
-            cyrinxCaseWatchdog.complete(activeTransmit);
-            transmitCase = undefined;
+            activeTransmit.completionSent = true;
+            cyrinxCaseWatchdog.markTransmitCompletionSent(activeTransmit);
           } catch {
             cyrinxCaseWatchdog.fail(activeTransmit);
           }
@@ -251,16 +251,39 @@ function handleBridgeMessage(socket: WebSocket, event: MessageEvent): void {
       const deadline = message.deadline as Record<string, unknown>; const fallback = message.fallback as Record<string, unknown> | null;
       const snapshot: CyrinxSessionSnapshot = message.codec === 'idle' ? { codec: 'idle', stage: 'idle' } : { codec: message.codec, stage: message.stage, startedAtMs: deadline.startedAtMs, deadlineAtMs: deadline.deadlineAtMs, elapsedMs: deadline.elapsedMs, ...(typeof fallback?.reasonCode === 'string' ? { reasonCode: fallback.reasonCode } : {}) } as CyrinxSessionSnapshot;
       cyrinxSession.apply(snapshot);
+      const instruction = message.instruction as Record<string, unknown> | null;
+      const authoritativeInstruction: CyrinxBrowserCase | undefined =
+        snapshot.codec === 'cyrinx'
+        && instruction
+        && (instruction.action === 'transmit' || instruction.action === 'listen')
+        && typeof instruction.caseId === 'string'
+        && (instruction.direction === 'A → B' || instruction.direction === 'B → A')
+          ? {
+              epoch,
+              caseId: instruction.caseId,
+              direction: instruction.direction,
+              mode: instruction.action,
+            }
+          : undefined;
+      const completedTransmit = transmitCase;
+      if (
+        completedTransmit?.completionSent
+        && cyrinxCaseWatchdog.completeTransmitAfterAuthoritativeSnapshot({
+          epoch,
+          codec: snapshot.codec,
+          terminal: message.terminal === true,
+          ...(authoritativeInstruction ? { instruction: authoritativeInstruction } : {}),
+        })
+      ) transmitCase = undefined;
       bridgeDelivery = snapshot.codec === 'cyrinx' ? `Cyrinx gate: ${snapshot.stage} · deadline ${new Date(snapshot.deadlineAtMs!).toLocaleTimeString()}` : `Cyrinx rejected: ${snapshot.reasonCode}; Quiet is runner-authorized`;
       if (cyrinxSession.shouldStartQuiet) { cyrinxSession.markQuietStarted(); void startQuietFallback(); }
-      const instruction = message.instruction as Record<string, unknown> | null;
-      if (snapshot.codec === 'cyrinx' && instruction && (instruction.action === 'transmit' || instruction.action === 'listen') && typeof instruction.caseId === 'string' && (instruction.direction === 'A → B' || instruction.direction === 'B → A') && bridge?.readyState === WebSocket.OPEN) {
-        const payload = new TextEncoder().encode(JSON.stringify({ action: 'accept_cyrinx_instruction', caseId: instruction.caseId, direction: instruction.direction }));
+      if (snapshot.codec === 'cyrinx' && authoritativeInstruction && bridge?.readyState === WebSocket.OPEN && !cyrinxCaseWatchdog.owns(authoritativeInstruction)) {
+        const payload = new TextEncoder().encode(JSON.stringify({ action: 'accept_cyrinx_instruction', caseId: authoritativeInstruction.caseId, direction: authoritativeInstruction.direction }));
         bridge.send(encodeControlFrame({ type: 5, epoch, sequence: bridgeSequence++, payload }));
-        if (instruction.action === 'listen') { transmitCase = undefined; armCyrinxCapture(instruction.caseId, instruction.direction); }
+        if (authoritativeInstruction.mode === 'listen') { transmitCase = undefined; armCyrinxCapture(authoritativeInstruction.caseId, authoritativeInstruction.direction); }
         else {
           clearCyrinxCapture();
-          const active: CyrinxTransmitCase = { epoch, generation: ++captureGeneration, caseId: instruction.caseId, direction: instruction.direction, mode: 'transmit' };
+          const active: CyrinxTransmitCase = { ...authoritativeInstruction, generation: ++captureGeneration, completionSent: false };
           transmitCase = active;
           cyrinxCaseWatchdog.arm(active);
         }

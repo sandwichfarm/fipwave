@@ -12,6 +12,13 @@ export interface CyrinxBrowserCase {
   mode: CyrinxBrowserCaseMode;
 }
 
+export interface CyrinxAuthoritativeCaseSnapshot {
+  epoch: number;
+  codec: 'idle' | 'cyrinx' | 'quiet' | 'unqualified';
+  terminal: boolean;
+  instruction?: CyrinxBrowserCase;
+}
+
 type TimerHandle = ReturnType<typeof globalThis.setTimeout>;
 
 interface TimerApi {
@@ -42,6 +49,7 @@ export function sameCyrinxBrowserCase(left: CyrinxBrowserCase | undefined, right
  */
 export class CyrinxCaseWatchdog {
   #active: CyrinxBrowserCase | undefined;
+  #transmitCompletionSent = false;
   #timer: TimerHandle | undefined;
   #reported = new Set<string>();
 
@@ -57,10 +65,12 @@ export class CyrinxCaseWatchdog {
     if (sameCyrinxBrowserCase(this.#active, value)) return;
     this.cancel();
     this.#active = value;
+    this.#transmitCompletionSent = false;
     this.#timer = this.timers.setTimeout(() => {
       const active = this.#active;
       if (!active) return;
       this.#active = undefined;
+      this.#transmitCompletionSent = false;
       this.#timer = undefined;
       this.emitOnce(active);
     }, this.timeoutMs);
@@ -68,6 +78,28 @@ export class CyrinxCaseWatchdog {
 
   owns(value: CyrinxBrowserCase): boolean {
     return sameCyrinxBrowserCase(this.#active, value);
+  }
+
+  markTransmitCompletionSent(value: CyrinxBrowserCase): boolean {
+    if (value.mode !== 'transmit' || !sameCyrinxBrowserCase(this.#active, value)) return false;
+    this.#transmitCompletionSent = true;
+    return true;
+  }
+
+  completeTransmitAfterAuthoritativeSnapshot(snapshot: CyrinxAuthoritativeCaseSnapshot): boolean {
+    const active = this.#active;
+    if (
+      !active
+      || active.mode !== 'transmit'
+      || active.epoch !== snapshot.epoch
+      || !this.#transmitCompletionSent
+    ) return false;
+    const advanced = snapshot.codec !== 'cyrinx'
+      || snapshot.terminal
+      || (snapshot.instruction !== undefined && !sameCyrinxBrowserCase(active, snapshot.instruction));
+    if (!advanced) return false;
+    this.clearActive();
+    return true;
   }
 
   fail(value: CyrinxBrowserCase): boolean {
@@ -91,6 +123,7 @@ export class CyrinxCaseWatchdog {
     if (this.#timer !== undefined) this.timers.clearTimeout(this.#timer);
     this.#timer = undefined;
     this.#active = undefined;
+    this.#transmitCompletionSent = false;
   }
 
   private emitOnce(value: CyrinxBrowserCase): void {
