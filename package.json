@@ -15,7 +15,7 @@
     "test:browser": "playwright test --pass-with-no-tests",
     "test:skeleton": "vitest run tests/skeleton.test.ts",
     "build": "vite build",
-    "generate:corpus": "node --input-type=module --eval \"console.log('Corpus generation is introduced by Plan 01-04.')\" --",
+    "generate:corpus": "node scripts/generate-corpus.mjs",
     "qualify:fixture": "node --input-type=module --eval \"console.log('Fixture qualification is introduced by Plan 01-05.')\" --",
     "qualify:verify": "node --input-type=module --eval \"console.log('Physical qualification verification is introduced by Plan 01-07.')\" --",
     "test:compose": "node --input-type=module --eval \"console.log('Compose TUN preflight is introduced by Plan 01-06.')\" --",

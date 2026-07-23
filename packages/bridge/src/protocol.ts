@@ -1,0 +1,112 @@
+/** The fixed, little-endian v1 envelope shared by browser and local bridge. */
+export const FWAV_MAGIC = 'FWAV';
+export const FWAV_VERSION = 1;
+export const HEADER_BYTES = 32;
+export const MAX_MESSAGE_BYTES = 256 * 1024;
+export const MAX_PAYLOAD_BYTES = MAX_MESSAGE_BYTES - HEADER_BYTES;
+
+export enum MessageType {
+  HELLO = 1,
+  AUDIO_SETTINGS = 2,
+  PCM_CAPTURE = 3,
+  PCM_PLAYBACK = 4,
+  QUALIFICATION_CASE = 5,
+  QUALIFICATION_RESULT = 6,
+  ERROR = 7,
+  RESET = 8,
+}
+
+export enum PcmEncoding {
+  NONE = 0,
+  FLOAT32_LE = 1,
+}
+
+export interface FwavFrame {
+  type: MessageType;
+  flags?: number;
+  epoch: number;
+  sequence: bigint;
+  sampleRate?: number;
+  channels?: number;
+  encoding?: PcmEncoding;
+  payload: Buffer;
+}
+
+function fail(message: string): never {
+  throw new Error(`FWAV ${message}`);
+}
+
+function isMessageType(value: number): value is MessageType {
+  return value >= MessageType.HELLO && value <= MessageType.RESET;
+}
+
+function validateInteger(value: number, name: string, maximum: number): void {
+  if (!Number.isInteger(value) || value < 0 || value > maximum) {
+    fail(`${name} is out of range`);
+  }
+}
+
+function validateFrame(frame: FwavFrame): Required<Pick<FwavFrame, 'flags' | 'sampleRate' | 'channels' | 'encoding'>> & FwavFrame {
+  if (!isMessageType(frame.type)) fail('message type is unsupported');
+  validateInteger(frame.flags ?? 0, 'flags', 0xffff);
+  validateInteger(frame.epoch, 'epoch', 0xffff_ffff);
+  if (frame.sequence < 0n || frame.sequence > 0xffff_ffff_ffff_ffffn) fail('sequence is out of range');
+  if (!Buffer.isBuffer(frame.payload)) fail('payload must be binary');
+  if (frame.payload.byteLength > MAX_PAYLOAD_BYTES) fail('message exceeds the 256 KiB cap');
+
+  const sampleRate = frame.sampleRate ?? 0;
+  const channels = frame.channels ?? 0;
+  const encoding = frame.encoding ?? PcmEncoding.NONE;
+  validateInteger(sampleRate, 'sample rate', 0xffff_ffff);
+  validateInteger(channels, 'channel count', 0xffff);
+  validateInteger(encoding, 'encoding', 0xffff);
+  const isPcm = frame.type === MessageType.PCM_CAPTURE || frame.type === MessageType.PCM_PLAYBACK;
+  if (isPcm) {
+    if (sampleRate === 0) fail('sample rate must be declared for PCM');
+    if (channels === 0) fail('channel count must be declared for PCM');
+    if (encoding !== PcmEncoding.FLOAT32_LE) fail('PCM encoding is unsupported');
+    if (frame.payload.byteLength % (Float32Array.BYTES_PER_ELEMENT * channels) !== 0) fail('PCM payload is not frame aligned');
+  } else if (sampleRate !== 0 || channels !== 0 || encoding !== PcmEncoding.NONE) {
+    fail('non-PCM messages must not declare PCM format');
+  }
+  return { ...frame, flags: frame.flags ?? 0, sampleRate, channels, encoding };
+}
+
+export function encodeFrame(frame: FwavFrame): Buffer {
+  const valid = validateFrame(frame);
+  const output = Buffer.alloc(HEADER_BYTES + valid.payload.byteLength);
+  output.write(FWAV_MAGIC, 0, 'ascii');
+  output.writeUInt8(FWAV_VERSION, 4);
+  output.writeUInt8(valid.type, 5);
+  output.writeUInt16LE(valid.flags, 6);
+  output.writeUInt32LE(valid.payload.byteLength, 8);
+  output.writeUInt32LE(valid.epoch, 12);
+  output.writeBigUInt64LE(valid.sequence, 16);
+  output.writeUInt32LE(valid.sampleRate, 24);
+  output.writeUInt16LE(valid.channels, 28);
+  output.writeUInt16LE(valid.encoding, 30);
+  valid.payload.copy(output, HEADER_BYTES);
+  return output;
+}
+
+export function decodeFrame(input: Buffer): FwavFrame {
+  if (!Buffer.isBuffer(input)) fail('input must be binary');
+  if (input.byteLength < HEADER_BYTES) fail('message is shorter than the 32-byte header');
+  if (input.byteLength > MAX_MESSAGE_BYTES) fail('message exceeds the 256 KiB cap');
+  if (input.toString('ascii', 0, 4) !== FWAV_MAGIC) fail('magic is invalid');
+  if (input.readUInt8(4) !== FWAV_VERSION) fail('version is unsupported');
+  const type = input.readUInt8(5);
+  if (!isMessageType(type)) fail('message type is unsupported');
+  const payloadLength = input.readUInt32LE(8);
+  if (payloadLength > MAX_PAYLOAD_BYTES || input.byteLength !== HEADER_BYTES + payloadLength) fail('declared payload length does not match message');
+  return validateFrame({
+    type,
+    flags: input.readUInt16LE(6),
+    epoch: input.readUInt32LE(12),
+    sequence: input.readBigUInt64LE(16),
+    sampleRate: input.readUInt32LE(24),
+    channels: input.readUInt16LE(28),
+    encoding: input.readUInt16LE(30) as PcmEncoding,
+    payload: Buffer.from(input.subarray(HEADER_BYTES)),
+  });
+}

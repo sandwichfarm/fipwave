@@ -1,0 +1,356 @@
+{
+  "schemaVersion": 1,
+  "seed": "fipwave-phase-01-corpus-v1",
+  "cases": [
+    {
+      "id": "a-to-b-256-01",
+      "direction": "A → B",
+      "size": 256,
+      "pattern": "all-zero",
+      "sha256": "5341e6b2646979a70e57653007a1f310169421ec9bdd9f1a5648f75ade005af1"
+    },
+    {
+      "id": "a-to-b-256-02",
+      "direction": "A → B",
+      "size": 256,
+      "pattern": "all-ff",
+      "sha256": "3d6876a0146de8576eb2395a858de1213d1b92c65b779df3a331cfd5a4584546"
+    },
+    {
+      "id": "a-to-b-256-03",
+      "direction": "A → B",
+      "size": 256,
+      "pattern": "incrementing",
+      "sha256": "feb3943c6cbca3f3bf6491b0c021f40368536c7fd54c418a3a754ced89351880"
+    },
+    {
+      "id": "a-to-b-256-04",
+      "direction": "A → B",
+      "size": 256,
+      "pattern": "alternating",
+      "sha256": "f27a3a59770a5641860de605db1cca7212f7132cda71d0217901c4c347ba15ab"
+    },
+    {
+      "id": "a-to-b-256-05",
+      "direction": "A → B",
+      "size": 256,
+      "pattern": "pseudorandom",
+      "sha256": "b45d68b0907a82373581e4a481f25360a09966978c2cf27292be3edc793ebd33"
+    },
+    {
+      "id": "a-to-b-256-06",
+      "direction": "A → B",
+      "size": 256,
+      "pattern": "all-zero",
+      "sha256": "5341e6b2646979a70e57653007a1f310169421ec9bdd9f1a5648f75ade005af1"
+    },
+    {
+      "id": "a-to-b-256-07",
+      "direction": "A → B",
+      "size": 256,
+      "pattern": "all-ff",
+      "sha256": "3d6876a0146de8576eb2395a858de1213d1b92c65b779df3a331cfd5a4584546"
+    },
+    {
+      "id": "a-to-b-256-08",
+      "direction": "A → B",
+      "size": 256,
+      "pattern": "incrementing",
+      "sha256": "dd6ffa2e9eca842e3b1385edad940cf4581c200217cc881b76381bcc2b2bfe31"
+    },
+    {
+      "id": "a-to-b-256-09",
+      "direction": "A → B",
+      "size": 256,
+      "pattern": "alternating",
+      "sha256": "200bd68ee0036a1c243c95ed34ce125bb51fb50edbd9b2aa1c79a0356f4bb508"
+    },
+    {
+      "id": "a-to-b-256-10",
+      "direction": "A → B",
+      "size": 256,
+      "pattern": "pseudorandom",
+      "sha256": "9f6cfcdd055cfa01bfd2dac28b7912c015946b098babaa2be27da49b38994f89"
+    },
+    {
+      "id": "a-to-b-256-11",
+      "direction": "A → B",
+      "size": 256,
+      "pattern": "all-zero",
+      "sha256": "5341e6b2646979a70e57653007a1f310169421ec9bdd9f1a5648f75ade005af1"
+    },
+    {
+      "id": "a-to-b-256-12",
+      "direction": "A → B",
+      "size": 256,
+      "pattern": "all-ff",
+      "sha256": "3d6876a0146de8576eb2395a858de1213d1b92c65b779df3a331cfd5a4584546"
+    },
+    {
+      "id": "a-to-b-256-13",
+      "direction": "A → B",
+      "size": 256,
+      "pattern": "incrementing",
+      "sha256": "f375b4a71df87ae9601746f45a1b12fdf19e8dd46a942e9cf59086b7df771763"
+    },
+    {
+      "id": "a-to-b-256-14",
+      "direction": "A → B",
+      "size": 256,
+      "pattern": "alternating",
+      "sha256": "f27a3a59770a5641860de605db1cca7212f7132cda71d0217901c4c347ba15ab"
+    },
+    {
+      "id": "a-to-b-256-15",
+      "direction": "A → B",
+      "size": 256,
+      "pattern": "pseudorandom",
+      "sha256": "a540c9291b2c5175125deff725d1d558d526549b3624d0601432f82ac3f70a1a"
+    },
+    {
+      "id": "a-to-b-256-16",
+      "direction": "A → B",
+      "size": 256,
+      "pattern": "all-zero",
+      "sha256": "5341e6b2646979a70e57653007a1f310169421ec9bdd9f1a5648f75ade005af1"
+    },
+    {
+      "id": "a-to-b-256-17",
+      "direction": "A → B",
+      "size": 256,
+      "pattern": "all-ff",
+      "sha256": "3d6876a0146de8576eb2395a858de1213d1b92c65b779df3a331cfd5a4584546"
+    },
+    {
+      "id": "a-to-b-256-18",
+      "direction": "A → B",
+      "size": 256,
+      "pattern": "incrementing",
+      "sha256": "2d90a1e62c68792ebe959115f2f229f70c2a2383f4751feee91790557479948f"
+    },
+    {
+      "id": "a-to-b-256-19",
+      "direction": "A → B",
+      "size": 256,
+      "pattern": "alternating",
+      "sha256": "200bd68ee0036a1c243c95ed34ce125bb51fb50edbd9b2aa1c79a0356f4bb508"
+    },
+    {
+      "id": "a-to-b-256-20",
+      "direction": "A → B",
+      "size": 256,
+      "pattern": "pseudorandom",
+      "sha256": "28aeec29f9d8df3fde2767450a7bd1e5f6c0a318889fa1e1fafe4acb2f2fb244"
+    },
+    {
+      "id": "a-to-b-1536-01",
+      "direction": "A → B",
+      "size": 1536,
+      "pattern": "all-zero",
+      "sha256": "80422bc3d307b4a25bdafcc84ac7fb01cb55a09810e8b0f37bb12e0edb5c48ca"
+    },
+    {
+      "id": "a-to-b-1536-02",
+      "direction": "A → B",
+      "size": 1536,
+      "pattern": "all-ff",
+      "sha256": "e6d1b616fc8f6230c07d0e573527b701e7f377803916cc22f51faa21917d9160"
+    },
+    {
+      "id": "a-to-b-1536-03",
+      "direction": "A → B",
+      "size": 1536,
+      "pattern": "incrementing",
+      "sha256": "18005dd022aec76604509addf4281b6a53b34752a1cd976c78e136198c2720bb"
+    },
+    {
+      "id": "a-to-b-1536-04",
+      "direction": "A → B",
+      "size": 1536,
+      "pattern": "alternating",
+      "sha256": "e6c168f9928a0e083fed4af23bc8aefd672dc4e4df5bcec91d7fd460e722a3c3"
+    },
+    {
+      "id": "a-to-b-1536-05",
+      "direction": "A → B",
+      "size": 1536,
+      "pattern": "pseudorandom",
+      "sha256": "da1e752cfe2b0fe460a276108b1f60f7c6dc96fc3e336f6b4d77249a51e0cc96"
+    },
+    {
+      "id": "b-to-a-256-01",
+      "direction": "B → A",
+      "size": 256,
+      "pattern": "all-zero",
+      "sha256": "5341e6b2646979a70e57653007a1f310169421ec9bdd9f1a5648f75ade005af1"
+    },
+    {
+      "id": "b-to-a-256-02",
+      "direction": "B → A",
+      "size": 256,
+      "pattern": "all-ff",
+      "sha256": "3d6876a0146de8576eb2395a858de1213d1b92c65b779df3a331cfd5a4584546"
+    },
+    {
+      "id": "b-to-a-256-03",
+      "direction": "B → A",
+      "size": 256,
+      "pattern": "incrementing",
+      "sha256": "feb3943c6cbca3f3bf6491b0c021f40368536c7fd54c418a3a754ced89351880"
+    },
+    {
+      "id": "b-to-a-256-04",
+      "direction": "B → A",
+      "size": 256,
+      "pattern": "alternating",
+      "sha256": "f27a3a59770a5641860de605db1cca7212f7132cda71d0217901c4c347ba15ab"
+    },
+    {
+      "id": "b-to-a-256-05",
+      "direction": "B → A",
+      "size": 256,
+      "pattern": "pseudorandom",
+      "sha256": "0b97a0d581a35644a711e87fc623098aa2a6e3d9236b419fd313175d48413706"
+    },
+    {
+      "id": "b-to-a-256-06",
+      "direction": "B → A",
+      "size": 256,
+      "pattern": "all-zero",
+      "sha256": "5341e6b2646979a70e57653007a1f310169421ec9bdd9f1a5648f75ade005af1"
+    },
+    {
+      "id": "b-to-a-256-07",
+      "direction": "B → A",
+      "size": 256,
+      "pattern": "all-ff",
+      "sha256": "3d6876a0146de8576eb2395a858de1213d1b92c65b779df3a331cfd5a4584546"
+    },
+    {
+      "id": "b-to-a-256-08",
+      "direction": "B → A",
+      "size": 256,
+      "pattern": "incrementing",
+      "sha256": "dd6ffa2e9eca842e3b1385edad940cf4581c200217cc881b76381bcc2b2bfe31"
+    },
+    {
+      "id": "b-to-a-256-09",
+      "direction": "B → A",
+      "size": 256,
+      "pattern": "alternating",
+      "sha256": "200bd68ee0036a1c243c95ed34ce125bb51fb50edbd9b2aa1c79a0356f4bb508"
+    },
+    {
+      "id": "b-to-a-256-10",
+      "direction": "B → A",
+      "size": 256,
+      "pattern": "pseudorandom",
+      "sha256": "d5e14d8b7e6ca9b6a405a0764acde9b781bda6879aeca35b20349e294d1cf518"
+    },
+    {
+      "id": "b-to-a-256-11",
+      "direction": "B → A",
+      "size": 256,
+      "pattern": "all-zero",
+      "sha256": "5341e6b2646979a70e57653007a1f310169421ec9bdd9f1a5648f75ade005af1"
+    },
+    {
+      "id": "b-to-a-256-12",
+      "direction": "B → A",
+      "size": 256,
+      "pattern": "all-ff",
+      "sha256": "3d6876a0146de8576eb2395a858de1213d1b92c65b779df3a331cfd5a4584546"
+    },
+    {
+      "id": "b-to-a-256-13",
+      "direction": "B → A",
+      "size": 256,
+      "pattern": "incrementing",
+      "sha256": "f375b4a71df87ae9601746f45a1b12fdf19e8dd46a942e9cf59086b7df771763"
+    },
+    {
+      "id": "b-to-a-256-14",
+      "direction": "B → A",
+      "size": 256,
+      "pattern": "alternating",
+      "sha256": "f27a3a59770a5641860de605db1cca7212f7132cda71d0217901c4c347ba15ab"
+    },
+    {
+      "id": "b-to-a-256-15",
+      "direction": "B → A",
+      "size": 256,
+      "pattern": "pseudorandom",
+      "sha256": "e9c12fe86ea0827166a5db0fff73b9ece98a5df617ad0fa3da817a1c3149e85e"
+    },
+    {
+      "id": "b-to-a-256-16",
+      "direction": "B → A",
+      "size": 256,
+      "pattern": "all-zero",
+      "sha256": "5341e6b2646979a70e57653007a1f310169421ec9bdd9f1a5648f75ade005af1"
+    },
+    {
+      "id": "b-to-a-256-17",
+      "direction": "B → A",
+      "size": 256,
+      "pattern": "all-ff",
+      "sha256": "3d6876a0146de8576eb2395a858de1213d1b92c65b779df3a331cfd5a4584546"
+    },
+    {
+      "id": "b-to-a-256-18",
+      "direction": "B → A",
+      "size": 256,
+      "pattern": "incrementing",
+      "sha256": "2d90a1e62c68792ebe959115f2f229f70c2a2383f4751feee91790557479948f"
+    },
+    {
+      "id": "b-to-a-256-19",
+      "direction": "B → A",
+      "size": 256,
+      "pattern": "alternating",
+      "sha256": "200bd68ee0036a1c243c95ed34ce125bb51fb50edbd9b2aa1c79a0356f4bb508"
+    },
+    {
+      "id": "b-to-a-256-20",
+      "direction": "B → A",
+      "size": 256,
+      "pattern": "pseudorandom",
+      "sha256": "757b6ab8e75e524ef8302e0b9d21eff0fdcc12ae2b5c1a09a666cfc6d8d25540"
+    },
+    {
+      "id": "b-to-a-1536-01",
+      "direction": "B → A",
+      "size": 1536,
+      "pattern": "all-zero",
+      "sha256": "80422bc3d307b4a25bdafcc84ac7fb01cb55a09810e8b0f37bb12e0edb5c48ca"
+    },
+    {
+      "id": "b-to-a-1536-02",
+      "direction": "B → A",
+      "size": 1536,
+      "pattern": "all-ff",
+      "sha256": "e6d1b616fc8f6230c07d0e573527b701e7f377803916cc22f51faa21917d9160"
+    },
+    {
+      "id": "b-to-a-1536-03",
+      "direction": "B → A",
+      "size": 1536,
+      "pattern": "incrementing",
+      "sha256": "18005dd022aec76604509addf4281b6a53b34752a1cd976c78e136198c2720bb"
+    },
+    {
+      "id": "b-to-a-1536-04",
+      "direction": "B → A",
+      "size": 1536,
+      "pattern": "alternating",
+      "sha256": "e6c168f9928a0e083fed4af23bc8aefd672dc4e4df5bcec91d7fd460e722a3c3"
+    },
+    {
+      "id": "b-to-a-1536-05",
+      "direction": "B → A",
+      "size": 1536,
+      "pattern": "pseudorandom",
+      "sha256": "cc12d2243647a6f3386fffa16fff229455bbc206ba32973447700a56862b1922"
+    }
+  ]
+}

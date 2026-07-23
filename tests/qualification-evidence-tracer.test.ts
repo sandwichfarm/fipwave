@@ -11,6 +11,7 @@ describe('qualification evidence tracer', () => {
   it('carries a committed 256-byte fixture case through FWAV and an atomic non-physical report', async () => {
     const entry = generateCorpus().cases.find((candidate: { size: number; direction: string }) => candidate.size === 256 && candidate.direction === 'A → B');
     expect(entry).toBeDefined();
+    if (!entry) throw new Error('expected committed 256-byte A → B corpus case');
     const frame = decodeFrame(encodeFrame({ type: MessageType.QUALIFICATION_CASE, epoch: 1, sequence: 1n, payload: Buffer.from(JSON.stringify(entry)) }));
     expect(JSON.parse(frame.payload.toString('utf8'))).toEqual(entry);
     const report: MachineReport = {
@@ -20,7 +21,7 @@ describe('qualification evidence tracer', () => {
       codec: { commit: 'fixture', profile: 'fixture', advertisedMtu: 1357 },
       audio: { contextSampleRate: 48_000, captureSampleRate: 48_000, channels: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
       queues: { captureHighWaterBytes: 0, captureHighWaterMs: 0, playbackHighWaterBytes: 0, playbackHighWaterMs: 0, discontinuities: 0 },
-      results: [{ epoch: 1, direction: entry.direction, caseId: entry.id, digest: entry.sha256, acquisitionMs: 0, airtimeMs: 0, deliveryCount: 1, bytePerfect: true }], complete: true,
+      results: [{ epoch: 1, direction: entry.direction as 'A → B', caseId: entry.id, digest: entry.sha256, acquisitionMs: 0, airtimeMs: 0, deliveryCount: 1, bytePerfect: true }], complete: true,
     };
     const reportPath = path.join(await mkdtemp(path.join(tmpdir(), 'fipwave-tracer-')), 'fixture.json');
     await writeMachineReport(reportPath, report);
