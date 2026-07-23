@@ -1,0 +1,16 @@
+:root { color: #e2e8f0; background: #0f172a; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; }
+#app { max-width: 1160px; margin: 0 auto; padding: 24px; }
+h1, h2 { color: #f8fafc; } h1 { margin-bottom: 4px; } h2 { margin-top: 0; font-size: 1.1rem; }
+.measurements, table { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+.status { font-weight: 700; } .status-ready { color: #22c55e; } .status-failed, .status-disconnected { color: #fb7185; } .status-requesting { color: #facc15; }
+.console-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 16px; }
+.card { background: #172554; border: 1px solid #334155; border-radius: 10px; padding: 18px; margin-top: 16px; overflow-wrap: anywhere; }
+.operator-card { position: sticky; top: 12px; align-self: start; }
+button { min-height: 44px; padding: 10px 16px; border: 1px solid #38bdf8; border-radius: 6px; background: #0ea5e9; color: #082f49; font-weight: 700; cursor: pointer; margin: 4px 8px 4px 0; }
+button.secondary { background: transparent; color: #e2e8f0; } button:disabled { opacity: .55; cursor: wait; }
+button:focus-visible { outline: 3px solid #38bdf8; outline-offset: 2px; }
+table { width: 100%; border-collapse: collapse; } th, td { border-top: 1px solid #475569; padding: 8px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+@media (max-width: 1023px) { #app { padding: 16px; } .console-grid { display: block; } .operator-card { position: static; } button { width: 100%; margin: 5px 0; } }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto; } }
