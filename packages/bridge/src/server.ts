@@ -1,5 +1,6 @@
-import { randomUUID } from 'node:crypto';
-import { lstat, mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { lstat, mkdir, readFile, realpath, rename, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import path from 'node:path';
@@ -12,7 +13,15 @@ export const HEADER_BYTES = 32;
 export const MAX_MESSAGE_BYTES = 256 * 1024;
 export const AUDIO_SETTINGS_MESSAGE_TYPE = MessageType.AUDIO_SETTINGS;
 const MAX_QUEUE_AGE_MS = 5_000;
-const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+function findProjectRoot(from: string): string {
+  let current = from;
+  while (path.dirname(current) !== current) {
+    if (existsSync(path.join(current, 'package.json'))) return current;
+    current = path.dirname(current);
+  }
+  throw new Error('FIPS over Sound project root could not be located');
+}
+const PROJECT_ROOT = findProjectRoot(path.dirname(fileURLToPath(import.meta.url)));
 const MODEM_UI_PATH = path.join(PROJECT_ROOT, 'apps/modem-ui/index.html');
 
 export interface QualificationReport {
@@ -51,6 +60,7 @@ function contentType(file: string): string {
   return 'application/octet-stream';
 }
 function immutableConfig(config: RunnerQualificationConfig): RunnerQualificationConfig { return Object.freeze({ ...config }); }
+function sha256(body: Buffer): string { return createHash('sha256').update(body).digest('hex'); }
 function hasForbiddenAuthority(value: unknown): boolean {
   const forbidden = new Set(['machineId', 'role', 'reportTarget', 'report', 'tunEvidence', 'evidenceMode', 'evidenceClass', 'hostIdentity']);
   if (!value || typeof value !== 'object') return false;
@@ -89,10 +99,15 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   await mkdir(options.artifactDir, { recursive: true });
   const config = options.qualificationConfig && immutableConfig(options.qualificationConfig);
   const uiRoot = options.uiDir ? await realpath(options.uiDir) : undefined;
-  const assets = new Map((options.codecAssets ?? []).filter((asset) => asset.browserServing).map((asset) => [asset.filename, asset]));
+  const assets = new Map<string, CodecAsset>();
+  for (const asset of options.codecAssets ?? []) {
+    if (!asset.browserServing) continue;
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(asset.filename) || assets.has(asset.filename) || !/^[a-f0-9]{64}$/.test(asset.sha256)) fail('codec asset allowlist is invalid');
+    assets.set(asset.filename, asset);
+  }
   const assetRoot = options.codecAssetDir ? await realpath(options.codecAssetDir) : undefined;
   if (assets.size && !assetRoot) fail('codec assets require a verified cache directory');
-  const serveFile = async (response: import('node:http').ServerResponse, root: string, requestPath: string, mime?: string): Promise<void> => {
+  const serveFile = async (response: import('node:http').ServerResponse, root: string, requestPath: string, mime?: string, asset?: CodecAsset, headOnly = false): Promise<void> => {
     if (requestPath.includes('\\') || requestPath.split('/').some((segment) => segment === '.' || segment === '..' || segment === '')) { response.writeHead(404).end(); return; }
     const candidate = path.resolve(root, requestPath);
     if (candidate !== root && !candidate.startsWith(`${root}${path.sep}`)) { response.writeHead(404).end(); return; }
@@ -102,7 +117,10 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       const resolved = await realpath(candidate);
       if (!resolved.startsWith(`${root}${path.sep}`)) { response.writeHead(404).end(); return; }
       const body = await readFile(resolved);
-      response.writeHead(200, { 'content-type': mime ?? contentType(requestPath), 'content-length': String(body.byteLength), 'x-content-type-options': 'nosniff', 'cache-control': 'public, max-age=31536000, immutable' }); response.end(body);
+      if (asset && sha256(body) !== asset.sha256) { response.writeHead(404).end(); return; }
+      const headers: Record<string, string> = { 'content-type': mime ?? contentType(requestPath), 'content-length': String(body.byteLength), 'x-content-type-options': 'nosniff', 'cache-control': 'public, max-age=31536000, immutable' };
+      if (asset) headers.etag = `"sha256-${asset.sha256}"`;
+      response.writeHead(200, headers); response.end(headOnly ? undefined : body);
     } catch { response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }); response.end('Not found'); }
   };
   const server = createServer((request, response) => {
@@ -113,7 +131,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       const filename = url.pathname.slice('/codec-assets/'.length);
       const asset = !url.search && assets.get(filename);
       if (!asset || !assetRoot || filename !== encodeURIComponent(filename)) { response.writeHead(404).end(); return; }
-      void serveFile(response, assetRoot, filename, asset.mimeType); return;
+      void serveFile(response, assetRoot, filename, asset.mimeType, asset, request.method === 'HEAD'); return;
     }
     if (url.pathname === '/' && !url.search) { if (uiRoot) { void serveFile(response, uiRoot, 'index.html'); return; } void readFile(MODEM_UI_PATH).then((page) => { response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); response.end(page); }).catch(() => { response.writeHead(404).end(); }); return; }
     if (uiRoot && !url.search) { void serveFile(response, uiRoot, url.pathname.slice(1)); return; }

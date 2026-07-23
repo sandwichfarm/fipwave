@@ -29,15 +29,24 @@ test('production origin serves only immutable, allowlisted codec files with fixe
     '/codec-assets/nope.js',
   ]) expect((await request.get(`${origin}${pathname}`)).status()).toBe(404);
 
+  const browserRequests: string[] = [];
+  page.on('request', (entry) => browserRequests.push(entry.url()));
   await page.goto(`${origin}/`);
   await page.addScriptTag({ url: `${origin}/codec-assets/quiet.js` });
-  await page.addScriptTag({ url: `${origin}/codec-assets/quiet-emscripten.js` });
-  await expect.poll(() => page.evaluate(async () => new Promise<string>((resolve, reject) => {
-    const quiet = (window as Window & { Quiet?: { init(options: { profilesPrefix: string; memoryInitializerPrefix: string; libfecPrefix: string; onReady: () => void; onError: (reason: string) => void }): void } }).Quiet;
-    if (!quiet) { reject(new Error('Quiet global is unavailable')); return; }
-    quiet.init({
+  await page.evaluate(() => {
+    const target = window as Window & { Quiet?: { init(options: { profilesPrefix: string; memoryInitializerPrefix: string; libfecPrefix: string; onReady: () => void; onError: (reason: string) => void }): void }; quietInitialization?: string };
+    target.quietInitialization = 'pending';
+    target.Quiet?.init({
       profilesPrefix: '/codec-assets/', memoryInitializerPrefix: '/codec-assets/', libfecPrefix: '/codec-assets/',
-      onReady: () => resolve('ready'), onError: reject,
+      onReady: () => { target.quietInitialization = 'ready'; },
+      onError: (reason) => { target.quietInitialization = `error:${reason}`; },
     });
-  })), { timeout: 15_000 }).toBe('ready');
+  });
+  await page.addScriptTag({ url: `${origin}/codec-assets/libfec.js` });
+  await page.addScriptTag({ url: `${origin}/codec-assets/quiet-emscripten.js` });
+  await expect.poll(() => page.evaluate(() => (window as Window & { quietInitialization?: string }).quietInitialization), { timeout: 15_000 }).toBe('ready');
+  expect(browserRequests).toEqual(expect.arrayContaining([
+    `${origin}/codec-assets/quiet.js`, `${origin}/codec-assets/quiet-emscripten.js`, `${origin}/codec-assets/quiet-emscripten.js.mem`,
+    `${origin}/codec-assets/quiet-profiles.json`, `${origin}/codec-assets/libfec.js`,
+  ]));
 });
