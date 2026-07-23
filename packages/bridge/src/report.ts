@@ -18,12 +18,14 @@ export interface MachineReport {
   queues: { captureHighWaterBytes: number; captureHighWaterMs: number; playbackHighWaterBytes: number; playbackHighWaterMs: number; discontinuities: number };
   results: Array<{ epoch: number; direction: LiteralDirection; caseId: string; digest: string; acquisitionMs: number; airtimeMs: number; deliveryCount: number; bytePerfect: boolean }>;
   complete: boolean;
+  /** Present only when the local runner, not the browser, stamped identity and host evidence. */
+  runner?: { machineId: string; role: 'A' | 'B'; reportTarget: string; evidenceClass: EvidenceClass; tunEvidence: TunEvidence };
 }
 
 export interface SelectionReport {
   schemaVersion: 1;
   expectedHosts: readonly [string, string];
-  decision: 'selected' | 'human_needed';
+  decision: 'cyrinx' | 'quiet' | 'unqualified' | 'human_needed';
   reasonCodes: string[];
   reports: [MachineReport, MachineReport];
 }
@@ -150,5 +152,24 @@ export function mergeSelection(expectedHosts: readonly [string, string], first: 
   if (reports.some((report) => report.evidenceClass !== 'Open air')) reasons.push('open_air_evidence_required');
   if (reports.some((report) => report.codec.advertisedMtu < 1357)) reasons.push('minimum_mtu_required');
   if (reports.some((report) => report.queues.discontinuities !== 0)) reasons.push('queue_discontinuity');
-  return { schemaVersion: 1, expectedHosts, decision: reasons.length === 0 ? 'selected' : 'human_needed', reasonCodes: reasons, reports };
+  const codec = reports[0].codec;
+  if (reports.some((report) => report.codec.commit !== codec.commit || report.codec.profile !== codec.profile)) reasons.push('codec_mismatch');
+  const roles = new Set(reports.map((report) => report.runner?.role));
+  for (const report of reports) {
+    const runner = report.runner;
+    if (!runner || runner.machineId !== report.machine.hostName || runner.evidenceClass !== report.evidenceClass || runner.evidenceClass !== 'Open air' || !runner.reportTarget || !runner.tunEvidence) { reasons.push('runner_authority_required'); continue; }
+    try {
+      const tun = validateTunEvidence(runner.tunEvidence);
+      if (tun.source !== 'exact_host' || tun.status !== 'passed' || TUN_EVIDENCE_CHECKS.some((check) => tun.checks[check] !== 'passed')) reasons.push('exact_host_tun_required');
+    } catch { reasons.push('exact_host_tun_required'); }
+  }
+  if (roles.size !== 2 || !roles.has('A') || !roles.has('B')) reasons.push('literal_roles_required');
+  for (const direction of ['A → B', 'B → A'] as const) {
+    const values = reports.flatMap((report) => report.results).filter((result) => result.direction === direction);
+    if (new Set(values.map((result) => result.caseId)).size !== values.length || values.some((result) => result.deliveryCount !== 1 || !result.bytePerfect)) reasons.push('duplicate_or_corrupt_case');
+    if (values.filter((result) => result.caseId.includes('-256-')).length < 19 || values.filter((result) => result.caseId.includes('-1536-')).length < 5) reasons.push('corpus_incomplete');
+  }
+  const uniqueReasons = [...new Set(reasons)];
+  const selected = codec.profile === 'audible-7k-channel-0' ? 'quiet' : codec.profile.includes('cyrinx') ? 'cyrinx' : 'unqualified';
+  return { schemaVersion: 1, expectedHosts, decision: uniqueReasons.length === 0 ? selected : selected === 'unqualified' ? 'unqualified' : 'human_needed', reasonCodes: uniqueReasons, reports };
 }

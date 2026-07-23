@@ -3,7 +3,11 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { mergeSelection, readMachineReport, validateMachineReport, validateTunEvidence, writeMachineReport, type MachineReport } from '../src/report.js';
+import { mergeSelection, readMachineReport, validateMachineReport, validateTunEvidence, writeMachineReport, type MachineReport, type TunEvidence } from '../src/report.js';
+
+function exactTun(): TunEvidence {
+  return { schemaVersion: 1, source: 'exact_host', status: 'passed', image: 'alpine:3.21.3@sha256:a8560b36e8b8210634f77d9f7f9efd7ffa463e380b75e2e74aff4511df3ef88c', interfaceName: 'fips-preflight0', ipv6Address: 'fd42:6677:6677::1/64', authorities: { devices: ['/dev/net/tun'], capabilities: ['NET_ADMIN'], securityOptions: ['no-new-privileges:true'], privileged: false, networkMode: 'none', publishedPorts: [] }, checks: { imagePinned: 'passed', tunDevice: 'passed', netAdmin: 'passed', noNewPrivileges: 'passed', notPrivileged: 'passed', sysAdminAbsent: 'passed', hostNetworkAbsent: 'passed', loopbackPortsOnly: 'passed', interfaceCreated: 'passed', ipv6Assigned: 'passed', cleanupComplete: 'passed' }, errors: [] };
+}
 
 function report(hostName = 'alpha', evidenceClass: MachineReport['evidenceClass'] = 'Open air'): MachineReport {
   return {
@@ -51,11 +55,14 @@ describe('canonical qualification reports', () => {
     expect(() => validateMachineReport({ ...report(), queues: { ...report().queues, playbackHighWaterBytes: 256 * 1024 + 1 } })).toThrow('bound');
   });
 
-  it('fails closed unless named exact hosts have unique Open air evidence', () => {
+  it('fails closed unless named exact hosts have runner-stamped roles, exact-host TUN evidence, and complete corpus evidence', () => {
     const alpha = report('alpha');
     const beta = report('beta');
-    expect(mergeSelection(['alpha', 'beta'], alpha, beta)).toMatchObject({ decision: 'selected' });
-    expect(mergeSelection(['alpha', 'beta'], alpha, report('beta', 'Fixture'))).toMatchObject({ decision: 'human_needed' });
-    expect(mergeSelection(['alpha', 'beta'], alpha, report('other'))).toMatchObject({ decision: 'human_needed' });
+    expect(mergeSelection(['alpha', 'beta'], alpha, beta)).toMatchObject({ decision: 'unqualified', reasonCodes: expect.arrayContaining(['runner_authority_required', 'corpus_incomplete']) });
+    alpha.runner = { machineId: 'alpha', role: 'A', reportTarget: 'alpha.json', evidenceClass: 'Open air', tunEvidence: exactTun() };
+    beta.runner = { machineId: 'beta', role: 'B', reportTarget: 'beta.json', evidenceClass: 'Open air', tunEvidence: { ...exactTun(), source: 'lifecycle' } };
+    expect(mergeSelection(['alpha', 'beta'], alpha, beta)).toMatchObject({ decision: 'unqualified', reasonCodes: expect.arrayContaining(['exact_host_tun_required']) });
+    expect(mergeSelection(['alpha', 'beta'], alpha, report('beta', 'Fixture'))).toMatchObject({ decision: 'unqualified' });
+    expect(mergeSelection(['alpha', 'beta'], alpha, report('other'))).toMatchObject({ decision: 'unqualified' });
   });
 });
