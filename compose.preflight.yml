@@ -1,0 +1,14 @@
+services:
+  tun-preflight:
+    build:
+      context: .
+      dockerfile: docker/preflight.Dockerfile
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    privileged: false
+    network_mode: none
+    read_only: true

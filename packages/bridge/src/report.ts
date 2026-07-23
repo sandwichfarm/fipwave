@@ -28,9 +28,74 @@ export interface SelectionReport {
   reports: [MachineReport, MachineReport];
 }
 
+export const TUN_EVIDENCE_CHECKS = [
+  'imagePinned', 'tunDevice', 'netAdmin', 'noNewPrivileges', 'notPrivileged',
+  'sysAdminAbsent', 'hostNetworkAbsent', 'loopbackPortsOnly', 'interfaceCreated',
+  'ipv6Assigned', 'cleanupComplete',
+] as const;
+
+export type TunCheck = 'passed' | 'failed' | 'not_run';
+export type TunEvidenceSource = 'static' | 'inspect' | 'lifecycle' | 'exact_host';
+
+/**
+ * A fixed-shape record shared by the static Compose check, fake lifecycle, and
+ * exact-host capture. `source` prevents a partial check from being mistaken
+ * for a complete host qualification.
+ */
+export interface TunEvidence {
+  schemaVersion: 1;
+  source: TunEvidenceSource;
+  status: 'passed' | 'failed';
+  image: string;
+  interfaceName: 'fips-preflight0';
+  ipv6Address: 'fd42:6677:6677::1/64';
+  authorities: {
+    devices: readonly ['/dev/net/tun'];
+    capabilities: readonly ['NET_ADMIN'];
+    securityOptions: readonly ['no-new-privileges:true'];
+    privileged: false;
+    networkMode: 'none';
+    publishedPorts: readonly string[];
+  };
+  checks: Record<(typeof TUN_EVIDENCE_CHECKS)[number], TunCheck>;
+  errors: string[];
+}
+
 function fail(message: string): never { throw new Error(`qualification report ${message}`); }
 function nonEmpty(value: string, label: string): void { if (typeof value !== 'string' || value.trim() === '') fail(`${label} is required`); }
 function finiteNonNegative(value: number, label: string): void { if (!Number.isFinite(value) || value < 0) fail(`${label} is invalid`); }
+
+function hasExactKeys(value: object, keys: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  return actual.length === keys.length && actual.every((key, index) => key === [...keys].sort()[index]);
+}
+
+function exactTunArray(value: unknown, expected: readonly string[], label: string): void {
+  if (!Array.isArray(value) || value.length !== expected.length || value.some((item, index) => item !== expected[index])) fail(`TunEvidence ${label} is invalid`);
+}
+
+export function validateTunEvidence(candidate: unknown): TunEvidence {
+  const evidence = candidate as TunEvidence;
+  if (!evidence || evidence.schemaVersion !== 1) fail('TunEvidence schema version is unsupported');
+  if (!['static', 'inspect', 'lifecycle', 'exact_host'].includes(evidence.source)) fail('TunEvidence source is invalid');
+  if (evidence.status !== 'passed' && evidence.status !== 'failed') fail('TunEvidence status is invalid');
+  if (!/^alpine:3\.21\.3@sha256:[a-f0-9]{64}$/.test(evidence.image)) fail('TunEvidence image is not pinned');
+  if (evidence.interfaceName !== 'fips-preflight0' || evidence.ipv6Address !== 'fd42:6677:6677::1/64') fail('TunEvidence interface is invalid');
+  if (!evidence.authorities || !hasExactKeys(evidence.authorities, ['devices', 'capabilities', 'securityOptions', 'privileged', 'networkMode', 'publishedPorts'])) fail('TunEvidence authorities are incomplete');
+  exactTunArray(evidence.authorities.devices, ['/dev/net/tun'], 'devices');
+  exactTunArray(evidence.authorities.capabilities, ['NET_ADMIN'], 'capabilities');
+  exactTunArray(evidence.authorities.securityOptions, ['no-new-privileges:true'], 'security options');
+  if (evidence.authorities.privileged !== false || evidence.authorities.networkMode !== 'none') fail('TunEvidence authority is broader than allowed');
+  if (!Array.isArray(evidence.authorities.publishedPorts) || evidence.authorities.publishedPorts.some((port) => typeof port !== 'string' || !/^127\.0\.0\.1:|^\[::1\]:/.test(port))) fail('TunEvidence published ports are invalid');
+  if (!evidence.checks || !hasExactKeys(evidence.checks, TUN_EVIDENCE_CHECKS) || Object.values(evidence.checks).some((check) => check !== 'passed' && check !== 'failed' && check !== 'not_run')) fail('TunEvidence checks are invalid');
+  if (!Array.isArray(evidence.errors) || evidence.errors.some((error) => typeof error !== 'string' || error.trim() === '')) fail('TunEvidence errors are invalid');
+  const authorityChecks = TUN_EVIDENCE_CHECKS.slice(0, 8);
+  const lifecycleChecks = TUN_EVIDENCE_CHECKS.slice(8);
+  const required = evidence.source === 'static' || evidence.source === 'inspect' ? authorityChecks : evidence.source === 'lifecycle' ? lifecycleChecks : TUN_EVIDENCE_CHECKS;
+  const inactive = evidence.source === 'static' || evidence.source === 'inspect' ? lifecycleChecks : evidence.source === 'lifecycle' ? authorityChecks : [];
+  if (evidence.status === 'passed' && (required.some((check) => evidence.checks[check] !== 'passed') || inactive.some((check) => evidence.checks[check] !== 'not_run') || evidence.errors.length !== 0)) fail('TunEvidence passed status is inconsistent');
+  return evidence;
+}
 
 export function validateMachineReport(candidate: unknown): MachineReport {
   const report = candidate as MachineReport;
