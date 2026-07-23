@@ -8,7 +8,9 @@ type UiState = 'idle' | 'requesting' | 'ready' | 'failed' | 'disconnected';
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Modem UI root is unavailable');
 const appRoot: HTMLDivElement = app;
-const developmentDiagnostic = import.meta.env.DEV;
+// Vite's diagnostic server intentionally has no runner authority. The shipped
+// production route is always runner-backed and never uses this fixture branch.
+const developmentDiagnostic = window.location.port === '5173';
 
 let epoch = 1;
 let evidence: AppliedAudioEvidence | undefined;
