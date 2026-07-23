@@ -69,9 +69,8 @@ checks is `unqualified` with precise reason codes.
 
 A physical Quiet selection additionally requires an activated Cyrinx → Quiet
 fallback with its immutable failure/expiry reason. A Cyrinx selection must not
-claim that fallback was activated. Both reports retain the Cyrinx start,
-deadline, and elapsed timing; until Plan 01-09 supplies that trace, the current
-Quiet runner remains intentionally fail-closed for physical selection.
+claim that fallback was activated. Both reports retain the runner-owned Cyrinx
+start, deadline, elapsed timing, cold-frame authority, and terminal stage.
 
 The canonical qualification timeout is runner-owned and fixed at 30,000 ms.
 Complete-payload p95 airtime must be strictly less than one third of it
@@ -139,6 +138,10 @@ captures and reports the result. During a listen instruction the browser sends
 at most one 2.731-second capture window: 64 contiguous 2,048-sample mono
 batches, with a per-case sample offset beginning at zero. FWAV header sequence
 remains globally monotonic for anti-replay and is not a sample offset.
+Because the corpus contains consecutive cases in each direction, the runner
+also holds every transmitter for a fixed 4.5-second case interval before it
+issues the next instruction. This keeps a faster playback completion from
+overtaking the opposite laptop's bounded capture and native decode window.
 
 RESET stops local capture and audio before the runner changes epoch. It clears
 the active native case but does not restart Cyrinx or alter its original
@@ -176,11 +179,16 @@ docker compose -f compose.preflight.yml run --rm tun-preflight \
   | tee .artifacts/qualification/tun-lifecycle.log
 tail -n 1 .artifacts/qualification/tun-lifecycle.log \
   > .artifacts/qualification/tun-lifecycle.json
+node scripts/check-compose.mjs --exact-host \
+  --inspect-json .artifacts/qualification/tun-inspect.json \
+  --lifecycle-json .artifacts/qualification/tun-lifecycle.json \
+  > .artifacts/qualification/tun-exact-host.json
 docker compose -f compose.preflight.yml down --remove-orphans
 ```
 
-Save the three JSON/NDJSON outputs with the matching machine report for Plan
-01-07. The static/inspect records must report `NET_ADMIN` and
+Pass `tun-exact-host.json` to that laptop's physical qualification runner and
+save every JSON/NDJSON input with the matching machine report. The
+static/inspect records must report `NET_ADMIN` and
 `no-new-privileges:true`, exactly `/dev/net/tun`, `Privileged: false`, no
 `SYS_ADMIN`, `networkMode: "none"`, and no published ports. The lifecycle
 record must report that it created `fips-preflight0`, assigned

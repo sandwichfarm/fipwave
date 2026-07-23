@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 
 import { validateTunEvidence } from '../packages/bridge/src/report.js';
-import { checkComposeSource, validateComposeTopology, validateDockerInspect } from '../scripts/check-compose.mjs';
+import { checkComposeSource, combineExactHostEvidence, validateComposeTopology, validateDockerInspect } from '../scripts/check-compose.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const execFileAsync = promisify(execFile);
@@ -36,6 +36,39 @@ function inspect() {
       NetworkMode: 'none',
       PortBindings: {},
     },
+  };
+}
+
+function lifecycle() {
+  return {
+    schemaVersion: 1,
+    source: 'lifecycle',
+    status: 'passed',
+    image: 'alpine:3.21.3@sha256:a8560b36e8b8210634f77d9f7f9efd7ffa463e380b75e2e74aff4511df3ef88c',
+    interfaceName: 'fips-preflight0',
+    ipv6Address: 'fd42:6677:6677::1/64',
+    authorities: {
+      devices: ['/dev/net/tun'],
+      capabilities: ['NET_ADMIN'],
+      securityOptions: ['no-new-privileges:true'],
+      privileged: false,
+      networkMode: 'none',
+      publishedPorts: [],
+    },
+    checks: {
+      imagePinned: 'not_run',
+      tunDevice: 'not_run',
+      netAdmin: 'not_run',
+      noNewPrivileges: 'not_run',
+      notPrivileged: 'not_run',
+      sysAdminAbsent: 'not_run',
+      hostNetworkAbsent: 'not_run',
+      loopbackPortsOnly: 'not_run',
+      interfaceCreated: 'passed',
+      ipv6Assigned: 'passed',
+      cleanupComplete: 'passed',
+    },
+    errors: [],
   };
 }
 
@@ -73,6 +106,53 @@ describe('least-privilege Docker/TUN preflight', () => {
     expect(() => validateDockerInspect({ HostConfig: { ...inspect().HostConfig, Devices: null } })).toThrow('devices');
     expect(() => validateDockerInspect({ HostConfig: { ...inspect().HostConfig, SecurityOpt: [] } })).toThrow('security options');
     expect(() => validateDockerInspect({ HostConfig: { ...inspect().HostConfig, NetworkMode: 'host' } })).toThrow('host network');
+  });
+
+  it('combines effective authority and owned lifecycle into one exact-host record', () => {
+    const combined = combineExactHostEvidence(inspect(), lifecycle());
+    expect(validateTunEvidence(combined)).toEqual(combined);
+    expect(combined).toMatchObject({
+      source: 'exact_host',
+      status: 'passed',
+      checks: {
+        imagePinned: 'passed',
+        tunDevice: 'passed',
+        netAdmin: 'passed',
+        noNewPrivileges: 'passed',
+        notPrivileged: 'passed',
+        sysAdminAbsent: 'passed',
+        hostNetworkAbsent: 'passed',
+        loopbackPortsOnly: 'passed',
+        interfaceCreated: 'passed',
+        ipv6Assigned: 'passed',
+        cleanupComplete: 'passed',
+      },
+    });
+    expect(() => combineExactHostEvidence(inspect(), { ...lifecycle(), status: 'failed' })).toThrow('must be passed');
+    expect(() => combineExactHostEvidence(inspect(), {
+      ...lifecycle(),
+      authorities: { ...lifecycle().authorities, capabilities: ['NET_ADMIN', 'SYS_ADMIN'] },
+    })).toThrow('capabilities');
+  });
+
+  it('writes the runner-ready exact-host record from the documented CLI inputs', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'fipwave-exact-host-'));
+    const inspectPath = path.join(directory, 'inspect.json');
+    const lifecyclePath = path.join(directory, 'lifecycle.json');
+    await writeFile(inspectPath, JSON.stringify(inspect()), 'utf8');
+    await writeFile(lifecyclePath, JSON.stringify(lifecycle()), 'utf8');
+    const result = await execFileAsync(process.execPath, [
+      'scripts/check-compose.mjs',
+      '--exact-host',
+      '--inspect-json',
+      inspectPath,
+      '--lifecycle-json',
+      lifecyclePath,
+    ], { cwd: root });
+    expect(validateTunEvidence(JSON.parse(result.stdout))).toMatchObject({
+      source: 'exact_host',
+      status: 'passed',
+    });
   });
 });
 

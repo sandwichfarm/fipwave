@@ -53,6 +53,47 @@ function expectedAuthorities({ devices, capabilities, securityOptions, privilege
   return { devices, capabilities, securityOptions, privileged, networkMode, publishedPorts };
 }
 
+export function combineExactHostEvidence(inspected, lifecycle) {
+  const authority = validateDockerInspect(inspected);
+  if (!lifecycle || lifecycle.schemaVersion !== 1 || lifecycle.source !== 'lifecycle' || lifecycle.status !== 'passed') {
+    fail('exact-host lifecycle evidence must be passed');
+  }
+  const lifecycleAuthority = lifecycle.authorities;
+  if (!lifecycleAuthority) fail('exact-host lifecycle identity or authority does not match inspect');
+  const lifecycleDevices = exactSet(lifecycleAuthority.devices, ['/dev/net/tun'], 'lifecycle devices');
+  const lifecycleCapabilities = exactSet(lifecycleAuthority.capabilities, ['NET_ADMIN'], 'lifecycle capabilities');
+  const lifecycleSecurity = exactSet(lifecycleAuthority.securityOptions, ['no-new-privileges:true'], 'lifecycle security options');
+  const lifecyclePorts = loopbackPorts(lifecycleAuthority.publishedPorts, 'lifecycle published ports');
+  if (
+    lifecycle.image !== PINNED_IMAGE
+    || lifecycle.interfaceName !== INTERFACE_NAME
+    || lifecycle.ipv6Address !== IPV6_ADDRESS
+    || lifecycleAuthority.privileged !== false
+    || lifecycleAuthority.networkMode !== 'none'
+    || lifecycleDevices.some((value, index) => value !== authority.authorities.devices[index])
+    || lifecycleCapabilities.some((value, index) => value !== authority.authorities.capabilities[index])
+    || lifecycleSecurity.some((value, index) => value !== authority.authorities.securityOptions[index])
+    || lifecyclePorts.length !== authority.authorities.publishedPorts.length
+    || lifecyclePorts.some((value, index) => value !== authority.authorities.publishedPorts[index])
+  ) {
+    fail('exact-host lifecycle identity or authority does not match inspect');
+  }
+  if (
+    !lifecycle.checks
+    || AUTHORITY_CHECKS.some((check) => lifecycle.checks[check] !== 'not_run')
+    || LIFECYCLE_CHECKS.some((check) => lifecycle.checks[check] !== 'passed')
+    || !Array.isArray(lifecycle.errors)
+    || lifecycle.errors.length !== 0
+  ) {
+    fail('exact-host lifecycle checks are incomplete');
+  }
+  return evidence(
+    'exact_host',
+    authority.authorities,
+    Object.fromEntries([...AUTHORITY_CHECKS, ...LIFECYCLE_CHECKS].map((check) => [check, 'passed'])),
+  );
+}
+
 export function validateComposeTopology(rendered) {
   const service = rendered?.services?.['tun-preflight'];
   if (!service || typeof service !== 'object') fail('tun-preflight service is missing');
@@ -105,6 +146,20 @@ async function main() {
   const args = process.argv.slice(2);
   const composeIndex = args.indexOf('--compose-json');
   const inspectIndex = args.indexOf('--inspect-json');
+  const lifecycleIndex = args.indexOf('--lifecycle-json');
+  if (args.includes('--exact-host')) {
+    const inspectPath = args[inspectIndex + 1];
+    const lifecyclePath = args[lifecycleIndex + 1];
+    if (inspectIndex < 0 || lifecycleIndex < 0 || !inspectPath || !lifecyclePath) {
+      fail('--exact-host requires --inspect-json and --lifecycle-json paths');
+    }
+    const [inspected, lifecycle] = await Promise.all([
+      readFile(inspectPath, 'utf8').then(JSON.parse),
+      readFile(lifecyclePath, 'utf8').then(JSON.parse),
+    ]);
+    console.log(JSON.stringify(combineExactHostEvidence(inspected, lifecycle)));
+    return;
+  }
   if (composeIndex >= 0) {
     const composePath = args[composeIndex + 1];
     if (!composePath) fail('--compose-json requires a path');
