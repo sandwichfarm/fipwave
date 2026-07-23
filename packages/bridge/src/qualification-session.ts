@@ -279,6 +279,12 @@ export class CyrinxQualificationSession {
     this.#accepted = undefined;
   }
 
+  operatorReset(nowMs: number): boolean {
+    this.#accepted = undefined;
+    if (this.#codec !== 'cyrinx' || this.terminal || this.#stage === 'idle') return false;
+    return this.failCurrent(nowMs);
+  }
+
   expire(nowMs: number): boolean {
     if (
       this.#startedAtMs === null

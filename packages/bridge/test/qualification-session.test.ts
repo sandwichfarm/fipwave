@@ -155,7 +155,7 @@ describe('runner-owned Cyrinx qualification session', () => {
     });
   });
 
-  it('reset aborts only the active case, preserves timing and terminal state, and ignores late results', () => {
+  it('operator reset aborts the active case into immutable Quiet fallback and ignores late results', () => {
     const active = reachCases('B');
     const before = active.snapshot(1, startAt + 20);
     const accepted = active.acceptInstruction(
@@ -165,24 +165,25 @@ describe('runner-owned Cyrinx qualification session', () => {
     );
     expect(accepted.mode).toBe('listen');
     expect(active.canReceiveCapture()).toBe(true);
-    active.abortCase();
+    expect(active.operatorReset(startAt + 30)).toBe(true);
     expect(active.canReceiveCapture()).toBe(false);
     expect(active.snapshot(2, startAt + 30)).toMatchObject({
-      stage: 'cold-a-to-b',
+      codec: 'quiet',
+      stage: 'quiet',
       deadline: {
         startedAtMs: startAt,
         deadlineAtMs: startAt + CYRINX_DEADLINE_MS,
         elapsedMs: 30,
       },
-      terminal: false,
+      fallback: {
+        state: 'activated',
+        reasonCode: 'cyrinx_cold_a_to_b_failed',
+      },
+      terminal: true,
     });
-    expect(() => active.completeAccepted('listen', startAt + 31)).toThrow(
-      'qualification_instruction_not_accepted',
-    );
 
-    active.failCurrent(startAt + 40);
     const terminal = active.snapshot(2, startAt + 50);
-    active.abortCase();
+    expect(active.operatorReset(startAt + 500_000)).toBe(false);
     expect(active.snapshot(3, startAt + 500_000)).toEqual({ ...terminal, epoch: 3 });
     expect(() => active.completeAccepted('listen', startAt + 500_001)).toThrow(
       'qualification_session_terminal',
