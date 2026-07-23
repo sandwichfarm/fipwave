@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: Qualify the Demo Substrate
 status: executing
-stopped_at: Completed 01-04-PLAN.md
-last_updated: "2026-07-23T15:19:12.767Z"
+stopped_at: Completed 01-05-PLAN.md
+last_updated: "2026-07-23T15:30:53.310Z"
 last_activity: 2026-07-23
 last_activity_desc: Phase 01 execution started
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 7
-  completed_plans: 4
+  completed_plans: 5
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-23)
 ## Current Position
 
 Phase: 01 (Qualify the Demo Substrate) — EXECUTING
-Plan: 5 of 7
+Plan: 6 of 7
 Status: Ready to execute
 Last activity: 2026-07-23 — Phase 01 execution started
 
-Progress: [██████░░░░] 57%
+Progress: [███████░░░] 71%
 
 ## Performance Metrics
 
@@ -61,6 +61,7 @@ Progress: [██████░░░░] 57%
 | Phase 01-qualify-the-demo-substrate P02 | 6min | 2 tasks | 11 files |
 | Phase 01-qualify-the-demo-substrate P03 | 14min | 2 tasks | 10 files |
 | Phase 01-qualify-the-demo-substrate P04 | 4min | 3 tasks | 10 files |
+| Phase 01 P05 | 11min | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -78,6 +79,8 @@ Recent decisions affecting current work:
 - [Phase ?]: Browser audio readiness is derived from applied settings and live context/worklet evidence; unknown values fail closed.
 - [Phase ?]: Browser audio reset increments an epoch and rejects stale media, worklet, and PCM playback completion.
 - [Phase ?]: FWAV v1 evidence is codec-neutral and only two exact named Open air reports can select a profile.
+- [Phase ?]: Cyrinx gets one immutable 90-minute qualification window; a hard miss or expiry immediately routes to Quiet, and Quiet failure is unqualified.
+- [Phase ?]: Fixture and loopback results remain human_needed; exact named Open air reports are required for a selection.
 
 ### Pending Todos
 
@@ -96,6 +99,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-23T15:19:12.761Z
-Stopped at: Completed 01-04-PLAN.md
+Last session: 2026-07-23T15:30:53.305Z
+Stopped at: Completed 01-05-PLAN.md
 Resume file: None
