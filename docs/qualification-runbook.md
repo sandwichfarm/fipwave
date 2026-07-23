@@ -97,6 +97,40 @@ npm run test:compose
 npm run test:unit -- tests/tun-preflight.test.ts
 ```
 
+## Cyrinx early-abandonment gate
+
+Cyrinx is a bounded batch experiment, not an acoustic qualification claim. Start
+its runner-owned 90-minute deadline **before** the build command, then execute
+only this order: locked archive/hash/licenses and portable C build; digital
+256- and 1,536-byte round trips; one cold A → B frame; one cold B → A frame;
+then the corpus. The first miss records one immutable reason and activates the
+already runnable Quiet path; do not restart or extend Cyrinx after RESET,
+reload, or re-arm.
+
+```sh
+npm run fetch:codecs
+npm run fetch:codecs:check
+npm run cyrinx:build
+npm run cyrinx:test
+npm run qualification:serve -- --machine-id laptop-a --role A --port 4173 \
+  --report .artifacts/qualification/laptop-a.json \
+  --tun-evidence .artifacts/qualification/laptop-a-tun.json --physical-open-air
+```
+
+The pinned profile is `bulk-qpsk-r1-2-48k-v1`: 48 kHz mono, QPSK rate 1/2,
+2048 FFT, 768 CP, 18 symbols, 8-bin pilots, and 0.18 peak. It encodes one
+62,464-sample modem frame. The 1,792-byte PHY payload contains mandatory
+256-byte metadata, so its honest application MTU is **1,536 bytes**. Browser
+wire playback contains only that modem frame; Web Audio locally appends a
+300 ms zero guard on the left channel and renders the right channel all-zero.
+Capture is bounded to one mono 2–3-second batch window.
+
+Excluded work: Swift integration, WASM, arbitrary-chunk streaming decode,
+stereo/MRC capture, adaptive profiles, Cyrinx sessions, retransmission, and
+ARQ. A digital or Loopback result is never proof of speakers, microphones, or
+the final FIPS ping; preserve failed evidence and complete the exact-laptop
+manual checkpoint before making any physical claim.
+
 The first command emits one `TunEvidence` JSON object with `source: "static"`.
 The second uses a fake `ip` binary and `/dev/null`, never Docker or a real TUN
 device. Both are diagnostic evidence only.
