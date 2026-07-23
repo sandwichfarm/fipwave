@@ -32,12 +32,20 @@ export function generateCorpus() {
   return { schemaVersion: 1, seed: CORPUS_SEED, cases };
 }
 
+/** Rejects any manual edit to seed-derived IDs, directions, payload digests, or order. */
+export function assertCorpusManifest(manifest) {
+  if (JSON.stringify(manifest) !== JSON.stringify(generateCorpus())) {
+    throw new Error('corpus manifest drifted from the committed seed');
+  }
+}
+
 async function main() {
   const manifestPath = new URL('../fixtures/corpus/manifest.json', import.meta.url);
   const generated = `${JSON.stringify(generateCorpus(), null, 2)}\n`;
   if (process.argv.includes('--check')) {
     const existing = await readFile(manifestPath, 'utf8');
     if (existing !== generated) throw new Error('corpus manifest drifted from the committed seed');
+    assertCorpusManifest(JSON.parse(existing));
     return;
   }
   await mkdir(new URL('../fixtures/corpus/', import.meta.url), { recursive: true });
