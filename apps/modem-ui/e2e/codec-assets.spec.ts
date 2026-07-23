@@ -1,0 +1,43 @@
+import { expect, test } from '@playwright/test';
+
+const origin = 'http://127.0.0.1:4173';
+
+test('production origin serves only immutable, allowlisted codec files with fixed MIME and hash identity', async ({ page, request }) => {
+  const expected = [
+    ['/codec-assets/quiet.js', 'application/javascript'],
+    ['/codec-assets/quiet-emscripten.js', 'application/javascript'],
+    ['/codec-assets/libfec.js', 'application/javascript'],
+    ['/codec-assets/quiet-emscripten.js.mem', 'application/octet-stream'],
+    ['/codec-assets/quiet-profiles.json', 'application/json'],
+    ['/codec-assets/LICENSE', 'text/plain; charset=utf-8'],
+  ] as const;
+  for (const [pathname, mime] of expected) {
+    const response = await request.get(`${origin}${pathname}`);
+    expect(response.status()).toBe(200);
+    expect(response.headers()['content-type']).toContain(mime);
+    expect(response.headers()['x-content-type-options']).toBe('nosniff');
+    expect(response.headers()['cache-control']).toContain('immutable');
+    expect(response.headers()['content-length']).toBe(String((await response.body()).byteLength));
+    expect(response.headers().etag).toMatch(/^"sha256-[a-f0-9]{64}"$/);
+  }
+  for (const pathname of [
+    '/codec-assets/cyrinx-ddbd0ce4.tar.gz',
+    '/codec-assets/../quiet.js',
+    '/codec-assets/%2e%2e%2fquiet.js',
+    '/codec-assets/quiet.js?alias=1',
+    '/codec-assets/',
+    '/codec-assets/nope.js',
+  ]) expect((await request.get(`${origin}${pathname}`)).status()).toBe(404);
+
+  await page.goto(`${origin}/`);
+  await page.addScriptTag({ url: `${origin}/codec-assets/quiet.js` });
+  await page.addScriptTag({ url: `${origin}/codec-assets/quiet-emscripten.js` });
+  await expect.poll(() => page.evaluate(async () => new Promise<string>((resolve, reject) => {
+    const quiet = (window as Window & { Quiet?: { init(options: { profilesPrefix: string; memoryInitializerPrefix: string; libfecPrefix: string; onReady: () => void; onError: (reason: string) => void }): void } }).Quiet;
+    if (!quiet) { reject(new Error('Quiet global is unavailable')); return; }
+    quiet.init({
+      profilesPrefix: '/codec-assets/', memoryInitializerPrefix: '/codec-assets/', libfecPrefix: '/codec-assets/',
+      onReady: () => resolve('ready'), onError: reject,
+    });
+  })), { timeout: 15_000 }).toBe('ready');
+});
