@@ -59,7 +59,9 @@ describe('production runner', () => {
   });
 
   it('defaults to deterministic Loopback and rejects open-air startup without validated exact-host evidence', async () => {
-    await expect(startProductionRunner({ machineId: 'laptop-a', role: 'A', port: 0, report: 'report.json', tunEvidence: 'none', uiDir: await fixtureUi() })).resolves.toMatchObject({});
+    const defaultRunner = await startProductionRunner({ machineId: 'laptop-a', role: 'A', port: 0, report: 'report.json', tunEvidence: 'none', uiDir: await fixtureUi() });
+    runners.push(defaultRunner);
+    expect(defaultRunner.config.evidenceMode).toBe('Loopback');
     await expect(startProductionRunner({ machineId: 'laptop-a', role: 'A', port: 0, report: 'report.json', tunEvidence: 'none', evidenceMode: 'Fixture', physicalOpenAir: true, uiDir: await fixtureUi() })).rejects.toThrow('exact_host');
   });
 
@@ -68,8 +70,7 @@ describe('production runner', () => {
     runners.push(runner);
     const socket = new WebSocket(`ws://127.0.0.1:${runner.port}/bridge`, { origin: `http://127.0.0.1:${runner.port}` });
     await new Promise<void>((resolve, reject) => { socket.once('open', resolve); socket.once('error', reject); });
-    socket.send(pcm(1, 1n));
-    socket.send(frame(MessageType.QUALIFICATION_RESULT, 1, 2n, { caseId: 'case-1', role: 'A' }));
+    socket.send(frame(MessageType.QUALIFICATION_RESULT, 1, 1n, { caseId: 'case-1', role: 'A' }));
     await new Promise((resolve) => socket.once('close', resolve));
     expect(runner.state().rejectedFrames).toBe(1);
 
