@@ -23,6 +23,7 @@
     "fetch:codecs:check": "node scripts/fetch-codec-assets.mjs --check",
     "cyrinx:build": "node scripts/build-cyrinx.mjs",
     "cyrinx:test": "npm run cyrinx:build && node --test tests/cyrinx-batch.test.mjs",
+    "smoke:self-loop": "npm run build && node scripts/self-loop-smoke.mjs",
     "generate:corpus": "node scripts/generate-corpus.mjs",
     "qualify:fixture": "node scripts/qualify.mjs fixture",
     "qualify:verify": "node scripts/qualify.mjs verify",
