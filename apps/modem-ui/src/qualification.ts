@@ -1,4 +1,4 @@
-import { MAX_QUEUE_BYTES, MAX_QUEUE_DURATION_MS, type EvidenceClass, type LiteralDirection } from '../../../packages/bridge/src/report.js';
+import type { EvidenceClass, LiteralDirection } from '../../../packages/bridge/src/report.js';
 import type { AdapterResult, QualificationCase } from '../../../packages/bridge/src/codecs/types.js';
 
 export type GateDecision = {
@@ -12,6 +12,8 @@ export interface SelectionOptions { expectedHosts: readonly [string, string]; ev
 const VALID_DIRECTIONS: readonly LiteralDirection[] = ['A → B', 'B → A'];
 const QUALIFYING_SMALL = 19;
 const QUALIFYING_LARGE = 5;
+const MAX_QUEUE_BYTES = 256 * 1024;
+const MAX_QUEUE_DURATION_MS = 5_000;
 
 function invalidResult(result: AdapterResult, options: GateOptions): string | undefined {
   if (result.epoch !== options.expectedEpoch) return 'stale_epoch';
