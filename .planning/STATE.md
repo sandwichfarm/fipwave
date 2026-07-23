@@ -5,10 +5,10 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: Qualify the Demo Substrate
 status: executing
-stopped_at: Completed 01-09-PLAN.md
-last_updated: "2026-07-23T20:46:40.548Z"
+stopped_at: Awaiting 01-10 blocking-human physical qualification
+last_updated: "2026-07-23T20:47:52.228Z"
 last_activity: 2026-07-23
-last_activity_desc: Phase 01 execution started
+last_activity_desc: Plan 01-10 awaiting exact-laptop physical qualification
 progress:
   total_phases: 1
   completed_phases: 0
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-07-23)
 
 Phase: 01 (Qualify the Demo Substrate) — EXECUTING
 Plan: 10 of 10
-Status: Ready to execute
-Last activity: 2026-07-23 — Phase 01 execution started
+Status: Awaiting blocking-human physical qualification
+Last activity: 2026-07-23 — Plan 01-10 physical checkpoint reached
 
 Progress: [█████████░] 90%
 
@@ -106,6 +106,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-23T20:46:06.569Z
-Stopped at: Completed 01-09-PLAN.md
+Last session: 2026-07-23T20:47:52.222Z
+Stopped at: Awaiting 01-10 blocking-human physical qualification
 Resume file: None
