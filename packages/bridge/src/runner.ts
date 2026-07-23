@@ -4,7 +4,7 @@ import { lstat, readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createBridgeServer, LOOPBACK_HOST, type BridgeServer, type BridgeServerOptions, type CodecAsset, type RunnerQualificationConfig } from './server.js';
-import { validateTunEvidence } from './report.js';
+import { TUN_EVIDENCE_CHECKS, validateTunEvidence, type TunEvidence } from './report.js';
 
 function findProjectRoot(from: string): string {
   let current = from;
@@ -47,19 +47,22 @@ async function loadCodecAssets(): Promise<readonly CodecAsset[]> {
   if (raw.schemaVersion !== 1 || !Array.isArray(raw.assets) || raw.assets.length === 0) fail('codec lock is invalid');
   return raw.assets.map(assertCodecAsset);
 }
+function unavailableTunEvidence(): TunEvidence {
+  return { schemaVersion: 1, source: 'static', status: 'failed', image: 'alpine:3.21.3@sha256:a8560b36e8b8210634f77d9f7f9efd7ffa463e380b75e2e74aff4511df3ef88c', interfaceName: 'fips-preflight0', ipv6Address: 'fd42:6677:6677::1/64', authorities: { devices: ['/dev/net/tun'], capabilities: ['NET_ADMIN'], securityOptions: ['no-new-privileges:true'], privileged: false, networkMode: 'none', publishedPorts: [] }, checks: Object.fromEntries(TUN_EVIDENCE_CHECKS.map((check) => [check, 'not_run'])) as TunEvidence['checks'], errors: ['exact-host TUN evidence was not supplied for deterministic runner mode'] };
+}
 
 export async function startProductionRunner(options: ProductionRunnerOptions): Promise<ProductionRunner> {
   assertText(options.machineId, 'machine ID'); if (options.role !== 'A' && options.role !== 'B') fail('role must be literal A or B'); assertText(options.report, 'report target');
   if (!Number.isInteger(options.port) || options.port < 0 || options.port > 65_535) fail('port is invalid');
-  let evidenceMode: RunnerQualificationConfig['evidenceMode'] = options.evidenceMode ?? 'Loopback';
+  let evidenceMode: RunnerQualificationConfig['evidenceMode'] = options.evidenceMode ?? 'Loopback'; let tunEvidence = unavailableTunEvidence();
   if (options.physicalOpenAir) {
     let raw: unknown; try { raw = JSON.parse(await readFile(options.tunEvidence, 'utf8')); } catch { fail('physical open-air requires a readable exact_host TUN evidence record'); }
-    const evidence = validateTunEvidence(raw); if (evidence.source !== 'exact_host' || evidence.status !== 'passed') fail('physical open-air requires passed source: exact_host TUN evidence'); evidenceMode = 'Open air';
+    const evidence = validateTunEvidence(raw); if (evidence.source !== 'exact_host' || evidence.status !== 'passed') fail('physical open-air requires passed source: exact_host TUN evidence'); tunEvidence = evidence; evidenceMode = 'Open air';
   }
   const config = Object.freeze({ machineId: options.machineId, role: options.role, reportTarget: options.report, tunEvidence: options.tunEvidence, evidenceMode, evidenceClass: evidenceMode } satisfies RunnerQualificationConfig);
   const codecAssetDir = options.codecAssetDir ?? path.join(PROJECT_ROOT, '.artifacts', 'codecs');
   const codecAssets = await verifiedCodecAssets(codecAssetDir, options.codecAssets ?? await loadCodecAssets());
-  const bridgeOptions = { host: LOOPBACK_HOST, port: options.port, artifactDir: path.join(PROJECT_ROOT, '.artifacts', 'qualification'), uiDir: options.uiDir ?? path.join(PROJECT_ROOT, 'dist', 'modem-ui'), qualificationConfig: config, codecAssetDir, codecAssets } satisfies BridgeServerOptions;
+  const bridgeOptions = { host: LOOPBACK_HOST, port: options.port, artifactDir: path.join(PROJECT_ROOT, '.artifacts', 'qualification'), uiDir: options.uiDir ?? path.join(PROJECT_ROOT, 'dist', 'modem-ui'), qualificationConfig: config, reportAuthority: { tunEvidence, build: { commit: process.env.FIPWAVE_BUILD_COMMIT ?? 'workspace', os: process.platform, architecture: process.arch } }, codecAssetDir, codecAssets } satisfies BridgeServerOptions;
   const bridge = await createBridgeServer(bridgeOptions);
   return { ...bridge, config };
 }

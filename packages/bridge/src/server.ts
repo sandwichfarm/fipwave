@@ -7,6 +7,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
 import { decodeFrame, encodeFrame, MessageType, type FwavFrame } from './protocol.js';
+import { writeMachineReport, type MachineReport, type TunEvidence } from './report.js';
+import manifest from '../../../fixtures/corpus/manifest.json' with { type: 'json' };
 
 export const LOOPBACK_HOST = '127.0.0.1';
 export const HEADER_BYTES = 32;
@@ -32,6 +34,10 @@ export interface ParsedAudioSettingsFrame { epoch: number; sequence: bigint; pay
 export interface RunnerQualificationConfig {
   machineId: string; role: 'A' | 'B'; reportTarget: string; tunEvidence: string; evidenceMode: 'Fixture' | 'Loopback' | 'Open air'; evidenceClass: 'Fixture' | 'Loopback' | 'Open air';
 }
+export interface RunnerReportAuthority {
+  tunEvidence: TunEvidence;
+  build: { commit: string; os: string; architecture: string };
+}
 export interface CodecAsset { filename: string; mimeType: string; browserServing: boolean; sha256: string; }
 export interface BridgeState {
   epoch: number; rejectedFrames: number; overflowedQueues: string[]; discontinuities: number;
@@ -42,7 +48,7 @@ export interface BridgeServer {
   port: number; sendPcmPlayback(frame: Buffer): void; reset(): number; close(): Promise<void>; state(): BridgeState;
 }
 export interface BridgeServerOptions {
-  host: typeof LOOPBACK_HOST; port: number; artifactDir: string; uiDir?: string; qualificationConfig?: RunnerQualificationConfig; codecAssetDir?: string; codecAssets?: readonly CodecAsset[];
+  host: typeof LOOPBACK_HOST; port: number; artifactDir: string; uiDir?: string; qualificationConfig?: RunnerQualificationConfig; reportAuthority?: RunnerReportAuthority; codecAssetDir?: string; codecAssets?: readonly CodecAsset[];
 }
 
 function fail(message: string): never { throw new Error(message); }
@@ -72,6 +78,30 @@ function parseJsonPayload(frame: FwavFrame): Record<string, unknown> {
   try { const value = JSON.parse(frame.payload.toString('utf8')) as unknown; if (!value || Array.isArray(value) || typeof value !== 'object') fail('FWAV control payload must be a JSON object'); return value as Record<string, unknown>; } catch (error) { if (error instanceof Error && error.message.startsWith('FWAV')) throw error; fail('FWAV control payload is invalid JSON'); }
 }
 
+type BrowserAudio = Pick<MachineReport['audio'], 'contextSampleRate' | 'captureSampleRate' | 'channels' | 'echoCancellation' | 'noiseSuppression' | 'autoGainControl'> & { browserVersion: string };
+type BrowserResult = MachineReport['results'][number] & { queues: MachineReport['queues'] };
+type CorpusEntry = { id: string; direction: MachineReport['results'][number]['direction']; size: number; sha256: string };
+function exactObject(value: Record<string, unknown>, keys: readonly string[]): boolean { const actual = Object.keys(value).sort(); return actual.length === keys.length && actual.every((key, index) => key === [...keys].sort()[index]); }
+function asBoolean(value: unknown, name: string): boolean { if (typeof value !== 'boolean') fail(`browser ${name} is invalid`); return value; }
+function asInteger(value: unknown, name: string): number { if (!Number.isInteger(value) || (value as number) < 0) fail(`browser ${name} is invalid`); return value as number; }
+function asText(value: unknown, name: string): string { if (typeof value !== 'string' || value.trim() === '') fail(`browser ${name} is invalid`); return value; }
+function parseBrowserAudio(payload: Record<string, unknown>): BrowserAudio {
+  if (!exactObject(payload, ['browserVersion', 'contextSampleRate', 'captureSampleRate', 'channels', 'echoCancellation', 'noiseSuppression', 'autoGainControl'])) fail('browser audio settings shape is invalid');
+  const audio: BrowserAudio = { browserVersion: asText(payload.browserVersion, 'browser version'), contextSampleRate: asInteger(payload.contextSampleRate, 'context sample rate'), captureSampleRate: asInteger(payload.captureSampleRate, 'capture sample rate'), channels: asInteger(payload.channels, 'channels'), echoCancellation: asBoolean(payload.echoCancellation, 'echo cancellation'), noiseSuppression: asBoolean(payload.noiseSuppression, 'noise suppression'), autoGainControl: asBoolean(payload.autoGainControl, 'automatic gain control') };
+  if (audio.contextSampleRate !== 48_000 || audio.captureSampleRate !== 48_000 || audio.channels !== 1 || audio.echoCancellation || audio.noiseSuppression || audio.autoGainControl) fail('browser audio settings are not qualifying');
+  return audio;
+}
+function parseBrowserResult(payload: Record<string, unknown>, epoch: number, direction: MachineReport['results'][number]['direction'], expected: ReadonlyMap<string, CorpusEntry>): BrowserResult {
+  if (!exactObject(payload, ['acquisitionMs', 'airtimeMs', 'bytePerfect', 'caseId', 'deliveryCount', 'digest', 'queues'])) fail('browser qualification result shape is invalid');
+  const queues = payload.queues;
+  if (!queues || typeof queues !== 'object' || Array.isArray(queues) || !exactObject(queues as Record<string, unknown>, ['captureHighWaterBytes', 'captureHighWaterMs', 'discontinuities', 'playbackHighWaterBytes', 'playbackHighWaterMs'])) fail('browser queue evidence shape is invalid');
+  const result: BrowserResult = { epoch, direction, caseId: asText(payload.caseId, 'case ID'), digest: asText(payload.digest, 'digest'), acquisitionMs: asInteger(payload.acquisitionMs, 'acquisition time'), airtimeMs: asInteger(payload.airtimeMs, 'airtime'), deliveryCount: asInteger(payload.deliveryCount, 'delivery count'), bytePerfect: asBoolean(payload.bytePerfect, 'byte-perfect flag'), queues: { captureHighWaterBytes: asInteger((queues as Record<string, unknown>).captureHighWaterBytes, 'capture queue bytes'), captureHighWaterMs: asInteger((queues as Record<string, unknown>).captureHighWaterMs, 'capture queue time'), playbackHighWaterBytes: asInteger((queues as Record<string, unknown>).playbackHighWaterBytes, 'playback queue bytes'), playbackHighWaterMs: asInteger((queues as Record<string, unknown>).playbackHighWaterMs, 'playback queue time'), discontinuities: asInteger((queues as Record<string, unknown>).discontinuities, 'queue discontinuities') } };
+  if (!/^[a-f0-9]{64}$/i.test(result.digest) || result.deliveryCount !== 1 || !result.bytePerfect) fail('browser qualification result integrity is invalid');
+  const corpus = expected.get(result.caseId);
+  if (!corpus || corpus.direction !== direction || corpus.sha256 !== result.digest) fail('browser qualification result does not match committed corpus');
+  return result;
+}
+
 export function parseAudioSettingsFrame(frame: Buffer): ParsedAudioSettingsFrame {
   const parsed = decodeFrame(frame);
   if (parsed.type !== MessageType.AUDIO_SETTINGS) fail('FWAV message type is not AUDIO_SETTINGS');
@@ -98,6 +128,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   if (!Number.isInteger(options.port) || options.port < 0 || options.port > 65_535) fail('bridge port must be an integer between 0 and 65535');
   await mkdir(options.artifactDir, { recursive: true });
   const config = options.qualificationConfig && immutableConfig(options.qualificationConfig);
+  const corpus = manifest.cases as CorpusEntry[];
   const uiRoot = options.uiDir ? await realpath(options.uiDir) : undefined;
   const assets = new Map<string, CodecAsset>();
   for (const asset of options.codecAssets ?? []) {
@@ -140,6 +171,8 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   const webSocketServer = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });
   const clients = new Set<WebSocket>(); const queues = new Map<MessageType, Queue>();
   const state: BridgeState = { epoch: 1, rejectedFrames: 0, overflowedQueues: [], discontinuities: 0, queueCounts: {}, stampedResults: [] };
+  const audioByEpoch = new Map<number, BrowserAudio>();
+  const resultsByEpoch = new Map<number, Map<string, BrowserResult>>();
   for (const type of [MessageType.PCM_CAPTURE, MessageType.PCM_PLAYBACK, MessageType.QUALIFICATION_CASE, MessageType.QUALIFICATION_RESULT, MessageType.ERROR, MessageType.RESET]) queues.set(type, { frames: [], bytes: 0, overflowed: false });
   const refreshState = () => { for (const [type, queue] of queues) state.queueCounts[queueName(type)] = queue.frames.length; };
   const clearQueues = () => { for (const queue of queues.values()) { queue.frames = []; queue.bytes = 0; } refreshState(); };
@@ -150,7 +183,19 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     if (queue.bytes + frame.payload.byteLength + HEADER_BYTES > MAX_MESSAGE_BYTES) { queue.overflowed = true; state.overflowedQueues = [...new Set([...state.overflowedQueues, queueName(frame.type)])]; state.discontinuities += 1; fail(`FWAV ${queueName(frame.type)} queue overflow`); }
     queue.frames.push({ frame, enqueuedAt: now }); queue.bytes += frame.payload.byteLength + HEADER_BYTES; refreshState();
   };
-  const reset = (): number => { state.epoch += 1; clearQueues(); const resetFrame = encodeFrame({ type: MessageType.RESET, epoch: state.epoch, sequence: 0n, payload: Buffer.alloc(0) }); for (const client of clients) if (client.readyState === client.OPEN) client.send(resetFrame); return state.epoch; };
+  const reset = (): number => { state.epoch += 1; clearQueues(); audioByEpoch.clear(); resultsByEpoch.clear(); const resetFrame = encodeFrame({ type: MessageType.RESET, epoch: state.epoch, sequence: 0n, payload: Buffer.alloc(0) }); for (const client of clients) if (client.readyState === client.OPEN) client.send(resetFrame); return state.epoch; };
+  const expectedDirection = config?.role === 'A' ? 'B → A' : 'A → B';
+  const expectedCorpus = new Map(corpus.filter((entry) => entry.direction === expectedDirection).map((entry) => [entry.id, entry]));
+  const persistMachineReport = async (epoch: number): Promise<string | undefined> => {
+    if (!config || !options.reportAuthority) return undefined;
+    const audio = audioByEpoch.get(epoch); const results = resultsByEpoch.get(epoch);
+    if (!audio || !results || results.size !== 25) return undefined;
+    const values = [...results.values()];
+    if (values.some((value) => value.direction !== expectedDirection) || values.length !== expectedCorpus.size || values.some((value) => !expectedCorpus.has(value.caseId)) || [...expectedCorpus.keys()].some((caseId) => !results.has(`${expectedDirection}\u0000${caseId}`))) fail('browser corpus evidence is incomplete');
+    const queues = values.reduce<MachineReport['queues']>((current, value) => ({ captureHighWaterBytes: Math.max(current.captureHighWaterBytes, value.queues.captureHighWaterBytes), captureHighWaterMs: Math.max(current.captureHighWaterMs, value.queues.captureHighWaterMs), playbackHighWaterBytes: Math.max(current.playbackHighWaterBytes, value.queues.playbackHighWaterBytes), playbackHighWaterMs: Math.max(current.playbackHighWaterMs, value.queues.playbackHighWaterMs), discontinuities: Math.max(current.discontinuities, value.queues.discontinuities) }), { captureHighWaterBytes: 0, captureHighWaterMs: 0, playbackHighWaterBytes: 0, playbackHighWaterMs: 0, discontinuities: state.discontinuities });
+    const report: MachineReport = { schemaVersion: 1, capturedAt: new Date().toISOString(), machine: { hostName: config.machineId, os: options.reportAuthority.build.os, architecture: options.reportAuthority.build.architecture, browserVersion: audio.browserVersion, commit: options.reportAuthority.build.commit }, evidenceClass: config.evidenceClass, epoch, codec: { commit: 'quiet-72782542a41f1b615a02c2ab43a0edb56edb6ce4', profile: 'audible-7k-channel-0', advertisedMtu: 1357 }, audio: { contextSampleRate: audio.contextSampleRate, captureSampleRate: audio.captureSampleRate, channels: audio.channels, echoCancellation: audio.echoCancellation, noiseSuppression: audio.noiseSuppression, autoGainControl: audio.autoGainControl }, queues, results: values.map(({ queues: _queues, ...result }) => result), complete: true, runner: { machineId: config.machineId, role: config.role, reportTarget: config.reportTarget, evidenceClass: config.evidenceClass, tunEvidence: options.reportAuthority.tunEvidence } };
+    return writeMachineReport(config.reportTarget, report);
+  };
   const handleFrame = async (socket: WebSocket, rawData: RawData, isBinary: boolean, lastSequence: { value: bigint }): Promise<void> => {
     try {
       if (!isBinary) fail('bridge accepts binary FWAV messages only');
@@ -163,9 +208,15 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       if (frame.type === MessageType.RESET) { reset(); return; }
       if ([MessageType.QUALIFICATION_CASE, MessageType.QUALIFICATION_RESULT, MessageType.ERROR].includes(frame.type)) {
         const payload = parseJsonPayload(frame); if (hasForbiddenAuthority(payload)) fail('FWAV browser payload attempts to own runner authority');
-        if (frame.type === MessageType.QUALIFICATION_RESULT && config) state.stampedResults.push({ ...payload, machineId: config.machineId, role: config.role, reportTarget: config.reportTarget, tunEvidence: config.tunEvidence, evidenceMode: config.evidenceMode, evidenceClass: config.evidenceClass });
+        if (frame.type === MessageType.QUALIFICATION_RESULT && config) {
+          const result = parseBrowserResult(payload, frame.epoch, expectedDirection!, expectedCorpus); const key = `${result.direction}\u0000${result.caseId}`; const results = resultsByEpoch.get(frame.epoch) ?? new Map<string, BrowserResult>();
+          if (results.has(key)) fail('browser qualification result is duplicate'); results.set(key, result); resultsByEpoch.set(frame.epoch, results);
+          state.stampedResults.push({ ...payload, machineId: config.machineId, role: config.role, reportTarget: config.reportTarget, tunEvidence: config.tunEvidence, evidenceMode: config.evidenceMode, evidenceClass: config.evidenceClass });
+          const reportPath = await persistMachineReport(frame.epoch); if (reportPath) socket.send(JSON.stringify({ reportPath, complete: true, physicalQualification: config.evidenceClass === 'Open air' }));
+        }
       }
       if (frame.type === MessageType.AUDIO_SETTINGS) {
+        if (config) { const payload = parseJsonPayload(frame); if (hasForbiddenAuthority(payload)) fail('FWAV browser payload attempts to own runner authority'); audioByEpoch.set(frame.epoch, parseBrowserAudio(payload)); }
         const reportPath = path.join(options.artifactDir, 'loopback-qualification.json');
         await writeQualificationReport({ schemaVersion: 1, evidencePath: 'Loopback', physicalQualification: false, qualificationStatus: 'not-physical', capturedAt: new Date().toISOString(), reportPath, frame: { messageType: 'AUDIO_SETTINGS', epoch: frame.epoch, sequence: frame.sequence.toString(), payloadBytes: frame.payload.byteLength } });
         socket.send(JSON.stringify({ reportPath, physicalQualification: false })); return;

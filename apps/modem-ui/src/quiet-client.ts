@@ -22,12 +22,14 @@ export interface RunnerConfig {
 
 export interface AppliedQuietSettings {
   microphoneLabel: string;
+  contextSampleRate: number | undefined;
   trackSampleRate: number | undefined;
   channelCount: number | undefined;
   echoCancellation: boolean | undefined;
   noiseSuppression: boolean | undefined;
   autoGainControl: boolean | undefined;
 }
+export interface QuietMetrics { captureHighWaterBytes: number; captureHighWaterMs: number; playbackHighWaterBytes: number; playbackHighWaterMs: number; discontinuities: number; }
 
 export interface CorpusCase { id: string; direction: LiteralDirection; size: number; pattern: string; sha256: string; }
 export interface QuietFragment { epoch: number; sender: Role; direction: LiteralDirection; caseId: string; caseIndex: number; fragmentIndex: number; fragmentCount: number; declaredLength: number; digestPrefix: Uint8Array; payload: Uint8Array; }
@@ -132,15 +134,22 @@ export class QuietClient {
   #receiverEvidence = new QuietReceiverEvidence();
   #onReceive: (evidence: ReceiveCaseEvidence) => void;
   #applied: AppliedQuietSettings | undefined;
+  #contextSampleRate: number | undefined;
+  #originalAudioContext: typeof AudioContext | undefined;
+  #metrics: QuietMetrics = { captureHighWaterBytes: 0, captureHighWaterMs: 0, playbackHighWaterBytes: 0, playbackHighWaterMs: 0, discontinuities: 0 };
 
   constructor(onReceive: (evidence: ReceiveCaseEvidence) => void = () => undefined) { this.#onReceive = onReceive; }
   get applied(): AppliedQuietSettings | undefined { return this.#applied; }
+  get metrics(): Readonly<QuietMetrics> { return { ...this.#metrics }; }
 
   async arm(epoch: number): Promise<AppliedQuietSettings> {
     await this.reset(); this.#epoch = epoch;
     const nav = navigator as Navigator & { getUserMedia?: (constraints: MediaStreamConstraints, success: (stream: MediaStream) => void, failure: (error: unknown) => void) => void };
     this.#originalGetUserMedia = nav.getUserMedia;
     nav.getUserMedia = (_ignored, success, failure) => { void navigator.mediaDevices.getUserMedia({ audio: { channelCount: { exact: 1 }, sampleRate: { ideal: 48_000 }, echoCancellation: { exact: false }, noiseSuppression: { exact: false }, autoGainControl: { exact: false } }, video: false }).then((stream) => { this.#track = stream.getAudioTracks()[0]; success(stream); }, failure); };
+    this.#originalAudioContext = window.AudioContext;
+    const client = this;
+    window.AudioContext = new Proxy(this.#originalAudioContext, { construct(Target, args) { const context = Reflect.construct(Target, args) as AudioContext; client.#contextSampleRate = context.sampleRate; return context; } });
     await loadClassicScript('/codec-assets/quiet.js');
     const quiet = window.Quiet; if (!quiet) throw new Error('verified Quiet runtime did not load');
     await new Promise<void>((resolve, reject) => quiet.init({ profilesPrefix: '/codec-assets/', memoryInitializerPrefix: '/codec-assets/', libfecPrefix: '/codec-assets/', onReady: resolve, onError: (reason) => reject(new Error(`Quiet initialization failed: ${reason}`)) }));
@@ -151,12 +160,12 @@ export class QuietClient {
       quiet.init({ profilesPrefix: '/codec-assets/', memoryInitializerPrefix: '/codec-assets/', libfecPrefix: '/codec-assets/', onReady: ready, onError: (reason) => reject(new Error(`Quiet initialization failed: ${reason}`)) });
     });
     await new Promise<void>((resolve, reject) => {
-      this.#receiver = quiet.receiver({ profile: QUIET_PROFILE, onReceive: (raw) => { void this.#receiverEvidence.accept(raw).then((evidence) => { if (evidence) this.#onReceive(evidence); }); }, onCreate: resolve, onCreateFail: (reason) => reject(new Error(`Quiet microphone failed: ${reason}`)), onReceiveFail: () => undefined });
+      this.#receiver = quiet.receiver({ profile: QUIET_PROFILE, onReceive: (raw) => { void this.#receiverEvidence.accept(raw).then((evidence) => { if (evidence) this.#onReceive(evidence); }); }, onCreate: resolve, onCreateFail: (reason) => reject(new Error(`Quiet microphone failed: ${reason}`)), onReceiveFail: () => { this.#metrics.discontinuities += 1; } });
     });
     const settings = this.#track?.getSettings() ?? {}; const flag = (value: unknown): boolean | undefined => typeof value === 'boolean' ? value : undefined;
-    const applied: AppliedQuietSettings = { microphoneLabel: this.#track?.label || 'Unavailable', trackSampleRate: settings.sampleRate, channelCount: settings.channelCount, echoCancellation: flag(settings.echoCancellation), noiseSuppression: flag(settings.noiseSuppression), autoGainControl: flag(settings.autoGainControl) };
+    const applied: AppliedQuietSettings = { microphoneLabel: this.#track?.label || 'Unavailable', contextSampleRate: this.#contextSampleRate, trackSampleRate: settings.sampleRate, channelCount: settings.channelCount, echoCancellation: flag(settings.echoCancellation), noiseSuppression: flag(settings.noiseSuppression), autoGainControl: flag(settings.autoGainControl) };
     this.#applied = applied;
-    if (applied.trackSampleRate !== 48_000 || applied.channelCount !== 1 || applied.echoCancellation !== false || applied.noiseSuppression !== false || applied.autoGainControl !== false) { await this.reset(); throw new Error('Quiet applied microphone settings are incompatible'); }
+    if (applied.contextSampleRate !== 48_000 || applied.trackSampleRate !== 48_000 || applied.channelCount !== 1 || applied.echoCancellation !== false || applied.noiseSuppression !== false || applied.autoGainControl !== false) { await this.reset(); throw new Error('Quiet applied microphone settings are incompatible'); }
     return applied;
   }
 
@@ -166,14 +175,16 @@ export class QuietClient {
     for (const [index, entry] of entries.entries()) {
       const payload = await corpusPayload(entry, index % (entry.size === 256 ? 20 : 5)); const digest = await sha256(payload); if (digest !== entry.sha256) throw new Error(`committed corpus digest mismatch: ${entry.id}`);
       const fragments = fragmentCase({ epoch, sender: role, caseIndex: index, entry, payload });
-      await new Promise<void>((resolve) => { this.#transmitter?.destroy(); this.#transmitter = window.Quiet!.transmitter({ profile: QUIET_PROFILE, clampFrame: QUIET_CLAMP_FRAME, onFinish: () => window.setTimeout(resolve, QUIET_GUARD_MS) }); fragments.forEach((fragment) => this.#transmitter!.transmit(encodeFragment(fragment))); });
+      const startedAt = performance.now(); const bytes = fragments.reduce((total, fragment) => total + encodeFragment(fragment).byteLength, 0); this.#metrics.playbackHighWaterBytes = Math.max(this.#metrics.playbackHighWaterBytes, bytes);
+      await new Promise<void>((resolve) => { this.#transmitter?.destroy(); this.#transmitter = window.Quiet!.transmitter({ profile: QUIET_PROFILE, clampFrame: QUIET_CLAMP_FRAME, onFinish: () => { this.#metrics.playbackHighWaterMs = Math.max(this.#metrics.playbackHighWaterMs, performance.now() - startedAt); window.setTimeout(resolve, QUIET_GUARD_MS); } }); fragments.forEach((fragment) => this.#transmitter!.transmit(encodeFragment(fragment))); });
       onProgress(entry, index + 1, entries.length);
     }
   }
 
   async reset(): Promise<void> {
-    this.#transmitter?.destroy(); this.#receiver?.destroy(); this.#transmitter = undefined; this.#receiver = undefined; this.#track?.stop(); this.#track = undefined; this.#applied = undefined;
+    this.#transmitter?.destroy(); this.#receiver?.destroy(); this.#transmitter = undefined; this.#receiver = undefined; this.#track?.stop(); this.#track = undefined; this.#applied = undefined; this.#contextSampleRate = undefined; this.#metrics = { captureHighWaterBytes: 0, captureHighWaterMs: 0, playbackHighWaterBytes: 0, playbackHighWaterMs: 0, discontinuities: 0 };
     const nav = navigator as Navigator & { getUserMedia?: unknown }; if (this.#originalGetUserMedia !== undefined) nav.getUserMedia = this.#originalGetUserMedia as never; else delete nav.getUserMedia; this.#originalGetUserMedia = undefined;
+    if (this.#originalAudioContext) window.AudioContext = this.#originalAudioContext; this.#originalAudioContext = undefined;
   }
 }
 

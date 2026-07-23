@@ -17,6 +17,7 @@ let evidence: AppliedAudioEvidence | undefined;
 let uiState: UiState = 'idle';
 let failure = '';
 let bridge: WebSocket | undefined;
+let bridgeSequence = 0n;
 let runnerConfig: Readonly<RunnerConfig> | undefined;
 let configFailure = '';
 const quiet = new QuietClient((received) => appendQuietEvidence(received));
@@ -48,7 +49,7 @@ function settingValue(value: unknown): string {
 }
 
 function frameForSettings(value: AppliedAudioEvidence): ArrayBuffer {
-  const payload = new TextEncoder().encode(JSON.stringify(value));
+  const payload = new TextEncoder().encode(JSON.stringify({ browserVersion: navigator.userAgent, contextSampleRate: value.contextSampleRate, captureSampleRate: value.trackSampleRate, channels: value.channelCount, echoCancellation: value.echoCancellation, noiseSuppression: value.noiseSuppression, autoGainControl: value.autoGainControl }));
   const frame = new ArrayBuffer(32 + payload.byteLength);
   const view = new DataView(frame);
   for (const [index, byte] of [0x46, 0x57, 0x41, 0x56].entries()) view.setUint8(index, byte);
@@ -56,13 +57,14 @@ function frameForSettings(value: AppliedAudioEvidence): ArrayBuffer {
   view.setUint8(5, 2);
   view.setUint32(8, payload.byteLength, true);
   view.setUint32(12, value.epoch, true);
+  view.setBigUint64(16, bridgeSequence++, true);
   new Uint8Array(frame, 32).set(payload);
   return frame;
 }
 
 function reportToBridge(value: AppliedAudioEvidence): Promise<void> {
   return new Promise((resolve, reject) => {
-    bridge?.close();
+    bridge?.close(); bridgeSequence = 0n;
     bridge = new WebSocket(`ws://${window.location.host}/bridge`);
     bridge.binaryType = 'arraybuffer';
     bridge.addEventListener('open', () => bridge?.send(frameForSettings(value)), { once: true });
@@ -79,6 +81,21 @@ function reportToBridge(value: AppliedAudioEvidence): Promise<void> {
     });
     bridge.addEventListener('error', () => reject(new Error('Local bridge disconnected.')), { once: true });
   });
+}
+
+function reportQuietSettings(): Promise<void> {
+  const applied = quiet.applied;
+  if (!applied) return Promise.reject(new Error('Quiet applied settings are unavailable'));
+  return reportToBridge({ epoch, microphoneLabel: applied.microphoneLabel, permission: 'granted', contextState: 'running', contextSampleRate: applied.contextSampleRate, trackSampleRate: applied.trackSampleRate, channelCount: applied.channelCount, echoCancellation: applied.echoCancellation, noiseSuppression: applied.noiseSuppression, autoGainControl: applied.autoGainControl, workletState: 'ready', bridgeState: 'connected' });
+}
+
+function reportQuietResult(received: ReceiveCaseEvidence): void {
+  if (!bridge || bridge.readyState !== WebSocket.OPEN) return;
+  const metrics = quiet.metrics;
+  const payload = new TextEncoder().encode(JSON.stringify({ caseId: received.caseId, digest: received.digest, acquisitionMs: Math.round(received.acquiredAtMs), airtimeMs: Math.round(received.airtimeMs), deliveryCount: received.deliveryCount, bytePerfect: !received.corrupt && received.duplicates === 0, queues: metrics }));
+  const frame = new ArrayBuffer(32 + payload.byteLength); const view = new DataView(frame);
+  for (const [index, byte] of [0x46, 0x57, 0x41, 0x56].entries()) view.setUint8(index, byte);
+  view.setUint8(4, 1); view.setUint8(5, 6); view.setUint32(8, payload.byteLength, true); view.setUint32(12, epoch, true); view.setBigUint64(16, bridgeSequence++, true); new Uint8Array(frame, 32).set(payload); bridge.send(frame);
 }
 
 function appendSetting(table: HTMLTableElement, label: string, value: unknown): void {
@@ -227,6 +244,7 @@ async function startQuietFallback(): Promise<void> {
     // normal worklet pipeline before it is permitted to arm.
     epoch = await resetAudio(); evidence = undefined;
     await quiet.arm(epoch);
+    await reportQuietSettings();
     await quiet.sendCorpus(runnerConfig.role, epoch, (entry, index, total) => {
       corpusRows = [...corpusRows, { direction: entry.direction, caseId: entry.id, evidenceClass: runnerConfig!.evidenceClass, result: `Sent locally ${index}/${total}; receiver evidence is independent`, airtime: 'pending' }];
       render();
@@ -238,6 +256,7 @@ async function startQuietFallback(): Promise<void> {
 function appendQuietEvidence(received: ReceiveCaseEvidence): void {
   const evidenceClass = runnerConfig?.evidenceClass ?? 'Loopback';
   corpusRows = [...corpusRows, { direction: received.direction, caseId: received.caseId, evidenceClass, result: received.corrupt || received.duplicates ? 'Failed receiver integrity' : 'Passed independent receiver evidence', airtime: `${Math.round(received.airtimeMs)} ms` }];
+  reportQuietResult(received);
   render();
 }
 
