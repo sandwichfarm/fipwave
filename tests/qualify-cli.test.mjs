@@ -57,6 +57,20 @@ test('invented manifest cases and expected digests retain precise invalid-input 
   }
 });
 
+test('browser-shaped fallback and deadline loopholes remain invalid at the CLI boundary', async () => {
+  for (const [mutate, reason] of [
+    [(value) => { value.qualification.deadline.elapsedMs = 5_400_000; }, 'fallback_timing_invalid'],
+    [(value) => { value.qualification.deadline.elapsedMs = 1.5; }, 'qualification_deadline_invalid'],
+    [(value) => { value.qualification.fallback.browserReason = 'spoof'; }, 'fallback_state_invalid'],
+  ]) {
+    const first = report('alpha', 'A'); mutate(first);
+    const paths = await files(first, report('beta', 'B')); run(args(paths));
+    const selection = JSON.parse(await readFile(paths.target, 'utf8'));
+    assert.equal(selection.decision, 'unqualified');
+    assert.deepEqual(selection.reasonCodes, [reason]);
+  }
+});
+
 test('human-needed is reserved for absent or explicitly nonphysical/manual evidence', async () => {
   const none = run([]); assert.match(none.stdout, /human_needed/);
   const help = spawnSync(process.execPath, ['scripts/qualify.mjs', 'verify', '--help'], { cwd: root, encoding: 'utf8' }); assert.equal(help.status, 0); assert.match(help.stdout, /--machine-a/);
