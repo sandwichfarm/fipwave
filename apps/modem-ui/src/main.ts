@@ -1,6 +1,7 @@
 import './style.css';
 import { armAudio, canBufferPcmCaptureFrame, enqueuePcmPlayback, resetAudio, setPcmCaptureHandler, validatePcmPlaybackFrame, type AppliedAudioEvidence } from './audio.js';
 import { acceptBridgePlaybackFrame } from '../../../packages/bridge/src/codecs/websocket.js';
+import { CyrinxCaseWatchdog, sameCyrinxBrowserCase, type CyrinxBrowserCase } from './cyrinx-case-watchdog.js';
 import { CyrinxQualificationSession, type CyrinxSessionSnapshot } from './qualification-session.js';
 import {
   QUIET_PROFILE,
@@ -44,10 +45,16 @@ type CorpusRow = { direction: string; caseId: string; evidenceClass: 'Fixture' |
 let gateState: GateState = 'not-started';
 let corpusRows: CorpusRow[] = [];
 const cyrinxSession = new CyrinxQualificationSession();
-type CyrinxCaptureCase = { epoch: number; generation: number; caseId: string; direction: 'A → B' | 'B → A'; baseSampleIndex?: number; nextSampleIndex: number };
+type CyrinxCaptureCase = CyrinxBrowserCase & { generation: number; baseSampleIndex?: number; nextSampleIndex: number };
+type CyrinxTransmitCase = CyrinxBrowserCase & { generation: number };
 let captureCase: CyrinxCaptureCase | undefined;
 let captureGeneration = 0;
-let transmitCase: { epoch: number; generation: number; caseId: string; direction: 'A → B' | 'B → A' } | undefined;
+let transmitCase: CyrinxTransmitCase | undefined;
+const cyrinxCaseWatchdog = new CyrinxCaseWatchdog((value) => {
+  reportCyrinxRuntimeFailure(value);
+  if (sameCyrinxBrowserCase(captureCase, value)) clearCyrinxCapture();
+  if (sameCyrinxBrowserCase(transmitCase, value)) transmitCase = undefined;
+});
 
 type Pending<T> = { resolve(value: T): void; reject(error: Error): void; timer: number };
 let pendingSettings: Pending<void> | undefined;
@@ -95,6 +102,22 @@ function frameForSettings(value: AppliedAudioEvidence): ArrayBuffer {
 
 function asError(reason: unknown, fallback: string): Error { return reason instanceof Error ? reason : new Error(fallback); }
 function resultKey(caseId: string, resultEpoch: number): string { return `${resultEpoch}\u0000${caseId}`; }
+function reportCyrinxRuntimeFailure(value: CyrinxBrowserCase): void {
+  const socket = bridge;
+  if (
+    value.epoch !== epoch
+    || cyrinxSession.snapshot.codec !== 'cyrinx'
+    || !socket
+    || socket.readyState !== WebSocket.OPEN
+  ) return;
+  try {
+    const frame = encodeControlFrame({ type: 7, epoch: value.epoch, sequence: bridgeSequence });
+    socket.send(frame);
+    bridgeSequence += 1n;
+  } catch {
+    // Reporting is best-effort and must never replace the original case error.
+  }
+}
 function reportQuietRuntimeFailure(failureEpoch: number): void {
   const socket = bridge;
   if (
@@ -115,29 +138,31 @@ function reportQuietRuntimeFailure(failureEpoch: number): void {
 }
 
 function clearCyrinxCapture(): void { captureGeneration += 1; captureCase = undefined; setPcmCaptureHandler(undefined); }
-function clearCyrinxCase(): void { clearCyrinxCapture(); transmitCase = undefined; }
+function clearCyrinxCase(): void { cyrinxCaseWatchdog.cancel(); clearCyrinxCapture(); transmitCase = undefined; }
 function pcmCaptureFrame(input: { epoch: number; sequence: bigint; firstSampleIndex: bigint; samples: Float32Array }): ArrayBuffer {
   const payloadBytes = 8 + input.samples.byteLength; const output = new ArrayBuffer(32 + payloadBytes); const view = new DataView(output);
   new Uint8Array(output, 0, 4).set([0x46, 0x57, 0x41, 0x56]); view.setUint8(4, 1); view.setUint8(5, 3); view.setUint32(8, payloadBytes, true); view.setUint32(12, input.epoch, true); view.setBigUint64(16, input.sequence, true); view.setUint32(24, 48_000, true); view.setUint16(28, 1, true); view.setUint16(30, 1, true); view.setBigUint64(32, input.firstSampleIndex, true); new Float32Array(output, 40, input.samples.length).set(input.samples); return output;
 }
 function armCyrinxCapture(caseId: string, direction: 'A → B' | 'B → A'): void {
-  const active: CyrinxCaptureCase = { epoch, generation: ++captureGeneration, caseId, direction, nextSampleIndex: 0 }; captureCase = active;
+  const active: CyrinxCaptureCase = { epoch, generation: ++captureGeneration, caseId, direction, mode: 'listen', nextSampleIndex: 0 }; captureCase = active;
+  cyrinxCaseWatchdog.arm(active);
   setPcmCaptureHandler((batch: unknown) => {
     const value = batch as { type?: unknown; epoch?: unknown; firstSampleIndex?: unknown; sampleRate?: unknown; channelCount?: unknown; encoding?: unknown; discontinuity?: unknown; samples?: unknown };
-    if (captureCase !== active || value.type !== 'PCM_CAPTURE' || value.epoch !== active.epoch || value.sampleRate !== 48_000 || value.channelCount !== 1 || value.encoding !== 'Float32LE' || !(value.samples instanceof Float32Array) || value.samples.length !== 2048 || value.discontinuity === true) { clearCyrinxCapture(); return; }
+    if (captureCase !== active) return;
+    if (value.type !== 'PCM_CAPTURE' || value.epoch !== active.epoch || value.sampleRate !== 48_000 || value.channelCount !== 1 || value.encoding !== 'Float32LE' || !(value.samples instanceof Float32Array) || value.samples.length !== 2048 || value.discontinuity === true) { cyrinxCaseWatchdog.fail(active); return; }
     if (active.baseSampleIndex === undefined) active.baseSampleIndex = typeof value.firstSampleIndex === 'number' ? value.firstSampleIndex : Number.NaN;
     const offset = typeof value.firstSampleIndex === 'number' ? value.firstSampleIndex - active.baseSampleIndex : Number.NaN;
     const socket = bridge;
-    if (!Number.isInteger(offset) || offset !== active.nextSampleIndex || !socket || socket.readyState !== WebSocket.OPEN) { clearCyrinxCapture(); return; }
+    if (!Number.isInteger(offset) || offset !== active.nextSampleIndex || !socket || socket.readyState !== WebSocket.OPEN) { cyrinxCaseWatchdog.fail(active); return; }
     try {
       const frame = pcmCaptureFrame({ epoch: active.epoch, sequence: bridgeSequence, firstSampleIndex: BigInt(offset), samples: value.samples });
-      if (!canBufferPcmCaptureFrame(socket.bufferedAmount, frame.byteLength)) { clearCyrinxCapture(); return; }
+      if (!canBufferPcmCaptureFrame(socket.bufferedAmount, frame.byteLength)) { cyrinxCaseWatchdog.fail(active); return; }
       bridgeSequence += 1n;
       socket.send(frame);
       active.nextSampleIndex += value.samples.length;
       if (active.nextSampleIndex === 131_072) clearCyrinxCapture();
     }
-    catch { clearCyrinxCapture(); }
+    catch { cyrinxCaseWatchdog.fail(active); }
   });
 }
 
@@ -150,6 +175,7 @@ function rejectPending(reason: Error): void {
 
 function failBridge(socket: WebSocket, reason: Error): void {
   if (bridge !== socket) return;
+  clearCyrinxCase();
   bridge = undefined;
   rejectPending(reason);
   bridgeDelivery = `Failed — ${reason.message}`;
@@ -180,14 +206,31 @@ function handleBridgeMessage(socket: WebSocket, event: MessageEvent): void {
       }
       if (type !== 4) throw new Error(`Local bridge sent unsupported binary FWAV type ${type}`);
       const activeTransmit = transmitCase;
-      const scheduled = acceptBridgePlaybackFrame(event.data, epoch, { validate: validatePcmPlaybackFrame, enqueue: enqueuePcmPlayback });
+      let scheduled;
+      try {
+        scheduled = acceptBridgePlaybackFrame(event.data, epoch, { validate: validatePcmPlaybackFrame, enqueue: enqueuePcmPlayback });
+      } catch (error) {
+        if (activeTransmit) cyrinxCaseWatchdog.fail(activeTransmit);
+        throw error;
+      }
       if (activeTransmit) {
         void scheduled.completion.then(() => {
-          if (transmitCase !== activeTransmit || !bridge || bridge.readyState !== WebSocket.OPEN) return;
-          const payload = new TextEncoder().encode(JSON.stringify({ action: 'playback_complete', caseId: activeTransmit.caseId, direction: activeTransmit.direction }));
-          bridge.send(encodeControlFrame({ type: 5, epoch: activeTransmit.epoch, sequence: bridgeSequence++, payload }));
-          transmitCase = undefined;
-        }).catch(() => undefined);
+          const socket = bridge;
+          if (transmitCase !== activeTransmit || !cyrinxCaseWatchdog.owns(activeTransmit)) return;
+          if (!socket || socket.readyState !== WebSocket.OPEN) { cyrinxCaseWatchdog.fail(activeTransmit); return; }
+          try {
+            const payload = new TextEncoder().encode(JSON.stringify({ action: 'playback_complete', caseId: activeTransmit.caseId, direction: activeTransmit.direction }));
+            const frame = encodeControlFrame({ type: 5, epoch: activeTransmit.epoch, sequence: bridgeSequence, payload });
+            socket.send(frame);
+            bridgeSequence += 1n;
+            cyrinxCaseWatchdog.complete(activeTransmit);
+            transmitCase = undefined;
+          } catch {
+            cyrinxCaseWatchdog.fail(activeTransmit);
+          }
+        }).catch(() => {
+          if (transmitCase === activeTransmit) cyrinxCaseWatchdog.fail(activeTransmit);
+        });
       }
       return;
     }
@@ -215,7 +258,12 @@ function handleBridgeMessage(socket: WebSocket, event: MessageEvent): void {
         const payload = new TextEncoder().encode(JSON.stringify({ action: 'accept_cyrinx_instruction', caseId: instruction.caseId, direction: instruction.direction }));
         bridge.send(encodeControlFrame({ type: 5, epoch, sequence: bridgeSequence++, payload }));
         if (instruction.action === 'listen') { transmitCase = undefined; armCyrinxCapture(instruction.caseId, instruction.direction); }
-        else { clearCyrinxCapture(); transmitCase = { epoch, generation: ++captureGeneration, caseId: instruction.caseId, direction: instruction.direction }; }
+        else {
+          clearCyrinxCapture();
+          const active: CyrinxTransmitCase = { epoch, generation: ++captureGeneration, caseId: instruction.caseId, direction: instruction.direction, mode: 'transmit' };
+          transmitCase = active;
+          cyrinxCaseWatchdog.arm(active);
+        }
       } else if (snapshot.codec !== 'cyrinx') clearCyrinxCase();
       render();
       return;
