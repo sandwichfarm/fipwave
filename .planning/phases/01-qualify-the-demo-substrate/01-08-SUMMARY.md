@@ -50,6 +50,7 @@ status: complete
 - Added 32-byte application envelopes with at most 221 bytes of data, committed-seed corpus reproduction/digest checks, receiver deduplication, complete-only reassembly, and integrity evidence.
 - Added named `qualify:verify` options for two machine reports, two exact hosts, and the exact atomic selection target. It emits `quiet`, `cyrinx`, `unqualified`, or `human_needed` with stable reasons rather than a generic selected flag.
 - Documented independent A → B then B → A operation and the deterministic Loopback runner boundary.
+- Added runner-side, atomic `MachineReport` persistence. It binds current-epoch audio/result data to the committed corpus and stamps machine, role, build, fixed Quiet profile, report target, evidence class, and TUN record from runner authority only.
 
 ## Task Commits
 
@@ -57,6 +58,7 @@ status: complete
 2. **Task 2: Schedule local corpus and validate independent receive evidence** — `aa745ea`
 3. **Task 3: Write canonical reports and named selection** — `d6c4e2a`
 4. **Follow-up compatibility fix** — `5b75245`
+5. **Rule 2 runner-report persistence correction** — `f5303c4`
 
 ## Deviations from Plan
 
@@ -69,19 +71,22 @@ status: complete
 
 ## Automated Checks
 
-- `npm run check` — passed (49 unit tests, 5 development-browser tests, build, corpus, fixture, CLI no-argument human-needed result, and Compose preflight).
-- `npm run test:browser:production -- apps/modem-ui/e2e/quiet-runtime.spec.ts` — passed against the compiled runner and real same-origin config/assets.
-- `node --test tests/qualify-cli.test.mjs` — passed (named options, requested output target, Quiet selection, and nonphysical rejection).
+Executed `npm run check`: passed (51 unit tests, 5 development-browser tests,
+build, corpus, fixture, CLI no-argument human-needed result, and Compose
+preflight).
+
+Executed the focused production Chromium test against the compiled runner and
+real same-origin configuration/assets: passed.
+
+Executed the named CLI test: passed (named options, requested output target,
+Quiet selection, and nonphysical rejection).
 
 ## Known Stubs
 
-The runner currently stamps accepted qualification-result frames in bridge
-memory but does not yet persist a complete `MachineReport` from the browser's
-measured Quiet receiver evidence. The named CLI and its canonical report
-validation are complete and tested, but an exact-laptop run needs this small
-runner-persistence follow-up before it can emit the two input files itself.
-A physical acoustic pass is intentionally not modelled as a fixture or inferred
-from the deterministic runner.
+None. The runner now atomically persists complete canonical reports only after
+the current-epoch applied-audio evidence and every exact role-opposite corpus
+case passes committed-ID/digest validation. A physical acoustic pass is still
+not inferred from deterministic Loopback evidence.
 
 ## User Setup Required
 
@@ -89,4 +94,6 @@ Run the documented exact-laptop sequence on both machines: cache codec assets, o
 
 ## Self-Check: PASSED
 
-Confirmed all four implementation commits exist and the Quiet client, production browser spec, canonical report validator, named CLI test, and updated runbook are present.
+Confirmed the runner report-persistence commit exists, the runner integration
+tests cover atomic deterministic persistence plus spoofed/digest rejection, and
+the production browser spec observes the real bridge diagnostic report path.

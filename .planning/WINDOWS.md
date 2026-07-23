@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 2
+open_count: 1
 waived_count: 0
-fixed_count: 0
+fixed_count: 1
 total_count: 2
-last_updated: 2026-07-23T17:42:43.795Z
+last_updated: 2026-07-23T17:57:33.247Z
 ---
 
 # Broken Windows Ledger
@@ -16,7 +16,7 @@ last_updated: 2026-07-23T17:42:43.795Z
 | id | phase | kind | file | line | description | status | reason | recorded_at | resolved_at |
 |----|-------|------|------|------|-------------|--------|--------|-------------|-------------|
 | 1 | 01 | deviation | scripts/audit-dependencies.mjs |  | Temporary official Node 22.23.1 runtime was required because the host ran Node 25.2.1. | open |  | 2026-07-23T14:50:10.558Z |  |
-| 2 | 01 | stub | packages/bridge/src/server.ts |  | Runner stamps qualification results in memory but does not persist a complete MachineReport from Quiet receiver evidence. | open |  | 2026-07-23T17:42:43.795Z |  |
+| 2 | 01 | stub | packages/bridge/src/server.ts |  | Runner stamps qualification results in memory but does not persist a complete MachineReport from Quiet receiver evidence. | fixed |  | 2026-07-23T17:42:43.795Z | 2026-07-23T17:57:33.247Z |
 
 ````json
 [
@@ -39,10 +39,10 @@ last_updated: 2026-07-23T17:42:43.795Z
     "file": "packages/bridge/src/server.ts",
     "line": null,
     "description": "Runner stamps qualification results in memory but does not persist a complete MachineReport from Quiet receiver evidence.",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-07-23T17:42:43.795Z",
-    "resolved_at": null
+    "resolved_at": "2026-07-23T17:57:33.247Z"
   }
 ]
 ````
