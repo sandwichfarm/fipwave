@@ -621,6 +621,9 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     cyrinxExpiryTimer = timer.set(() => { void forceExpireCyrinx().catch(() => undefined); }, CYRINX_DEADLINE_MS);
     await persist();
     if (acceptedOperation !== operationGeneration || signal.aborted || cyrinxSession.codec !== 'cyrinx') return cyrinxSummary();
+    const startedPersistedAt = clock();
+    if (await expireCyrinxAt(startedPersistedAt)) return cyrinxSummary();
+    if (acceptedOperation !== operationGeneration || signal.aborted || cyrinxSession.codec !== 'cyrinx') return cyrinxSummary();
     broadcastSession();
     try {
       const build = await waitForCyrinxOperation(
@@ -634,6 +637,9 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       cyrinxSession.completeBuild(buildCompletedAt);
       await persist();
       if (acceptedOperation !== operationGeneration || signal.aborted || cyrinxSession.codec !== 'cyrinx') return cyrinxSummary();
+      const buildPersistedAt = clock();
+      if (await expireCyrinxAt(buildPersistedAt)) return cyrinxSummary();
+      if (acceptedOperation !== operationGeneration || signal.aborted || cyrinxSession.codec !== 'cyrinx') return cyrinxSummary();
       broadcastSession();
       const digital = await waitForCyrinxOperation(
         options.cyrinxDigital?.({ epoch: state.epoch, evidenceClass: config.evidenceClass, nowMs: clock(), signal }) ?? Promise.resolve(),
@@ -645,6 +651,9 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       if (await expireCyrinxAt(digitalCompletedAt)) return cyrinxSummary();
       cyrinxSession.completeDigital(digitalCompletedAt);
       await persist();
+      if (acceptedOperation !== operationGeneration || signal.aborted || cyrinxSession.codec !== 'cyrinx') return cyrinxSummary();
+      const digitalPersistedAt = clock();
+      if (await expireCyrinxAt(digitalPersistedAt)) return cyrinxSummary();
       if (acceptedOperation !== operationGeneration || signal.aborted || cyrinxSession.codec !== 'cyrinx') return cyrinxSummary();
       broadcastSession();
     } catch {
@@ -711,6 +720,9 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     if (acceptedGeneration !== generation || acceptedOperation !== operationGeneration || cyrinxSession.codec !== 'cyrinx') return;
     cyrinxSession.completeAccepted('transmit', completedAt);
     await persist(acceptedGeneration);
+    if (acceptedGeneration !== generation || acceptedOperation !== operationGeneration || cyrinxSession.codec !== 'cyrinx') return;
+    const acknowledgedAt = clock();
+    if (await expireCyrinxAt(acknowledgedAt)) return;
     if (acceptedGeneration !== generation || acceptedOperation !== operationGeneration || cyrinxSession.codec !== 'cyrinx') return;
     cyrinxSession.acknowledgeAcceptedCompletion();
     if (cyrinxSession.terminal) clearCyrinxTimer();
@@ -792,6 +804,9 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     const cold = current.cold;
     cyrinxSession.completeAccepted('listen', completedAt);
     await persist(acceptedGeneration);
+    if (acceptedGeneration !== generation || acceptedOperation !== operationGeneration || cyrinxSession.codec !== 'cyrinx') return;
+    const acknowledgedAt = clock();
+    if (await expireCyrinxAt(acknowledgedAt)) return;
     if (acceptedGeneration !== generation || acceptedOperation !== operationGeneration || cyrinxSession.codec !== 'cyrinx') return;
     cyrinxSession.acknowledgeAcceptedCompletion();
     if (cyrinxSession.terminal) clearCyrinxTimer();

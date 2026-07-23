@@ -534,6 +534,67 @@ describe('production runner', () => {
     inbox.socket.close();
   });
 
+  it.each([
+    ['build', 0, 0],
+    ['digital', 1, 0],
+    ['cold-a-to-b', 1, 1],
+  ] as const)('does not advance beyond a %s report write that returns after the deadline', async (boundaryStage, buildCalls, digitalCalls) => {
+    const target = await reportPath(`stage-write-${boundaryStage}`);
+    const startAt = 3_000;
+    const deadlineAt = startAt + CYRINX_DEADLINE_MS;
+    let now = startAt;
+    let crossed = false;
+    const build = vi.fn(async () => undefined);
+    const digital = vi.fn(async () => undefined);
+    const runner = await startProductionRunner({
+      machineId: `stage-write-${boundaryStage}`,
+      role: 'A',
+      port: 0,
+      report: target,
+      tunEvidence: 'none',
+      uiDir: await fixtureUi(),
+      nowForTests: () => now,
+      cyrinxBuildForTests: build,
+      cyrinxDigitalForTests: digital,
+      cyrinxWorkerForTests: fakeCyrinxWorker(),
+      cyrinxTimerForTests: { set: () => 1, clear: vi.fn() },
+      reportWriterForTests: async (file, report) => {
+        if (!crossed && report.qualification?.cyrinx.stage === boundaryStage) {
+          crossed = true;
+          now = deadlineAt;
+        }
+        return writeMachineReport(file, report);
+      },
+    });
+    runners.push(runner);
+    const inbox = await openInbox(runner);
+    await expect(runner.startCyrinx()).resolves.toEqual({
+      codec: 'quiet',
+      reasonCode: 'cyrinx_deadline_expired',
+      deadlineAtMs: deadlineAt,
+    });
+    expect(build).toHaveBeenCalledTimes(buildCalls);
+    expect(digital).toHaveBeenCalledTimes(digitalCalls);
+    await vi.waitFor(() => expect(inbox.texts).toContainEqual(expect.objectContaining({
+      codec: 'quiet',
+      stage: 'quiet',
+      fallback: expect.objectContaining({ reasonCode: 'cyrinx_deadline_expired' }),
+    })));
+    expect(inbox.texts).not.toContainEqual(expect.objectContaining({ stage: boundaryStage }));
+    await vi.waitFor(async () => {
+      const report = JSON.parse(await readFile(target, 'utf8')) as MachineReport;
+      expect(report).toMatchObject({
+        codec: { id: 'quiet' },
+        qualification: {
+          cyrinx: { stage: 'quiet' },
+          deadline: { elapsedMs: CYRINX_DEADLINE_MS },
+          fallback: { reasonCode: 'cyrinx_deadline_expired' },
+        },
+      });
+    });
+    inbox.socket.close();
+  });
+
   it('rejects browser-spoofed Cyrinx result/stage authority and never turns it into corpus evidence', async () => {
     const target = await reportPath('cyrinx-spoof');
     const runner = await startProductionRunner({
@@ -945,6 +1006,84 @@ describe('production runner', () => {
       });
     });
     expect(inbox.texts).not.toContainEqual(expect.objectContaining({ kind: 'cyrinx-result', caseId: finalInstruction.caseId }));
+    inbox.socket.close();
+  });
+
+  it('overwrites final-case success when its durable write returns after the immutable deadline', async () => {
+    const target = await reportPath('final-write-deadline');
+    const startAt = 2_000;
+    const deadlineAt = startAt + CYRINX_DEADLINE_MS;
+    let now = startAt;
+    let crossedDeadline = false;
+    const runner = await startProductionRunner({
+      machineId: 'final-write-deadline',
+      role: 'A',
+      port: 0,
+      report: target,
+      tunEvidence: 'none',
+      uiDir: await fixtureUi(),
+      nowForTests: () => now,
+      cyrinxBuildForTests: async () => undefined,
+      cyrinxDigitalForTests: async () => undefined,
+      cyrinxWorkerForTests: fakeCyrinxWorker(),
+      cyrinxSettleForTests: async () => undefined,
+      cyrinxTimerForTests: { set: () => 1, clear: vi.fn() },
+      reportWriterForTests: async (file, report) => {
+        if (!crossedDeadline && report.qualification?.cyrinx.stage === 'complete') {
+          crossedDeadline = true;
+          now = deadlineAt;
+        }
+        return writeMachineReport(file, report);
+      },
+    });
+    runners.push(runner);
+    const inbox = await openInbox(runner);
+    await runner.startCyrinx();
+    await inbox.text(); await inbox.text();
+    let snapshot = await inbox.text() as CyrinxInstructionSnapshot;
+    let sequence = 0n;
+    for (let index = 0; index < 51; index += 1) {
+      const advanced = await advanceCyrinxCase(inbox, snapshot, sequence);
+      snapshot = advanced.snapshot as CyrinxInstructionSnapshot;
+      sequence = advanced.sequence;
+    }
+    const finalInstruction = snapshot.instruction;
+    inbox.socket.send(frame(MessageType.QUALIFICATION_CASE, 1, sequence++, {
+      action: 'accept_cyrinx_instruction',
+      caseId: finalInstruction.caseId,
+      direction: finalInstruction.direction,
+    }));
+    if (finalInstruction.action === 'transmit') {
+      await inbox.binary();
+      inbox.socket.send(frame(MessageType.QUALIFICATION_CASE, 1, sequence++, {
+        action: 'playback_complete',
+        caseId: finalInstruction.caseId,
+        direction: finalInstruction.direction,
+      }));
+    } else {
+      inbox.socket.send(pcm(1, sequence++));
+    }
+
+    expect(await inbox.text()).toMatchObject({
+      codec: 'quiet',
+      stage: 'quiet',
+      deadline: { elapsedMs: CYRINX_DEADLINE_MS },
+      fallback: { reasonCode: 'cyrinx_deadline_expired' },
+    });
+    await vi.waitFor(async () => {
+      const report = JSON.parse(await readFile(target, 'utf8')) as MachineReport;
+      expect(report).toMatchObject({
+        codec: { id: 'quiet' },
+        complete: false,
+        qualification: {
+          cyrinx: { stage: 'quiet' },
+          deadline: { elapsedMs: CYRINX_DEADLINE_MS },
+          fallback: { state: 'activated', reasonCode: 'cyrinx_deadline_expired' },
+        },
+      });
+    });
+    expect(inbox.texts).not.toContainEqual(expect.objectContaining({ kind: 'cyrinx-result', caseId: finalInstruction.caseId }));
+    expect(inbox.texts).not.toContainEqual(expect.objectContaining({ stage: 'complete' }));
     inbox.socket.close();
   });
 
