@@ -6,15 +6,26 @@ import type { Duplex } from 'node:stream';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
-import { decodeFrame, encodeFrame, MessageType, type FwavFrame } from './protocol.js';
-import { writeMachineReport, type MachineReport, type TunEvidence } from './report.js';
 import manifest from '../../../fixtures/corpus/manifest.json' with { type: 'json' };
+import { decodeFrame, encodeFrame, MessageType, type FwavFrame } from './protocol.js';
+import {
+  CYRINX_DEADLINE_MS,
+  MAX_QUEUE_BYTES,
+  MAX_QUEUE_DURATION_MS,
+  QUALIFICATION_DEAD_LINK_TIMEOUT_MS,
+  QUIET_CODEC,
+  writeMachineReport,
+  type MachineReport,
+  type MachineResult,
+  type TunEvidence,
+} from './report.js';
 
 export const LOOPBACK_HOST = '127.0.0.1';
 export const HEADER_BYTES = 32;
 export const MAX_MESSAGE_BYTES = 256 * 1024;
 export const AUDIO_SETTINGS_MESSAGE_TYPE = MessageType.AUDIO_SETTINGS;
 const MAX_QUEUE_AGE_MS = 5_000;
+
 function findProjectRoot(from: string): string {
   let current = from;
   while (path.dirname(current) !== current) {
@@ -32,7 +43,16 @@ export interface QualificationReport {
 }
 export interface ParsedAudioSettingsFrame { epoch: number; sequence: bigint; payload: Buffer; }
 export interface RunnerQualificationConfig {
-  machineId: string; role: 'A' | 'B'; reportTarget: string; tunEvidence: string; evidenceMode: 'Fixture' | 'Loopback' | 'Open air'; evidenceClass: 'Fixture' | 'Loopback' | 'Open air';
+  machineId: string;
+  role: 'A' | 'B';
+  reportTarget: string;
+  tunEvidence: string;
+  tunEvidenceSource: TunEvidence['source'];
+  evidenceMode: 'Fixture' | 'Loopback' | 'Open air';
+  evidenceClass: 'Fixture' | 'Loopback' | 'Open air';
+  buildCommit: string;
+  codec: MachineReport['codec'];
+  qualification: NonNullable<MachineReport['qualification']>;
 }
 export interface RunnerReportAuthority {
   tunEvidence: TunEvidence;
@@ -45,13 +65,25 @@ export interface BridgeState {
   stampedResults: Array<Record<string, unknown>>;
 }
 export interface BridgeServer {
-  port: number; sendPcmPlayback(frame: Buffer): void; reset(): number; close(): Promise<void>; state(): BridgeState;
+  port: number; sendPcmPlayback(frame: Buffer): void; reset(): Promise<number>; close(): Promise<void>; state(): BridgeState;
 }
 export interface BridgeServerOptions {
-  host: typeof LOOPBACK_HOST; port: number; artifactDir: string; uiDir?: string; qualificationConfig?: RunnerQualificationConfig; reportAuthority?: RunnerReportAuthority; codecAssetDir?: string; codecAssets?: readonly CodecAsset[];
+  host: typeof LOOPBACK_HOST;
+  port: number;
+  artifactDir: string;
+  uiDir?: string;
+  qualificationConfig?: RunnerQualificationConfig;
+  reportAuthority?: RunnerReportAuthority;
+  codecAssetDir?: string;
+  codecAssets?: readonly CodecAsset[];
+  reportWriter?: (reportPath: string, report: MachineReport) => Promise<string>;
+  now?: () => number;
 }
 
-function fail(message: string): never { throw new Error(message); }
+class BridgeInputError extends Error {
+  constructor(readonly reasonCode: string) { super(reasonCode); }
+}
+function fail(message: string): never { throw new BridgeInputError(message); }
 function asBuffer(rawData: RawData): Buffer { return Buffer.isBuffer(rawData) ? rawData : Array.isArray(rawData) ? Buffer.concat(rawData) : Buffer.from(rawData); }
 function isSameOriginLoopback(origin: string | undefined, port: number): boolean {
   if (!origin) return false;
@@ -65,41 +97,86 @@ function contentType(file: string): string {
   if (file.endsWith('.json')) return 'application/json; charset=utf-8';
   return 'application/octet-stream';
 }
-function immutableConfig(config: RunnerQualificationConfig): RunnerQualificationConfig { return Object.freeze({ ...config }); }
+function immutableConfig(config: RunnerQualificationConfig): RunnerQualificationConfig {
+  return Object.freeze({ ...config, codec: Object.freeze({ ...config.codec }), qualification: Object.freeze({ ...config.qualification, deadline: Object.freeze({ ...config.qualification.deadline }), fallback: Object.freeze({ ...config.qualification.fallback }) }) });
+}
 function sha256(body: Buffer): string { return createHash('sha256').update(body).digest('hex'); }
 function hasForbiddenAuthority(value: unknown): boolean {
-  const forbidden = new Set(['machineId', 'role', 'reportTarget', 'report', 'tunEvidence', 'evidenceMode', 'evidenceClass', 'hostIdentity']);
+  const forbidden = new Set(['machineId', 'role', 'reportTarget', 'report', 'tunEvidence', 'tunEvidenceSource', 'evidenceMode', 'evidenceClass', 'hostIdentity', 'buildCommit', 'codec', 'qualification', 'deadLinkTimeoutMs', 'cyrinxDeadlineMs']);
   if (!value || typeof value !== 'object') return false;
   if (Array.isArray(value)) return value.some(hasForbiddenAuthority);
   return Object.entries(value).some(([key, child]) => forbidden.has(key) || hasForbiddenAuthority(child));
 }
 function parseJsonPayload(frame: FwavFrame): Record<string, unknown> {
   if (frame.payload.length === 0) return {};
-  try { const value = JSON.parse(frame.payload.toString('utf8')) as unknown; if (!value || Array.isArray(value) || typeof value !== 'object') fail('FWAV control payload must be a JSON object'); return value as Record<string, unknown>; } catch (error) { if (error instanceof Error && error.message.startsWith('FWAV')) throw error; fail('FWAV control payload is invalid JSON'); }
+  try {
+    const value = JSON.parse(frame.payload.toString('utf8')) as unknown;
+    if (!value || Array.isArray(value) || typeof value !== 'object') fail('control_payload_not_object');
+    return value as Record<string, unknown>;
+  } catch (error) {
+    if (error instanceof BridgeInputError) throw error;
+    fail('control_payload_invalid_json');
+  }
 }
 
-type BrowserAudio = Pick<MachineReport['audio'], 'contextSampleRate' | 'captureSampleRate' | 'channels' | 'echoCancellation' | 'noiseSuppression' | 'autoGainControl'> & { browserVersion: string };
-type BrowserResult = MachineReport['results'][number] & { queues: MachineReport['queues'] };
-type CorpusEntry = { id: string; direction: MachineReport['results'][number]['direction']; size: number; sha256: string };
-function exactObject(value: Record<string, unknown>, keys: readonly string[]): boolean { const actual = Object.keys(value).sort(); return actual.length === keys.length && actual.every((key, index) => key === [...keys].sort()[index]); }
-function asBoolean(value: unknown, name: string): boolean { if (typeof value !== 'boolean') fail(`browser ${name} is invalid`); return value; }
-function asInteger(value: unknown, name: string): number { if (!Number.isInteger(value) || (value as number) < 0) fail(`browser ${name} is invalid`); return value as number; }
-function asText(value: unknown, name: string): string { if (typeof value !== 'string' || value.trim() === '') fail(`browser ${name} is invalid`); return value; }
-function parseBrowserAudio(payload: Record<string, unknown>): BrowserAudio {
-  if (!exactObject(payload, ['browserVersion', 'contextSampleRate', 'captureSampleRate', 'channels', 'echoCancellation', 'noiseSuppression', 'autoGainControl'])) fail('browser audio settings shape is invalid');
-  const audio: BrowserAudio = { browserVersion: asText(payload.browserVersion, 'browser version'), contextSampleRate: asInteger(payload.contextSampleRate, 'context sample rate'), captureSampleRate: asInteger(payload.captureSampleRate, 'capture sample rate'), channels: asInteger(payload.channels, 'channels'), echoCancellation: asBoolean(payload.echoCancellation, 'echo cancellation'), noiseSuppression: asBoolean(payload.noiseSuppression, 'noise suppression'), autoGainControl: asBoolean(payload.autoGainControl, 'automatic gain control') };
-  if (audio.contextSampleRate !== 48_000 || audio.captureSampleRate !== 48_000 || audio.channels !== 1 || audio.echoCancellation || audio.noiseSuppression || audio.autoGainControl) fail('browser audio settings are not qualifying');
-  return audio;
+type BrowserAudio = Required<MachineReport['audio']> & { browserVersion: string };
+interface BrowserResult {
+  epoch: number; caseId: string; digest: string | null; receivedSha256: string | null;
+  acquisitionMs: number; airtimeMs: number; deliveryCount: number; bytePerfect: boolean;
+  coldAcquired: boolean; complete: boolean; corrupt: boolean; missing: number; duplicates: number;
+  queues: MachineReport['queues'];
 }
-function parseBrowserResult(payload: Record<string, unknown>, epoch: number, direction: MachineReport['results'][number]['direction'], expected: ReadonlyMap<string, CorpusEntry>): BrowserResult {
-  if (!exactObject(payload, ['acquisitionMs', 'airtimeMs', 'bytePerfect', 'caseId', 'deliveryCount', 'digest', 'queues'])) fail('browser qualification result shape is invalid');
-  const queues = payload.queues;
-  if (!queues || typeof queues !== 'object' || Array.isArray(queues) || !exactObject(queues as Record<string, unknown>, ['captureHighWaterBytes', 'captureHighWaterMs', 'discontinuities', 'playbackHighWaterBytes', 'playbackHighWaterMs'])) fail('browser queue evidence shape is invalid');
-  const result: BrowserResult = { epoch, direction, caseId: asText(payload.caseId, 'case ID'), digest: asText(payload.digest, 'digest'), acquisitionMs: asInteger(payload.acquisitionMs, 'acquisition time'), airtimeMs: asInteger(payload.airtimeMs, 'airtime'), deliveryCount: asInteger(payload.deliveryCount, 'delivery count'), bytePerfect: asBoolean(payload.bytePerfect, 'byte-perfect flag'), queues: { captureHighWaterBytes: asInteger((queues as Record<string, unknown>).captureHighWaterBytes, 'capture queue bytes'), captureHighWaterMs: asInteger((queues as Record<string, unknown>).captureHighWaterMs, 'capture queue time'), playbackHighWaterBytes: asInteger((queues as Record<string, unknown>).playbackHighWaterBytes, 'playback queue bytes'), playbackHighWaterMs: asInteger((queues as Record<string, unknown>).playbackHighWaterMs, 'playback queue time'), discontinuities: asInteger((queues as Record<string, unknown>).discontinuities, 'queue discontinuities') } };
-  if (!/^[a-f0-9]{64}$/i.test(result.digest) || result.deliveryCount !== 1 || !result.bytePerfect) fail('browser qualification result integrity is invalid');
-  const corpus = expected.get(result.caseId);
-  if (!corpus || corpus.direction !== direction || corpus.sha256 !== result.digest) fail('browser qualification result does not match committed corpus');
-  return result;
+type CorpusEntry = { id: string; direction: MachineResult['direction']; size: 256 | 1536; sha256: string };
+function exactObject(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(value).sort(); const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+function asBoolean(value: unknown, name: string): boolean { if (typeof value !== 'boolean') fail(name); return value; }
+function asInteger(value: unknown, name: string): number { if (!Number.isInteger(value) || (value as number) < 0) fail(name); return value as number; }
+function asText(value: unknown, name: string): string { if (typeof value !== 'string' || value.trim() === '') fail(name); return value; }
+function parseBrowserAudio(payload: Record<string, unknown>): BrowserAudio {
+  const keys = ['browserVersion', 'microphoneLabel', 'contextState', 'contextSampleRate', 'captureSampleRate', 'channels', 'echoCancellation', 'noiseSuppression', 'autoGainControl'];
+  if (!exactObject(payload, keys)) fail('audio_settings_shape_invalid');
+  return {
+    browserVersion: asText(payload.browserVersion, 'browser_version_invalid'),
+    microphoneLabel: asText(payload.microphoneLabel, 'microphone_label_invalid'),
+    contextState: asText(payload.contextState, 'audio_context_state_invalid'),
+    contextSampleRate: asInteger(payload.contextSampleRate, 'context_sample_rate_invalid'),
+    captureSampleRate: asInteger(payload.captureSampleRate, 'capture_sample_rate_invalid'),
+    channels: asInteger(payload.channels, 'channels_invalid'),
+    echoCancellation: asBoolean(payload.echoCancellation, 'echo_cancellation_invalid'),
+    noiseSuppression: asBoolean(payload.noiseSuppression, 'noise_suppression_invalid'),
+    autoGainControl: asBoolean(payload.autoGainControl, 'auto_gain_control_invalid'),
+  };
+}
+function parseQueues(value: unknown): MachineReport['queues'] {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !exactObject(value as Record<string, unknown>, ['captureHighWaterBytes', 'captureHighWaterMs', 'discontinuities', 'playbackHighWaterBytes', 'playbackHighWaterMs'])) fail('queue_evidence_shape_invalid');
+  const queues = value as Record<string, unknown>;
+  return { captureHighWaterBytes: asInteger(queues.captureHighWaterBytes, 'capture_queue_bytes_invalid'), captureHighWaterMs: asInteger(queues.captureHighWaterMs, 'capture_queue_time_invalid'), playbackHighWaterBytes: asInteger(queues.playbackHighWaterBytes, 'playback_queue_bytes_invalid'), playbackHighWaterMs: asInteger(queues.playbackHighWaterMs, 'playback_queue_time_invalid'), discontinuities: asInteger(queues.discontinuities, 'queue_discontinuities_invalid') };
+}
+function parseBrowserResult(payload: Record<string, unknown>, epoch: number): BrowserResult {
+  const keys = ['caseId', 'digest', 'acquisitionMs', 'airtimeMs', 'deliveryCount', 'bytePerfect', 'coldAcquired', 'complete', 'corrupt', 'missing', 'duplicates', 'queues'];
+  if (!exactObject(payload, keys)) fail('qualification_result_shape_invalid');
+  const complete = asBoolean(payload.complete, 'complete_flag_invalid');
+  const received = payload.digest;
+  if (received !== null && (typeof received !== 'string' || !/^[a-f0-9]{64}$/i.test(received))) fail('received_digest_invalid');
+  if (complete && received === null) fail('complete_result_digest_missing');
+  return {
+    epoch,
+    caseId: asText(payload.caseId, 'case_id_invalid'),
+    digest: received,
+    receivedSha256: received,
+    acquisitionMs: asInteger(payload.acquisitionMs, 'acquisition_time_invalid'),
+    airtimeMs: asInteger(payload.airtimeMs, 'airtime_invalid'),
+    deliveryCount: asInteger(payload.deliveryCount, 'delivery_count_invalid'),
+    bytePerfect: asBoolean(payload.bytePerfect, 'byte_perfect_invalid'),
+    coldAcquired: asBoolean(payload.coldAcquired, 'cold_acquisition_invalid'),
+    complete,
+    corrupt: asBoolean(payload.corrupt, 'corrupt_flag_invalid'),
+    missing: asInteger(payload.missing, 'missing_count_invalid'),
+    duplicates: asInteger(payload.duplicates, 'duplicate_count_invalid'),
+    queues: parseQueues(payload.queues),
+  };
 }
 
 export function parseAudioSettingsFrame(frame: Buffer): ParsedAudioSettingsFrame {
@@ -118,10 +195,14 @@ export async function readQualificationReport(reportPath: string): Promise<Quali
   return report;
 }
 function closeServer(server: Server, webSocketServer: WebSocketServer): Promise<void> { return new Promise((resolve, reject) => webSocketServer.close((webSocketError) => webSocketError ? reject(webSocketError) : server.close((serverError) => serverError ? reject(serverError) : resolve()))); }
-
 interface QueueEntry { frame: FwavFrame; enqueuedAt: number; }
 interface Queue { frames: QueueEntry[]; bytes: number; overflowed: boolean; }
 function queueName(type: MessageType): string { return MessageType[type]; }
+function acoustic(type: MessageType): boolean { return type === MessageType.PCM_CAPTURE || type === MessageType.PCM_PLAYBACK; }
+function p95(values: number[]): number {
+  const ordered = [...values].sort((a, b) => a - b);
+  return ordered[Math.max(0, Math.ceil(ordered.length * 0.95) - 1)] ?? Number.POSITIVE_INFINITY;
+}
 
 export async function createBridgeServer(options: BridgeServerOptions): Promise<BridgeServer> {
   if (options.host !== LOOPBACK_HOST) fail(`bridge host must be ${LOOPBACK_HOST}`);
@@ -129,6 +210,9 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   await mkdir(options.artifactDir, { recursive: true });
   const config = options.qualificationConfig && immutableConfig(options.qualificationConfig);
   const corpus = manifest.cases as CorpusEntry[];
+  const expectedDirection = config?.role === 'A' ? 'B → A' : 'A → B';
+  const expectedCorpus = corpus.filter((entry) => entry.direction === expectedDirection);
+  const expectedById = new Map(expectedCorpus.map((entry) => [entry.id, entry]));
   const uiRoot = options.uiDir ? await realpath(options.uiDir) : undefined;
   const assets = new Map<string, CodecAsset>();
   for (const asset of options.codecAssets ?? []) {
@@ -143,12 +227,9 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     const candidate = path.resolve(root, requestPath);
     if (candidate !== root && !candidate.startsWith(`${root}${path.sep}`)) { response.writeHead(404).end(); return; }
     try {
-      const metadata = await lstat(candidate);
-      if (!metadata.isFile() || metadata.isSymbolicLink()) { response.writeHead(404).end(); return; }
-      const resolved = await realpath(candidate);
-      if (!resolved.startsWith(`${root}${path.sep}`)) { response.writeHead(404).end(); return; }
-      const body = await readFile(resolved);
-      if (asset && sha256(body) !== asset.sha256) { response.writeHead(404).end(); return; }
+      const metadata = await lstat(candidate); if (!metadata.isFile() || metadata.isSymbolicLink()) { response.writeHead(404).end(); return; }
+      const resolved = await realpath(candidate); if (!resolved.startsWith(`${root}${path.sep}`)) { response.writeHead(404).end(); return; }
+      const body = await readFile(resolved); if (asset && sha256(body) !== asset.sha256) { response.writeHead(404).end(); return; }
       const headers: Record<string, string> = { 'content-type': mime ?? contentType(requestPath), 'content-length': String(body.byteLength), 'x-content-type-options': 'nosniff', 'cache-control': 'public, max-age=31536000, immutable' };
       if (asset) headers.etag = `"sha256-${asset.sha256}"`;
       response.writeHead(200, headers); response.end(headOnly ? undefined : body);
@@ -159,79 +240,148 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     if (request.method !== 'GET' && request.method !== 'HEAD') { response.writeHead(405).end(); return; }
     if (url.pathname === '/qualification-config' && config) { response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); response.end(JSON.stringify(config)); return; }
     if (url.pathname.startsWith('/codec-assets/')) {
-      const filename = url.pathname.slice('/codec-assets/'.length);
-      const asset = !url.search && assets.get(filename);
+      const filename = url.pathname.slice('/codec-assets/'.length); const asset = !url.search && assets.get(filename);
       if (!asset || !assetRoot || filename !== encodeURIComponent(filename)) { response.writeHead(404).end(); return; }
       void serveFile(response, assetRoot, filename, asset.mimeType, asset, request.method === 'HEAD'); return;
     }
-    if (url.pathname === '/' && !url.search) { if (uiRoot) { void serveFile(response, uiRoot, 'index.html'); return; } void readFile(MODEM_UI_PATH).then((page) => { response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); response.end(page); }).catch(() => { response.writeHead(404).end(); }); return; }
+    if (url.pathname === '/' && !url.search) {
+      if (uiRoot) { void serveFile(response, uiRoot, 'index.html'); return; }
+      void readFile(MODEM_UI_PATH).then((page) => { response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); response.end(page); }).catch(() => { response.writeHead(404).end(); }); return;
+    }
     if (uiRoot && !url.search) { void serveFile(response, uiRoot, url.pathname.slice(1)); return; }
     response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }); response.end('Not found');
   });
   const webSocketServer = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });
   const clients = new Set<WebSocket>(); const queues = new Map<MessageType, Queue>();
   const state: BridgeState = { epoch: 1, rejectedFrames: 0, overflowedQueues: [], discontinuities: 0, queueCounts: {}, stampedResults: [] };
-  const audioByEpoch = new Map<number, BrowserAudio>();
-  const resultsByEpoch = new Map<number, Map<string, BrowserResult>>();
+  let audio: BrowserAudio | undefined; let generation = 1; let writeTail: Promise<unknown> = Promise.resolve();
+  let results = new Map<string, BrowserResult>(); let failureReasons = new Set<string>();
+  let owner: WebSocket | undefined; let epochClaimed = false; let reconnectAllowed = false;
   for (const type of [MessageType.PCM_CAPTURE, MessageType.PCM_PLAYBACK, MessageType.QUALIFICATION_CASE, MessageType.QUALIFICATION_RESULT, MessageType.ERROR, MessageType.RESET]) queues.set(type, { frames: [], bytes: 0, overflowed: false });
   const refreshState = () => { for (const [type, queue] of queues) state.queueCounts[queueName(type)] = queue.frames.length; };
-  const clearQueues = () => { for (const queue of queues.values()) { queue.frames = []; queue.bytes = 0; } refreshState(); };
+  const clearQueues = () => { for (const queue of queues.values()) { queue.frames = []; queue.bytes = 0; queue.overflowed = false; } refreshState(); };
   const enqueue = (frame: FwavFrame): void => {
     const queue = queues.get(frame.type); if (!queue) return;
-    const now = Date.now();
-    while (queue.frames.length && now - queue.frames[0]!.enqueuedAt > MAX_QUEUE_AGE_MS) { const expired = queue.frames.shift()!; queue.bytes -= expired.frame.payload.byteLength + HEADER_BYTES; state.discontinuities += 1; }
-    if (queue.bytes + frame.payload.byteLength + HEADER_BYTES > MAX_MESSAGE_BYTES) { queue.overflowed = true; state.overflowedQueues = [...new Set([...state.overflowedQueues, queueName(frame.type)])]; state.discontinuities += 1; fail(`FWAV ${queueName(frame.type)} queue overflow`); }
+    const now = options.now?.() ?? Date.now();
+    while (queue.frames.length && now - queue.frames[0]!.enqueuedAt > MAX_QUEUE_AGE_MS) {
+      const expired = queue.frames.shift()!; queue.bytes -= expired.frame.payload.byteLength + HEADER_BYTES;
+      if (acoustic(frame.type)) state.discontinuities += 1;
+    }
+    if (queue.bytes + frame.payload.byteLength + HEADER_BYTES > MAX_MESSAGE_BYTES) {
+      queue.overflowed = true; state.overflowedQueues = [...new Set([...state.overflowedQueues, queueName(frame.type)])];
+      if (acoustic(frame.type)) state.discontinuities += 1;
+      fail(`FWAV ${queueName(frame.type)} queue overflow`);
+    }
     queue.frames.push({ frame, enqueuedAt: now }); queue.bytes += frame.payload.byteLength + HEADER_BYTES; refreshState();
   };
-  const reset = (): number => { state.epoch += 1; clearQueues(); audioByEpoch.clear(); resultsByEpoch.clear(); const resetFrame = encodeFrame({ type: MessageType.RESET, epoch: state.epoch, sequence: 0n, payload: Buffer.alloc(0) }); for (const client of clients) if (client.readyState === client.OPEN) client.send(resetFrame); return state.epoch; };
-  const expectedDirection = config?.role === 'A' ? 'B → A' : 'A → B';
-  const expectedCorpus = new Map(corpus.filter((entry) => entry.direction === expectedDirection).map((entry) => [entry.id, entry]));
-  const persistMachineReport = async (epoch: number): Promise<string | undefined> => {
-    if (!config || !options.reportAuthority) return undefined;
-    const audio = audioByEpoch.get(epoch); const results = resultsByEpoch.get(epoch);
-    if (!audio || !results || results.size !== 25) return undefined;
+  const buildReport = (): MachineReport | undefined => {
+    if (!config || !options.reportAuthority || !expectedDirection) return undefined;
+    const canonicalResults: MachineResult[] = expectedCorpus.map((entry) => {
+      const observed = results.get(entry.id);
+      return observed ? { epoch: state.epoch, direction: expectedDirection, caseId: entry.id, size: entry.size, expectedSha256: entry.sha256, receivedSha256: observed.receivedSha256 ?? null, acquisitionMs: observed.acquisitionMs, airtimeMs: observed.airtimeMs, deliveryCount: observed.deliveryCount, bytePerfect: observed.bytePerfect, coldAcquired: observed.coldAcquired, observed: true, complete: observed.complete, corrupt: observed.corrupt, missing: observed.missing, duplicates: observed.duplicates } : { epoch: state.epoch, direction: expectedDirection, caseId: entry.id, size: entry.size, expectedSha256: entry.sha256, receivedSha256: null, acquisitionMs: 0, airtimeMs: 0, deliveryCount: 0, bytePerfect: false, coldAcquired: false, observed: false, complete: false, corrupt: false, missing: 1, duplicates: 0 };
+    });
     const values = [...results.values()];
-    if (values.some((value) => value.direction !== expectedDirection) || values.length !== expectedCorpus.size || values.some((value) => !expectedCorpus.has(value.caseId)) || [...expectedCorpus.keys()].some((caseId) => !results.has(`${expectedDirection}\u0000${caseId}`))) fail('browser corpus evidence is incomplete');
-    const queues = values.reduce<MachineReport['queues']>((current, value) => ({ captureHighWaterBytes: Math.max(current.captureHighWaterBytes, value.queues.captureHighWaterBytes), captureHighWaterMs: Math.max(current.captureHighWaterMs, value.queues.captureHighWaterMs), playbackHighWaterBytes: Math.max(current.playbackHighWaterBytes, value.queues.playbackHighWaterBytes), playbackHighWaterMs: Math.max(current.playbackHighWaterMs, value.queues.playbackHighWaterMs), discontinuities: Math.max(current.discontinuities, value.queues.discontinuities) }), { captureHighWaterBytes: 0, captureHighWaterMs: 0, playbackHighWaterBytes: 0, playbackHighWaterMs: 0, discontinuities: state.discontinuities });
-    const report: MachineReport = { schemaVersion: 1, capturedAt: new Date().toISOString(), machine: { hostName: config.machineId, os: options.reportAuthority.build.os, architecture: options.reportAuthority.build.architecture, browserVersion: audio.browserVersion, commit: options.reportAuthority.build.commit }, evidenceClass: config.evidenceClass, epoch, codec: { commit: 'quiet-72782542a41f1b615a02c2ab43a0edb56edb6ce4', profile: 'audible-7k-channel-0', advertisedMtu: 1357 }, audio: { contextSampleRate: audio.contextSampleRate, captureSampleRate: audio.captureSampleRate, channels: audio.channels, echoCancellation: audio.echoCancellation, noiseSuppression: audio.noiseSuppression, autoGainControl: audio.autoGainControl }, queues, results: values.map(({ queues: _queues, ...result }) => result), complete: true, runner: { machineId: config.machineId, role: config.role, reportTarget: config.reportTarget, evidenceClass: config.evidenceClass, tunEvidence: options.reportAuthority.tunEvidence } };
-    return writeMachineReport(config.reportTarget, report);
+    const queuesEvidence = values.reduce<MachineReport['queues']>((current, value) => ({ captureHighWaterBytes: Math.max(current.captureHighWaterBytes, value.queues.captureHighWaterBytes), captureHighWaterMs: Math.max(current.captureHighWaterMs, value.queues.captureHighWaterMs), playbackHighWaterBytes: Math.max(current.playbackHighWaterBytes, value.queues.playbackHighWaterBytes), playbackHighWaterMs: Math.max(current.playbackHighWaterMs, value.queues.playbackHighWaterMs), discontinuities: Math.max(current.discontinuities, value.queues.discontinuities) }), { captureHighWaterBytes: 0, captureHighWaterMs: 0, playbackHighWaterBytes: 0, playbackHighWaterMs: 0, discontinuities: state.discontinuities });
+    const good = canonicalResults.filter((value) => value.observed && value.complete && !value.corrupt && value.missing === 0 && value.duplicates === 0 && value.deliveryCount === 1 && value.bytePerfect && value.receivedSha256 === value.expectedSha256);
+    const reasons = new Set(failureReasons);
+    const audioPassed = Boolean(audio?.microphoneLabel && audio.contextState === 'running' && audio.contextSampleRate === 48_000 && audio.captureSampleRate === 48_000 && audio.channels === 1 && !audio.echoCancellation && !audio.noiseSuppression && !audio.autoGainControl);
+    if (!audioPassed) reasons.add('audio_preflight_failed');
+    if (good.filter((value) => value.size === 256).length < 19 || good.filter((value) => value.size === 1536).length < 5) reasons.add('corpus_incomplete');
+    if (good.length > 0 && !good.some((value) => value.coldAcquired)) reasons.add('cold_acquisition_failed');
+    if (good.length > 0 && p95(good.map((value) => value.airtimeMs)) >= QUALIFICATION_DEAD_LINK_TIMEOUT_MS / 3) reasons.add('airtime_budget_exceeded');
+    if (queuesEvidence.captureHighWaterBytes > MAX_QUEUE_BYTES || queuesEvidence.playbackHighWaterBytes > MAX_QUEUE_BYTES || queuesEvidence.captureHighWaterMs > MAX_QUEUE_DURATION_MS || queuesEvidence.playbackHighWaterMs > MAX_QUEUE_DURATION_MS) reasons.add('queue_bound_exceeded');
+    if (queuesEvidence.discontinuities > 0) reasons.add('queue_discontinuity');
+    for (const value of canonicalResults.filter((entry) => entry.observed)) {
+      if (value.duplicates! > 0 || value.deliveryCount !== 1) reasons.add('duplicate_case');
+      if (value.receivedSha256 !== value.expectedSha256 || !value.bytePerfect || value.corrupt) reasons.add('bad_digest');
+      if (!value.complete || value.missing! > 0) reasons.add('partial_evidence');
+    }
+    const corpusComplete = !reasons.has('corpus_incomplete') && !reasons.has('bad_digest') && !reasons.has('duplicate_case') && !reasons.has('partial_evidence') && !reasons.has('airtime_budget_exceeded') && !reasons.has('cold_acquisition_failed') && !reasons.has('queue_bound_exceeded') && !reasons.has('queue_discontinuity') && audioPassed;
+    const physicalGate = config.evidenceClass !== 'Open air' ? 'not_physical' : corpusComplete ? 'passed' : values.length >= 24 || [...reasons].some((reason) => reason !== 'corpus_incomplete' && reason !== 'audio_preflight_failed') ? 'failed' : 'pending';
+    return { schemaVersion: 1, capturedAt: new Date().toISOString(), machine: { hostName: config.machineId, os: options.reportAuthority.build.os, architecture: options.reportAuthority.build.architecture, browserVersion: audio?.browserVersion ?? 'Unavailable', commit: options.reportAuthority.build.commit }, evidenceClass: config.evidenceClass, epoch: state.epoch, codec: { ...config.codec }, audio: audio ? { microphoneLabel: audio.microphoneLabel, contextState: audio.contextState, contextSampleRate: audio.contextSampleRate, captureSampleRate: audio.captureSampleRate, channels: audio.channels, echoCancellation: audio.echoCancellation, noiseSuppression: audio.noiseSuppression, autoGainControl: audio.autoGainControl } : { microphoneLabel: 'Unavailable', contextState: 'unavailable', contextSampleRate: 0, captureSampleRate: 0, channels: 0, echoCancellation: false, noiseSuppression: false, autoGainControl: false }, queues: queuesEvidence, results: canonicalResults, complete: corpusComplete, reasonCodes: [...reasons], qualification: { ...config.qualification, deadline: { ...config.qualification.deadline }, fallback: { ...config.qualification.fallback }, physicalGate }, runner: { machineId: config.machineId, role: config.role, reportTarget: config.reportTarget, evidenceClass: config.evidenceClass, tunEvidence: options.reportAuthority.tunEvidence } };
   };
+  const persist = (expectedGeneration = generation): Promise<string | undefined> => {
+    const snapshot = buildReport(); if (!snapshot || !config) return Promise.resolve(undefined);
+    const writer = options.reportWriter ?? writeMachineReport;
+    const task = writeTail.then(async () => expectedGeneration === generation ? writer(config.reportTarget, snapshot) : undefined);
+    writeTail = task.catch(() => undefined); return task;
+  };
+  const reset = async (): Promise<number> => {
+    generation += 1; state.epoch += 1; audio = undefined; results = new Map(); failureReasons = new Set(); state.stampedResults = []; state.overflowedQueues = []; state.discontinuities = 0; clearQueues(); reconnectAllowed = true;
+    await persist(generation);
+    const resetFrame = encodeFrame({ type: MessageType.RESET, epoch: state.epoch, sequence: 0n, payload: Buffer.alloc(0) });
+    for (const client of clients) if (client.readyState === client.OPEN) client.send(resetFrame);
+    return state.epoch;
+  };
+  if (config && options.reportAuthority) await persist();
   const handleFrame = async (socket: WebSocket, rawData: RawData, isBinary: boolean, lastSequence: { value: bigint }): Promise<void> => {
     try {
-      if (!isBinary) fail('bridge accepts binary FWAV messages only');
+      if (!isBinary) fail('binary_frames_required');
       const frame = decodeFrame(asBuffer(rawData));
-      // The walking-skeleton settings report may establish the first browser
-      // epoch; every subsequent frame is pinned to the server's current one.
       if (frame.type === MessageType.AUDIO_SETTINGS && lastSequence.value < 0n && state.epoch === 1) state.epoch = frame.epoch;
-      if (frame.epoch !== state.epoch || frame.sequence <= lastSequence.value) fail('FWAV frame is stale or duplicate');
+      if (frame.epoch !== state.epoch || frame.sequence <= lastSequence.value) fail('stale_or_duplicate_frame');
       lastSequence.value = frame.sequence;
-      if (frame.type === MessageType.RESET) { reset(); return; }
+      if (frame.type === MessageType.RESET) { await reset(); lastSequence.value = -1n; return; }
       if ([MessageType.QUALIFICATION_CASE, MessageType.QUALIFICATION_RESULT, MessageType.ERROR].includes(frame.type)) {
-        const payload = parseJsonPayload(frame); if (hasForbiddenAuthority(payload)) fail('FWAV browser payload attempts to own runner authority');
+        const payload = parseJsonPayload(frame); if (hasForbiddenAuthority(payload)) fail('browser_authority_forbidden');
         if (frame.type === MessageType.QUALIFICATION_RESULT && config) {
-          const result = parseBrowserResult(payload, frame.epoch, expectedDirection!, expectedCorpus); const key = `${result.direction}\u0000${result.caseId}`; const results = resultsByEpoch.get(frame.epoch) ?? new Map<string, BrowserResult>();
-          if (results.has(key)) fail('browser qualification result is duplicate'); results.set(key, result); resultsByEpoch.set(frame.epoch, results);
-          state.stampedResults.push({ ...payload, machineId: config.machineId, role: config.role, reportTarget: config.reportTarget, tunEvidence: config.tunEvidence, evidenceMode: config.evidenceMode, evidenceClass: config.evidenceClass });
-          const reportPath = await persistMachineReport(frame.epoch); if (reportPath) socket.send(JSON.stringify({ reportPath, complete: true, physicalQualification: config.evidenceClass === 'Open air' }));
+          let result: BrowserResult;
+          try {
+            result = parseBrowserResult(payload, frame.epoch);
+            if (!expectedById.has(result.caseId)) fail('unknown_case');
+          } catch (error) {
+            failureReasons.add(error instanceof BridgeInputError ? error.reasonCode : 'qualification_result_invalid');
+            await persist(); throw error;
+          }
+          const existing = results.get(result.caseId);
+          if (existing) {
+            results.set(result.caseId, { ...existing, deliveryCount: Math.max(2, existing.deliveryCount + 1), duplicates: existing.duplicates! + 1 });
+            failureReasons.add('duplicate_case'); await persist(); fail('duplicate_case');
+          }
+          results.set(result.caseId, result);
+          state.stampedResults.push({ caseId: result.caseId, epoch: frame.epoch, machineId: config.machineId, role: config.role, evidenceClass: config.evidenceClass });
+          const acceptedGeneration = generation;
+          await persist(acceptedGeneration);
+          if (acceptedGeneration !== generation || frame.epoch !== state.epoch) return;
+          socket.send(JSON.stringify({ kind: 'qualification-result', caseId: result.caseId, epoch: frame.epoch, accepted: true }));
         }
       }
       if (frame.type === MessageType.AUDIO_SETTINGS) {
-        if (config) { const payload = parseJsonPayload(frame); if (hasForbiddenAuthority(payload)) fail('FWAV browser payload attempts to own runner authority'); audioByEpoch.set(frame.epoch, parseBrowserAudio(payload)); }
+        if (config) {
+          const payload = parseJsonPayload(frame); if (hasForbiddenAuthority(payload)) fail('browser_authority_forbidden');
+          audio = parseBrowserAudio(payload); await persist();
+        }
         const reportPath = path.join(options.artifactDir, 'loopback-qualification.json');
         await writeQualificationReport({ schemaVersion: 1, evidencePath: 'Loopback', physicalQualification: false, qualificationStatus: 'not-physical', capturedAt: new Date().toISOString(), reportPath, frame: { messageType: 'AUDIO_SETTINGS', epoch: frame.epoch, sequence: frame.sequence.toString(), payloadBytes: frame.payload.byteLength } });
         socket.send(JSON.stringify({ reportPath, physicalQualification: false })); return;
       }
       enqueue(frame);
-    } catch (error) { state.rejectedFrames += 1; socket.close(1008, error instanceof Error ? error.message : 'invalid FWAV message'); }
+    } catch (error) {
+      if (config && error instanceof BridgeInputError) {
+        failureReasons.add(error.reasonCode);
+        await persist().catch(() => undefined);
+      }
+      state.rejectedFrames += 1;
+      socket.close(1008, error instanceof Error ? error.message : 'invalid_fwav_message');
+    }
   };
-  const sendPcmPlayback = (encoded: Buffer): void => { const frame = decodeFrame(encoded); if (frame.type !== MessageType.PCM_PLAYBACK) fail('bridge only forwards PCM_PLAYBACK frames'); if (frame.epoch !== state.epoch) fail('bridge rejects stale PCM playback epoch'); enqueue(frame); for (const client of clients) if (client.readyState === client.OPEN) client.send(encoded); };
+  const sendPcmPlayback = (encoded: Buffer): void => {
+    const frame = decodeFrame(encoded); if (frame.type !== MessageType.PCM_PLAYBACK) fail('bridge only forwards PCM_PLAYBACK frames'); if (frame.epoch !== state.epoch) fail('bridge rejects stale PCM playback epoch');
+    enqueue(frame); for (const client of clients) if (client.readyState === client.OPEN) client.send(encoded);
+  };
   server.on('upgrade', (request: IncomingMessage, socket, head) => {
     const port = (server.address() as import('node:net').AddressInfo | null)?.port; const route = new URL(request.url ?? '/', `http://${LOOPBACK_HOST}`).pathname;
     if (!port || route !== '/bridge' || !isSameOriginLoopback(request.headers.origin, port)) { rejectUpgrade(socket); return; }
     webSocketServer.handleUpgrade(request, socket, head, (webSocket) => webSocketServer.emit('connection', webSocket, request));
   });
-  webSocketServer.on('connection', (socket) => { const lastSequence = { value: -1n }; clients.add(socket); socket.once('close', () => clients.delete(socket)); socket.on('message', (rawData, isBinary) => void handleFrame(socket, rawData, isBinary, lastSequence)); });
+  webSocketServer.on('connection', (socket) => {
+    if (owner?.readyState === socket.OPEN || epochClaimed && !reconnectAllowed) { state.rejectedFrames += 1; socket.close(1008, 'one browser tab owns each qualification epoch'); return; }
+    owner = socket; epochClaimed = true; reconnectAllowed = false; clients.add(socket);
+    const lastSequence = { value: -1n }; let processing = Promise.resolve();
+    socket.once('close', () => { clients.delete(socket); if (owner === socket) owner = undefined; });
+    socket.on('message', (rawData, isBinary) => { processing = processing.then(() => handleFrame(socket, rawData, isBinary, lastSequence)); });
+  });
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(options.port, LOOPBACK_HOST, () => { server.off('error', reject); resolve(); }); });
   const address = server.address(); if (!address || typeof address === 'string') { await closeServer(server, webSocketServer); fail('bridge did not bind a TCP loopback address'); }
-  return { port: address.port, sendPcmPlayback, reset, close: () => { for (const client of clients) client.terminate(); return closeServer(server, webSocketServer); }, state: () => ({ ...state, queueCounts: { ...state.queueCounts }, overflowedQueues: [...state.overflowedQueues], stampedResults: state.stampedResults.map((result) => ({ ...result })) }) };
+  return { port: address.port, sendPcmPlayback, reset, close: async () => { for (const client of clients) client.terminate(); await writeTail; await closeServer(server, webSocketServer); }, state: () => ({ ...state, queueCounts: { ...state.queueCounts }, overflowedQueues: [...state.overflowedQueues], stampedResults: state.stampedResults.map((result) => ({ ...result })) }) };
 }

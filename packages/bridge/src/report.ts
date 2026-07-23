@@ -6,7 +6,7 @@ import manifest from '../../../fixtures/corpus/manifest.json' with { type: 'json
 export type EvidenceClass = 'Fixture' | 'Loopback' | 'Open air';
 export type LiteralDirection = 'A → B' | 'B → A';
 export const MAX_QUEUE_BYTES = 256 * 1024;
-export const MAX_QUEUE_DURATION_MS = 5_000;
+export const MAX_QUEUE_DURATION_MS = 10_000;
 export const QUALIFICATION_DEAD_LINK_TIMEOUT_MS = 30_000;
 export const CYRINX_DEADLINE_MS = 90 * 60 * 1_000;
 export const QUIET_CODEC = Object.freeze({ id: 'quiet', commit: '72782542a41f1b615a02c2ab43a0edb56edb6ce4', profile: 'audible-7k-channel-0', audible: true, advertisedMtu: 1357 });

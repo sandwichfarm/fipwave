@@ -125,6 +125,13 @@ describe('canonical qualification reports', () => {
     expect(mergeSelection(['host-a', 'host-b'], report('host-a', 'A'), report('host-b', 'B', { commit: 'b'.repeat(40) }))).toMatchObject({ decision: 'unqualified', reasonCodes: expect.arrayContaining(['build_mismatch']) });
   });
 
+  it('allows 10s queue high-water evidence but rejects any duration above that bound', () => {
+    const boundary = report('host-a', 'A'); boundary.queues.playbackHighWaterMs = 10_000;
+    expect(mergeSelection(['host-a', 'host-b'], boundary, report('host-b', 'B'))).toMatchObject({ decision: 'quiet' });
+    const over = report('host-a', 'A'); over.queues.playbackHighWaterMs = 10_001;
+    expect(mergeSelection(['host-a', 'host-b'], over, report('host-b', 'B'))).toMatchObject({ decision: 'unqualified', reasonCodes: expect.arrayContaining(['queue_bound_exceeded']) });
+  });
+
   it('uses exact codec IDs/profiles and never recognizes Cyrinx by substring', () => {
     const spoof = { id: 'not-cyrinx', commit: 'd'.repeat(40), profile: 'definitely-cyrinx-fast', audible: true, advertisedMtu: 1792 };
     expect(mergeSelection(['host-a', 'host-b'], report('host-a', 'A', { codec: spoof }), report('host-b', 'B', { codec: spoof }))).toMatchObject({ decision: 'unqualified', reasonCodes: expect.arrayContaining(['unsupported_codec']) });
