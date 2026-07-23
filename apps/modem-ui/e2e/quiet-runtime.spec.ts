@@ -23,10 +23,11 @@ test('production Quiet route performs verified RESET, arm, teardown, and re-arm 
   await page.getByRole('button', { name: 'Start Cyrinx qualification' }).click();
   await expect(page.getByText('Quiet armed · audible-7k-channel-0 · epoch 2')).toBeVisible({ timeout: 30_000 });
   await expect(page.getByText('Bridge delivery: Quiet audio settings accepted for epoch 2')).toBeVisible();
-  expect(assets).toMatchObject(new Map([
+  expect([...assets]).toEqual(expect.arrayContaining([
     ['/codec-assets/quiet.js', 200],
     ['/codec-assets/libfec.js', 200],
     ['/codec-assets/quiet-emscripten.js', 200],
+    ['/codec-assets/quiet-emscripten.js.mem', 200],
     ['/codec-assets/quiet-profiles.json', 200],
   ]));
   await expect(page.getByText('Passed independent receiver evidence')).toHaveCount(0);

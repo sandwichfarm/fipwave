@@ -1,7 +1,18 @@
 import './style.css';
 import { armAudio, enqueuePcmPlayback, resetAudio, validatePcmPlaybackFrame, type AppliedAudioEvidence } from './audio.js';
 import { acceptBridgePlaybackFrame } from '../../../packages/bridge/src/codecs/websocket.js';
-import { QuietClient, fetchRunnerConfig, type RunnerConfig, type ReceiveCaseEvidence } from './quiet-client.js';
+import {
+  QUIET_PROFILE,
+  QuietClient,
+  decodeResetFrame,
+  encodeControlFrame,
+  fetchRunnerConfig,
+  peerRole,
+  readFwavMessageType,
+  receiveDirectionForRole,
+  type RunnerConfig,
+  type ReceiveCaseEvidence,
+} from './quiet-client.js';
 
 type UiState = 'idle' | 'requesting' | 'ready' | 'failed' | 'disconnected';
 
@@ -18,13 +29,20 @@ let uiState: UiState = 'idle';
 let failure = '';
 let bridge: WebSocket | undefined;
 let bridgeSequence = 0n;
+let bridgeDelivery = 'Not connected';
+let quietRuntime = 'Not armed';
 let runnerConfig: Readonly<RunnerConfig> | undefined;
 let configFailure = '';
-const quiet = new QuietClient((received) => appendQuietEvidence(received));
+const quiet = new QuietClient((received) => { void appendQuietEvidence(received); });
 type GateState = 'not-started' | 'cyrinx-running';
 type CorpusRow = { direction: string; caseId: string; evidenceClass: 'Fixture' | 'Loopback' | 'Open air'; result: string; airtime: string };
 let gateState: GateState = 'not-started';
 let corpusRows: CorpusRow[] = [];
+
+type Pending<T> = { resolve(value: T): void; reject(error: Error): void; timer: number };
+let pendingSettings: Pending<void> | undefined;
+let pendingReset: (Pending<number> & { previousEpoch: number }) | undefined;
+const pendingResults = new Map<string, Pending<void>>();
 
 const labels: Record<UiState, string> = {
   idle: 'Idle', requesting: 'Requesting', ready: 'Ready', failed: 'Failed', disconnected: 'Disconnected',
@@ -49,53 +67,195 @@ function settingValue(value: unknown): string {
 }
 
 function frameForSettings(value: AppliedAudioEvidence): ArrayBuffer {
-  const payload = new TextEncoder().encode(JSON.stringify({ browserVersion: navigator.userAgent, contextSampleRate: value.contextSampleRate, captureSampleRate: value.trackSampleRate, channels: value.channelCount, echoCancellation: value.echoCancellation, noiseSuppression: value.noiseSuppression, autoGainControl: value.autoGainControl }));
-  const frame = new ArrayBuffer(32 + payload.byteLength);
-  const view = new DataView(frame);
-  for (const [index, byte] of [0x46, 0x57, 0x41, 0x56].entries()) view.setUint8(index, byte);
-  view.setUint8(4, 1);
-  view.setUint8(5, 2);
-  view.setUint32(8, payload.byteLength, true);
-  view.setUint32(12, value.epoch, true);
-  view.setBigUint64(16, bridgeSequence++, true);
-  new Uint8Array(frame, 32).set(payload);
-  return frame;
+  const payload = new TextEncoder().encode(JSON.stringify({
+    browserVersion: navigator.userAgent,
+    microphoneLabel: value.microphoneLabel,
+    contextState: value.contextState,
+    contextSampleRate: value.contextSampleRate,
+    captureSampleRate: value.trackSampleRate,
+    channels: value.channelCount,
+    echoCancellation: value.echoCancellation,
+    noiseSuppression: value.noiseSuppression,
+    autoGainControl: value.autoGainControl,
+  }));
+  return encodeControlFrame({ type: 2, epoch: value.epoch, sequence: bridgeSequence++, payload });
 }
 
-function reportToBridge(value: AppliedAudioEvidence): Promise<void> {
-  return new Promise((resolve, reject) => {
-    bridge?.close(); bridgeSequence = 0n;
-    bridge = new WebSocket(`ws://${window.location.host}/bridge`);
-    bridge.binaryType = 'arraybuffer';
-    bridge.addEventListener('open', () => bridge?.send(frameForSettings(value)), { once: true });
-    bridge.addEventListener('message', (event) => {
-      if (event.data instanceof ArrayBuffer) {
-        try {
-          acceptBridgePlaybackFrame(event.data, value.epoch, { validate: validatePcmPlaybackFrame, enqueue: enqueuePcmPlayback });
-        } catch (error) {
-          reject(error instanceof Error ? error : new Error('Local bridge playback rejected.'));
-        }
+function asError(reason: unknown, fallback: string): Error { return reason instanceof Error ? reason : new Error(fallback); }
+function resultKey(caseId: string, resultEpoch: number): string { return `${resultEpoch}\u0000${caseId}`; }
+
+function rejectPending(reason: Error): void {
+  if (pendingSettings) { window.clearTimeout(pendingSettings.timer); pendingSettings.reject(reason); pendingSettings = undefined; }
+  if (pendingReset) { window.clearTimeout(pendingReset.timer); pendingReset.reject(reason); pendingReset = undefined; }
+  for (const pending of pendingResults.values()) { window.clearTimeout(pending.timer); pending.reject(reason); }
+  pendingResults.clear();
+}
+
+function failBridge(socket: WebSocket, reason: Error): void {
+  if (bridge !== socket) return;
+  bridge = undefined;
+  rejectPending(reason);
+  bridgeDelivery = `Failed — ${reason.message}`;
+  uiState = 'disconnected';
+  failure = reason.message;
+  render();
+}
+
+function handleBridgeMessage(socket: WebSocket, event: MessageEvent): void {
+  try {
+    if (developmentDiagnostic && pendingSettings && (event.data === undefined || event.data === '{}')) {
+      const pending = pendingSettings;
+      window.clearTimeout(pending.timer);
+      pendingSettings = undefined;
+      pending.resolve();
+      return;
+    }
+    if (event.data instanceof ArrayBuffer) {
+      const type = readFwavMessageType(event.data);
+      if (type === 8) {
+        const pending = pendingReset;
+        if (!pending) throw new Error('Local bridge sent an unsolicited RESET');
+        const nextEpoch = decodeResetFrame(event.data, pending.previousEpoch);
+        window.clearTimeout(pending.timer);
+        pendingReset = undefined;
+        pending.resolve(nextEpoch);
         return;
       }
-      resolve();
-    });
-    bridge.addEventListener('error', () => reject(new Error('Local bridge disconnected.')), { once: true });
+      if (type !== 4) throw new Error(`Local bridge sent unsupported binary FWAV type ${type}`);
+      acceptBridgePlaybackFrame(event.data, epoch, { validate: validatePcmPlaybackFrame, enqueue: enqueuePcmPlayback });
+      return;
+    }
+    if (typeof event.data !== 'string') throw new Error('Local bridge sent an unsupported message');
+    const message = JSON.parse(event.data) as Record<string, unknown>;
+    if (message.kind === 'qualification-result') {
+      const caseId = typeof message.caseId === 'string' ? message.caseId : '';
+      const ackEpoch = typeof message.epoch === 'number' ? message.epoch : -1;
+      const pending = pendingResults.get(resultKey(caseId, ackEpoch));
+      if (!pending || message.accepted !== true) throw new Error('Local bridge sent an invalid qualification-result acknowledgement');
+      window.clearTimeout(pending.timer);
+      pendingResults.delete(resultKey(caseId, ackEpoch));
+      pending.resolve();
+      return;
+    }
+    if (pendingSettings && typeof message.reportPath === 'string') {
+      const pending = pendingSettings;
+      window.clearTimeout(pending.timer);
+      pendingSettings = undefined;
+      pending.resolve();
+      return;
+    }
+    // A complete canonical report notification is informative; every case was
+    // already acknowledged independently before the UI could render it passed.
+    if (message.complete === true && typeof message.reportPath === 'string') {
+      bridgeDelivery = `Canonical report written: ${message.reportPath}`;
+      render();
+      return;
+    }
+    throw new Error('Local bridge sent an unrecognized acknowledgement');
+  } catch (error) {
+    failBridge(socket, asError(error, 'Local bridge message was invalid'));
+  }
+}
+
+async function openFreshBridge(): Promise<WebSocket> {
+  if (bridge) {
+    const previous = bridge;
+    bridge = undefined;
+    previous.close();
+  }
+  rejectPending(new Error('Local bridge connection was replaced'));
+  bridgeSequence = 0n;
+  const socket = new WebSocket(`ws://${window.location.host}/bridge`);
+  bridge = socket;
+  socket.binaryType = 'arraybuffer';
+  socket.addEventListener('message', (event) => handleBridgeMessage(socket, event));
+  socket.addEventListener('error', () => failBridge(socket, new Error('Local bridge disconnected')));
+  socket.addEventListener('close', () => failBridge(socket, new Error('Local bridge closed before delivery was accepted')));
+  await new Promise<void>((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error('Local bridge connection timed out')), 5_000);
+    socket.addEventListener('open', () => { window.clearTimeout(timer); resolve(); }, { once: true });
+    socket.addEventListener('error', () => { window.clearTimeout(timer); reject(new Error('Local bridge disconnected')); }, { once: true });
   });
+  return socket;
+}
+
+async function reportToBridge(value: AppliedAudioEvidence): Promise<void> {
+  const socket = await openFreshBridge();
+  const accepted = new Promise<void>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      pendingSettings = undefined;
+      reject(new Error('Local bridge did not accept audio settings'));
+    }, 5_000);
+    pendingSettings = { resolve, reject, timer };
+  });
+  try { socket.send(frameForSettings(value)); } catch (error) { failBridge(socket, asError(error, 'Local bridge settings delivery failed')); }
+  await accepted;
 }
 
 function reportQuietSettings(): Promise<void> {
   const applied = quiet.applied;
   if (!applied) return Promise.reject(new Error('Quiet applied settings are unavailable'));
-  return reportToBridge({ epoch, microphoneLabel: applied.microphoneLabel, permission: 'granted', contextState: 'running', contextSampleRate: applied.contextSampleRate, trackSampleRate: applied.trackSampleRate, channelCount: applied.channelCount, echoCancellation: applied.echoCancellation, noiseSuppression: applied.noiseSuppression, autoGainControl: applied.autoGainControl, workletState: 'ready', bridgeState: 'connected' });
+  if (!applied.contextState) return Promise.reject(new Error('Quiet AudioContext state is unavailable'));
+  return reportToBridge({ epoch, microphoneLabel: applied.microphoneLabel, permission: 'granted', contextState: applied.contextState, contextSampleRate: applied.contextSampleRate, trackSampleRate: applied.trackSampleRate, channelCount: applied.channelCount, echoCancellation: applied.echoCancellation, noiseSuppression: applied.noiseSuppression, autoGainControl: applied.autoGainControl, workletState: 'ready', bridgeState: 'connected' });
 }
 
-function reportQuietResult(received: ReceiveCaseEvidence): void {
-  if (!bridge || bridge.readyState !== WebSocket.OPEN) return;
-  const metrics = quiet.metrics;
-  const payload = new TextEncoder().encode(JSON.stringify({ caseId: received.caseId, digest: received.digest, acquisitionMs: Math.round(received.acquiredAtMs), airtimeMs: Math.round(received.airtimeMs), deliveryCount: received.deliveryCount, bytePerfect: !received.corrupt && received.duplicates === 0, queues: metrics }));
-  const frame = new ArrayBuffer(32 + payload.byteLength); const view = new DataView(frame);
-  for (const [index, byte] of [0x46, 0x57, 0x41, 0x56].entries()) view.setUint8(index, byte);
-  view.setUint8(4, 1); view.setUint8(5, 6); view.setUint32(8, payload.byteLength, true); view.setUint32(12, epoch, true); view.setBigUint64(16, bridgeSequence++, true); new Uint8Array(frame, 32).set(payload); bridge.send(frame);
+async function reportQuietResult(received: ReceiveCaseEvidence): Promise<void> {
+  if (!bridge || bridge.readyState !== WebSocket.OPEN) throw new Error('Local bridge is not open for qualification-result delivery');
+  const observed = quiet.metrics;
+  const metrics = {
+    captureHighWaterBytes: observed.captureHighWaterBytes,
+    captureHighWaterMs: Math.round(observed.captureHighWaterMs),
+    playbackHighWaterBytes: observed.playbackHighWaterBytes,
+    playbackHighWaterMs: Math.round(observed.playbackHighWaterMs),
+    discontinuities: observed.discontinuities,
+  };
+  const bytePerfect = received.complete && !received.corrupt && received.missing === 0 && received.duplicates === 0 && received.deliveryCount === 1 && received.digest !== null;
+  const payload = new TextEncoder().encode(JSON.stringify({
+    caseId: received.caseId,
+    digest: received.digest,
+    acquisitionMs: Math.round(received.acquisitionMs),
+    airtimeMs: Math.round(received.airtimeMs),
+    deliveryCount: received.deliveryCount,
+    bytePerfect,
+    coldAcquired: received.coldAcquired,
+    complete: received.complete,
+    corrupt: received.corrupt,
+    missing: received.missing,
+    duplicates: received.duplicates,
+    queues: metrics,
+  }));
+  const key = resultKey(received.caseId, received.epoch);
+  if (pendingResults.has(key)) throw new Error('Qualification-result delivery is already pending');
+  const accepted = new Promise<void>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      pendingResults.delete(key);
+      reject(new Error(`Local bridge did not accept result ${received.caseId}`));
+    }, 5_000);
+    pendingResults.set(key, { resolve, reject, timer });
+  });
+  try { bridge.send(encodeControlFrame({ type: 6, epoch: received.epoch, sequence: bridgeSequence++, payload })); } catch (error) { failBridge(bridge, asError(error, 'Local bridge result delivery failed')); }
+  await accepted;
+}
+
+async function requestBridgeReset(): Promise<number> {
+  const previousEpoch = epoch;
+  const socket = bridge?.readyState === WebSocket.OPEN ? bridge : await openFreshBridge();
+  const accepted = new Promise<number>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      pendingReset = undefined;
+      reject(new Error('Local bridge did not return RESET'));
+    }, 5_000);
+    pendingReset = { previousEpoch, resolve, reject, timer };
+  });
+  try { socket.send(encodeControlFrame({ type: 8, epoch: previousEpoch, sequence: bridgeSequence++ })); } catch (error) { failBridge(socket, asError(error, 'Local bridge RESET delivery failed')); }
+  const nextEpoch = await accepted;
+  bridgeDelivery = `RESET accepted at epoch ${nextEpoch}`;
+  if (bridge === socket) {
+    bridge = undefined;
+    socket.close();
+  }
+  bridgeSequence = 0n;
+  return nextEpoch;
 }
 
 function appendSetting(table: HTMLTableElement, label: string, value: unknown): void {
@@ -131,6 +291,8 @@ function render(): void {
   operator.append(announcement);
   if (configFailure) operator.append(element('p', `Runner configuration failed: ${configFailure}`));
   operator.append(element('p', `Report target: ${runnerConfig?.reportTarget ?? 'Unknown'} · TUN mode: ${runnerConfig?.tunEvidence ?? 'Unknown'}`));
+  operator.append(element('p', `Bridge delivery: ${bridgeDelivery}`));
+  operator.append(element('p', quietRuntime));
   if (uiState === 'idle') operator.append(control('Arm modem', arm, !runnerConfig && !developmentDiagnostic));
   if (uiState === 'requesting') operator.append(control('Arm modem', arm, true));
   if (uiState === 'ready') {
@@ -148,16 +310,16 @@ function render(): void {
   const table = element('table');
   table.append(element('caption', 'Actual browser and bridge observations'));
   appendSetting(table, 'Microphone label', quiet.applied?.microphoneLabel ?? evidence?.microphoneLabel);
-  appendSetting(table, 'Permission', evidence?.permission);
-  appendSetting(table, 'Audio-context state', evidence?.contextState);
-  appendSetting(table, 'Context sample rate', evidence?.contextSampleRate);
+  appendSetting(table, 'Permission', quiet.applied ? 'granted' : evidence?.permission);
+  appendSetting(table, 'Audio-context state', quiet.applied?.contextState ?? evidence?.contextState);
+  appendSetting(table, 'Context sample rate', quiet.applied?.contextSampleRate ?? evidence?.contextSampleRate);
   appendSetting(table, 'Track sample rate', quiet.applied?.trackSampleRate ?? evidence?.trackSampleRate);
   appendSetting(table, 'Channel count', quiet.applied?.channelCount ?? evidence?.channelCount);
   appendSetting(table, 'Echo cancellation', quiet.applied?.echoCancellation ?? evidence?.echoCancellation);
   appendSetting(table, 'Noise suppression', quiet.applied?.noiseSuppression ?? evidence?.noiseSuppression);
   appendSetting(table, 'Automatic gain control', quiet.applied?.autoGainControl ?? evidence?.autoGainControl);
   appendSetting(table, 'AudioWorklet status', evidence?.workletState);
-  appendSetting(table, 'Bridge endpoint', evidence ? 'localhost only' : undefined);
+  appendSetting(table, 'Bridge endpoint', quiet.applied || evidence ? 'localhost only' : undefined);
   evidenceCard.append(table);
   grid.append(evidenceCard);
   appRoot.append(grid);
@@ -211,10 +373,11 @@ function control(label: string, action: () => void | Promise<void>, disabled = f
 
 async function arm(): Promise<void> {
   if (uiState === 'requesting') return;
-  uiState = 'requesting'; failure = ''; render();
+  uiState = 'requesting'; failure = ''; quietRuntime = 'Not armed'; render();
   try {
     evidence = await armAudio(epoch);
     await reportToBridge(evidence);
+    bridgeDelivery = `Audio settings accepted for epoch ${epoch}`;
     uiState = 'ready';
   } catch (error) {
     const message = error instanceof Error ? error.message : 'unknown audio error';
@@ -239,33 +402,81 @@ function startQualification(): void {
 
 async function startQuietFallback(): Promise<void> {
   if (!runnerConfig) return;
+  let quietEpoch = epoch;
   try {
-    // Quiet owns its own classic-script AudioContext and microphone, so close the
-    // normal worklet pipeline before it is permitted to arm.
-    epoch = await resetAudio(); evidence = undefined;
-    await quiet.arm(epoch);
+    // The runner establishes the epoch. Only after its RESET response do we
+    // close normal audio and arm Quiet against that exact returned value.
+    quietEpoch = await requestBridgeReset();
+    await resetAudio();
+    epoch = quietEpoch;
+    evidence = undefined;
+    await quiet.arm(epoch, runnerConfig.role);
     await reportQuietSettings();
+    bridgeDelivery = `Quiet audio settings accepted for epoch ${epoch}`;
+    quietRuntime = `Quiet armed · ${QUIET_PROFILE} · epoch ${epoch}`;
+    render();
     await quiet.sendCorpus(runnerConfig.role, epoch, (entry, index, total) => {
       corpusRows = [...corpusRows, { direction: entry.direction, caseId: entry.id, evidenceClass: runnerConfig!.evidenceClass, result: `Sent locally ${index}/${total}; receiver evidence is independent`, airtime: 'pending' }];
       render();
     });
-  } catch (error) { uiState = 'failed'; failure = error instanceof Error ? error.message : 'Quiet qualification failed'; }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Quiet qualification failed';
+    if (message === 'Quiet transmission cancelled by reset' || epoch !== quietEpoch) return;
+    uiState = message.includes('bridge') || message.includes('RESET') ? 'disconnected' : 'failed';
+    failure = message;
+    quietRuntime = `Quiet failed · epoch ${quietEpoch}`;
+  }
   render();
 }
 
-function appendQuietEvidence(received: ReceiveCaseEvidence): void {
+async function appendQuietEvidence(received: ReceiveCaseEvidence): Promise<void> {
+  const config = runnerConfig;
+  if (!config || received.epoch !== epoch || received.sender !== peerRole(config.role) || received.direction !== receiveDirectionForRole(config.role)) {
+    uiState = 'failed';
+    failure = 'Rejected stale or impossible Quiet receiver evidence';
+    render();
+    return;
+  }
   const evidenceClass = runnerConfig?.evidenceClass ?? 'Loopback';
-  corpusRows = [...corpusRows, { direction: received.direction, caseId: received.caseId, evidenceClass, result: received.corrupt || received.duplicates ? 'Failed receiver integrity' : 'Passed independent receiver evidence', airtime: `${Math.round(received.airtimeMs)} ms` }];
-  reportQuietResult(received);
+  const row = { direction: received.direction, caseId: received.caseId, evidenceClass, result: 'Receiver evidence pending bridge acceptance', airtime: `${Math.round(received.airtimeMs)} ms` } satisfies CorpusRow;
+  corpusRows = [...corpusRows, row];
+  render();
+  try {
+    await reportQuietResult(received);
+    const bytePerfect = received.complete && received.digest !== null && !received.corrupt && received.missing === 0 && received.duplicates === 0 && received.deliveryCount === 1;
+    row.result = bytePerfect ? 'Passed independent receiver evidence' : 'Failed receiver integrity (report delivered)';
+    bridgeDelivery = `Result accepted: ${received.caseId} · epoch ${received.epoch}`;
+  } catch (error) {
+    row.result = 'Failed report delivery';
+    uiState = 'disconnected';
+    failure = asError(error, 'Local bridge result delivery failed').message;
+    bridgeDelivery = `Failed — ${failure}`;
+  }
   render();
 }
 
 async function reset(): Promise<void> {
-  bridge?.close(); bridge = undefined;
-  await quiet.reset();
-  epoch = await resetAudio();
-  evidence = undefined; uiState = 'requesting'; failure = ''; gateState = 'not-started'; corpusRows = []; render();
-  await arm();
+  if (uiState === 'requesting') return;
+  uiState = 'requesting'; failure = ''; render();
+  try {
+    for (const incomplete of quiet.flushIncomplete()) await appendQuietEvidence(incomplete);
+    const nextEpoch = await requestBridgeReset();
+    await quiet.reset();
+    await resetAudio();
+    epoch = nextEpoch;
+    evidence = undefined;
+    gateState = 'not-started';
+    corpusRows = [];
+    quietRuntime = 'Not armed';
+    uiState = 'idle';
+    render();
+    await arm();
+  } catch (error) {
+    const message = asError(error, 'Reset / re-arm failed').message;
+    uiState = message.includes('bridge') || message.includes('RESET') ? 'disconnected' : 'failed';
+    failure = message;
+    render();
+  }
 }
 
 render();
