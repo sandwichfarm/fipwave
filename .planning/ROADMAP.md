@@ -43,14 +43,14 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Within a strict 90-minute Cyrinx qualification, the operator can send the defined unique 256-byte and 1536-byte payload corpus in both directions and selects Cyrinx only when the byte-integrity, cold-acquisition, airtime, and duplicate-delivery gates pass; otherwise the operator immediately uses the browser-ready fallback rather than extending the spike.
   4. The selected demo codec has one fixed, rehearsed, intentionally audible profile, and a Dockerized FIPS preflight has `/dev/net/tun` plus only the network-administration capability needed to configure its Linux interface.
 
-**Plans**: 5/7 plans executed
+**Plans**: 6/7 plans executed
 
 - [x] 01-01-PLAN.md
 - [x] 01-02-PLAN.md
 - [x] 01-03-PLAN.md
 - [x] 01-04-PLAN.md
 - [x] 01-05-PLAN.md
-- [ ] 01-06-PLAN.md
+- [x] 01-06-PLAN.md
 - [ ] 01-07-PLAN.md
 
 **UI hint**: yes
@@ -126,7 +126,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Qualify the Demo Substrate | 5/7 | In Progress|  |
+| 1. Qualify the Demo Substrate | 6/7 | In Progress|  |
 | 2. Establish the Codec-Neutral FIPS Bridge | 0/TBD | Not started | - |
 | 3. Deliver Reliable Acoustic Packets | 0/TBD | Not started | - |
 | 4. Prove the Sound-Only FIPS Ping | 0/TBD | Not started | - |
