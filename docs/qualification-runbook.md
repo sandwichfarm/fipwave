@@ -9,7 +9,9 @@ do that; all other paths remain explicitly `human_needed` or `unqualified`.
 
 Populate the pinned cache once on each laptop, build, and start one runner per
 laptop. The runner is the only authority for machine identity, literal role,
-report target, TUN path, and evidence class; the page only displays them.
+report target, TUN path, evidence class, clean Git build identity, fixed codec,
+30,000 ms dead-link timeout, and immutable Cyrinx/fallback trace; the page only
+displays them.
 
 ```sh
 npm run fetch:codecs
@@ -23,6 +25,8 @@ Open `http://127.0.0.1:4173/` in Chromium, grant the microphone, and choose
 `Arm modem`. The fixed fallback is `audible-7k-channel-0` with frame clamping;
 there is no profile or asset override. Quiet takes exclusive ownership of its
 microphone and audio context after the normal audio lifecycle has been reset.
+Physical mode refuses a dirty worktree, an unresolved/default build identity,
+or any exact-host TUN field that is not passed.
 
 Operate the pages independently. On laptop A locally schedule **A → B**. The
 sender starts one corpus case at a time only after its own Quiet `onFinish` and
@@ -30,7 +34,20 @@ a fixed guard; it never waits for a receiver result, acknowledgement, retry,
 or ARQ. After the operator sees A's local transmitter finish, locally schedule
 **B → A** on laptop B. Each receiver independently records and deduplicates
 fragments, reassembles complete cases, and validates the committed SHA-256.
-The pages never exchange control messages.
+The pages never exchange control messages. One browser tab owns an epoch; a
+second tab cannot contribute evidence. Reconnection is accepted only after a
+RESET has atomically replaced the prior report with a new-epoch incomplete
+record.
+
+Role names describe the local laptop, while reports describe independently
+received sound: role A's report owns **B → A**, and role B's report owns
+**A → B**. Each report always contains the exact 25 committed rows for its
+receive direction. Unheard rows remain explicit Missing placeholders with
+`receivedSha256: null`; received rows bind case ID, direction, size,
+`expectedSha256`, and the observed `receivedSha256` to the committed manifest.
+At least 19/20 distinct byte-perfect 256-byte rows and 5/5 1,536-byte rows must
+pass in each direction. The optional missing 256-byte row is not itself a
+failure once that threshold is met.
 
 Copy the two completed canonical reports to one operator machine and reconcile
 them only after both local runs have ended:
@@ -44,9 +61,28 @@ npm run qualify:verify -- \
 ```
 
 The exact `--selection` path is atomically written. Its decision is one of
-`cyrinx`, `quiet`, `unqualified`, or `human_needed`; Fixture/Loopback reports,
-missing/mismatched roles or hosts, incomplete/duplicate/corrupt corpus cases,
-or any absent/non-passed/non-`exact_host` TUN evidence cannot select a codec.
+`cyrinx`, `quiet`, `unqualified`, or `human_needed`. `human_needed` is reserved
+for absent/manual evidence or Fixture/Loopback evidence. Present physical
+evidence with mismatched roles/ordered hosts/builds, missing thresholds,
+duplicates, corruption, bad timing, unsupported codec identity, or failed TUN
+checks is `unqualified` with precise reason codes.
+
+A physical Quiet selection additionally requires an activated Cyrinx → Quiet
+fallback with its immutable failure/expiry reason. A Cyrinx selection must not
+claim that fallback was activated. Both reports retain the Cyrinx start,
+deadline, and elapsed timing; until Plan 01-09 supplies that trace, the current
+Quiet runner remains intentionally fail-closed for physical selection.
+
+The canonical qualification timeout is runner-owned and fixed at 30,000 ms.
+Complete-payload p95 airtime must be strictly less than one third of it
+(10,000 ms). Queue duration high-water marks may be at most 10,000 ms: this
+accommodates the measured ~5.49 s Quiet 1,536-byte emission while remaining
+bounded. PCM byte caps and the zero-discontinuity requirement are unchanged.
+Physical audio evidence retains the observed microphone label, a `running`
+AudioContext state, the native `inputDeviceSampleRate`, actual mono 48 kHz
+AudioContext/codec-consumed PCM rates, and all three processing flags off.
+Native input may be 44.1 or 48 kHz; the former is accepted only as the explicit
+WebAudio 44.1 → 48 kHz resampling boundary. Unknown or other native rates fail.
 
 ## Deterministic checks (any development machine)
 
