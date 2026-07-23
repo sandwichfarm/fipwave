@@ -5,11 +5,16 @@
 
 ## Capability Proven End-to-End
 
-> A demo operator can arm the local browser, send one codec-neutral binary qualification case through the loopback-only bridge, and read the resulting canonical JSON evidence while the same repository exposes a reproducible Docker/TUN preflight.
+> A demo operator can launch one loopback-only production route, arm native
+> Chromium audio, try the pinned portable Cyrinx batch PHY under a hard gate,
+> run the pinned fixed audible Quiet fallback, schedule the committed corpus,
+> and write canonical JSON evidence while the same repository exposes a
+> reproducible Docker/TUN preflight.
 
-The exact two-laptop open-air codec result and the exact-host TUN result remain
-explicit hardware evidence. Fixture, loopback, and static Compose checks prove
-the substrate and its decision logic; they do not prove the physical link.
+The exact two-laptop open-air codec result and exact-host TUN result remain
+explicit blocking-human evidence. Digital, fixture, loopback, unmocked local
+browser, and static Compose checks prove the runnable substrate and decision
+logic; they do not prove the physical link.
 
 ## Architectural Decisions
 
@@ -20,19 +25,27 @@ the substrate and its decision logic; they do not prove the physical link.
 | Local bridge | `ws` binary WebSocket bound to loopback | Carries codec-neutral control and PCM without creating an alternate inter-laptop path per D-09 through D-11. |
 | Data layer | Canonical, schema-validated JSON reports under `.artifacts/qualification/` | Qualification evidence is append-on-run, portable, human-auditable, and consumed as files by later phases. A database is intentionally absent because there is no shared mutable application state, query workload, user identity, or long-lived service to justify one. |
 | Auth | None; localhost-only operator tool | No external user or remote service is in scope. Loopback binding and origin validation are the trust-boundary controls. |
-| Deployment target | Local production browser build plus Docker Compose preflight | The demo must run on the exact laptops; the meaningful deployment is a pinned, reproducible local command rather than a remote environment. |
+| Deployment target | Compiled loopback-only UI/bridge runner plus Docker Compose preflight | The demo must run on the exact laptops; one same-origin local command owns the built assets and `/bridge` without a remote environment or alternate inter-laptop route. |
+| Codec provenance | Hash-locked upstream assets and redistributed license texts | Quiet, libfec, and Cyrinx executable inputs are fetched by exact commit/release URL and SHA-256 before use. |
 | Directory layout | `apps/modem-ui`, `packages/bridge`, `fixtures`, `scripts`, `docker` | Separates browser I/O, codec-neutral bridge/report contracts, deterministic evidence, operator commands, and container preflight. |
 
 ## Stack Touched in Phase 1
 
-- [ ] Plan 01-01 — pinned Node and autonomous machine-readable dependency audit.
-- [ ] Plan 01-02 — audited Wave 0, local route, binary loopback tracer, and
+- [x] Plan 01-01 — pinned Node and autonomous machine-readable dependency audit.
+- [x] Plan 01-02 — audited Wave 0, local route, binary loopback tracer, and
       canonical JSON write/read.
-- [ ] Plan 01-03 — one-action applied browser-audio preflight.
-- [ ] Plan 01-04 — deterministic FWAV/report/corpus contracts.
-- [ ] Plan 01-05 — codec-neutral gate, adapters, console, and verifier.
-- [ ] Plan 01-06 — deterministic least-privilege Docker/TUN preflight.
-- [ ] Plan 01-07 — sole exact-laptop open-air and exact-host evidence checkpoint.
+- [x] Plan 01-03 — one-action applied browser-audio preflight.
+- [x] Plan 01-04 — deterministic FWAV/report/corpus contracts.
+- [x] Plan 01-05 — codec-neutral gate, adapters, console, and verifier seams.
+- [x] Plan 01-06 — deterministic least-privilege Docker/TUN preflight.
+- [ ] Plan 01-07 — authoritative production same-origin runner, runner-derived
+      qualification config, and verified allowlisted codec-asset cache.
+- [ ] Plan 01-08 — fixed Quiet fallback, local open-loop corpus roles,
+      canonical reports, named verifier, and unmocked browser test.
+- [ ] Plan 01-09 — pinned portable Cyrinx C batch worker with immutable
+      early-abandon transition to Quiet and left-only/right-zero playback.
+- [ ] Plan 01-10 — sole exact-laptop open-air and exact-host blocking-human
+      evidence checkpoint.
 
 ## Out of Scope (Deferred to Later Slices)
 
