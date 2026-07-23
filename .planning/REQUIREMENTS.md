@@ -170,50 +170,50 @@ Roadmap phase mapping is populated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| FIPS-01 | TBD | Pending |
-| FIPS-02 | TBD | Pending |
-| FIPS-03 | TBD | Pending |
-| FIPS-04 | TBD | Pending |
-| FIPS-05 | TBD | Pending |
-| CODEC-01 | TBD | Pending |
-| CODEC-02 | TBD | Pending |
-| CODEC-03 | TBD | Pending |
-| CODEC-04 | TBD | Pending |
-| LINK-01 | TBD | Pending |
-| LINK-02 | TBD | Pending |
-| LINK-03 | TBD | Pending |
-| LINK-04 | TBD | Pending |
-| LINK-05 | TBD | Pending |
-| LINK-06 | TBD | Pending |
-| LINK-07 | TBD | Pending |
-| LINK-08 | TBD | Pending |
-| LINK-09 | TBD | Pending |
-| WEB-01 | TBD | Pending |
-| WEB-02 | TBD | Pending |
-| WEB-03 | TBD | Pending |
-| WEB-04 | TBD | Pending |
-| WEB-05 | TBD | Pending |
-| WEB-06 | TBD | Pending |
-| WEB-07 | TBD | Pending |
-| DEPLOY-01 | TBD | Pending |
-| DEPLOY-02 | TBD | Pending |
-| DEPLOY-03 | TBD | Pending |
-| DEPLOY-04 | TBD | Pending |
-| DEPLOY-05 | TBD | Pending |
-| DEMO-01 | TBD | Pending |
-| DEMO-02 | TBD | Pending |
-| DEMO-03 | TBD | Pending |
-| DEMO-04 | TBD | Pending |
-| DEMO-05 | TBD | Pending |
-| DEMO-06 | TBD | Pending |
-| DEMO-07 | TBD | Pending |
-| DEMO-08 | TBD | Pending |
+| FIPS-01 | Phase 2 | Pending |
+| FIPS-02 | Phase 2 | Pending |
+| FIPS-03 | Phase 2 | Pending |
+| FIPS-04 | Phase 4 | Pending |
+| FIPS-05 | Phase 4 | Pending |
+| CODEC-01 | Phase 2 | Pending |
+| CODEC-02 | Phase 1 | Pending |
+| CODEC-03 | Phase 1 | Pending |
+| CODEC-04 | Phase 1 | Pending |
+| LINK-01 | Phase 3 | Pending |
+| LINK-02 | Phase 3 | Pending |
+| LINK-03 | Phase 3 | Pending |
+| LINK-04 | Phase 3 | Pending |
+| LINK-05 | Phase 3 | Pending |
+| LINK-06 | Phase 3 | Pending |
+| LINK-07 | Phase 3 | Pending |
+| LINK-08 | Phase 3 | Pending |
+| LINK-09 | Phase 3 | Pending |
+| WEB-01 | Phase 1 | Pending |
+| WEB-02 | Phase 1 | Pending |
+| WEB-03 | Phase 1 | Pending |
+| WEB-04 | Phase 2 | Pending |
+| WEB-05 | Phase 2 | Pending |
+| WEB-06 | Phase 2 | Pending |
+| WEB-07 | Phase 1 | Pending |
+| DEPLOY-01 | Phase 5 | Pending |
+| DEPLOY-02 | Phase 1 | Pending |
+| DEPLOY-03 | Phase 4 | Pending |
+| DEPLOY-04 | Phase 4 | Pending |
+| DEPLOY-05 | Phase 4 | Pending |
+| DEMO-01 | Phase 4 | Pending |
+| DEMO-02 | Phase 4 | Pending |
+| DEMO-03 | Phase 4 | Pending |
+| DEMO-04 | Phase 4 | Pending |
+| DEMO-05 | Phase 5 | Pending |
+| DEMO-06 | Phase 5 | Pending |
+| DEMO-07 | Phase 5 | Pending |
+| DEMO-08 | Phase 5 | Pending |
 
 **Coverage:**
 - v1 requirements: 38 total
-- Mapped to phases: 0
-- Unmapped: 38
+- Mapped to phases: 38
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-07-23*
-*Last updated: 2026-07-23 after initial definition*
+*Last updated: 2026-07-23 after roadmap creation*
