@@ -1,4 +1,9 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { promisify } from 'node:util';
 import test from 'node:test';
 
 import {
@@ -8,6 +13,7 @@ import {
 } from '../scripts/audit-dependencies.mjs';
 
 const EXPECTED_NAMES = Object.keys(EXPECTED_PACKAGES);
+const execFileAsync = promisify(execFile);
 
 function createRecord(name) {
   const expected = EXPECTED_PACKAGES[name];
@@ -114,4 +120,33 @@ test('rejects lockfiles with direct-version, integrity, missing, and added-packa
     integrity: 'sha512-unapproved',
   };
   assert.equal(validateLockfile(added, audit).ok, false);
+});
+
+test('check-lock CLI mode rejects lockfile version and integrity drift', async () => {
+  const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'dependency-audit-test-'));
+  const audit = createAudit();
+  const auditPath = path.join(temporaryDirectory, 'audit.json');
+  const lockfilePath = path.join(temporaryDirectory, 'package-lock.json');
+
+  await writeFile(auditPath, JSON.stringify(audit), 'utf8');
+
+  const wrongVersion = createLockfile(audit);
+  wrongVersion.packages['node_modules/vite'].version = '0.0.0';
+  await writeFile(lockfilePath, JSON.stringify(wrongVersion), 'utf8');
+  await assert.rejects(execFileAsync(process.execPath, [
+    'scripts/audit-dependencies.mjs',
+    '--check-lock',
+    lockfilePath,
+    auditPath,
+  ]));
+
+  const wrongIntegrity = createLockfile(audit);
+  wrongIntegrity.packages['node_modules/vite'].integrity = 'sha512-divergent';
+  await writeFile(lockfilePath, JSON.stringify(wrongIntegrity), 'utf8');
+  await assert.rejects(execFileAsync(process.execPath, [
+    'scripts/audit-dependencies.mjs',
+    '--check-lock',
+    lockfilePath,
+    auditPath,
+  ]));
 });
