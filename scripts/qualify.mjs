@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mergeSelection, validateMachineReport } from '../packages/bridge/src/report.ts';
+import { mergeSelection, qualificationReason, validateMachineReport } from '../packages/bridge/src/report.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const artifactDirectory = path.join(root, '.artifacts', 'qualification');
@@ -45,12 +45,22 @@ async function verifyReports(args) {
   if (options.help) { console.log(usage()); return; }
   if (!options.machineA && !options.machineB && !options.hostA && !options.hostB && !options.selection) { console.log(JSON.stringify({ decision: 'human_needed', reasonCodes: ['machine_reports_required'] })); return; }
   if (!options.machineA || !options.machineB || !options.hostA || !options.hostB || !options.selection) throw new Error(usage());
+  const readCanonical = async (reportPath) => {
+    let text;
+    try { text = await readFile(reportPath, 'utf8'); }
+    catch (error) { if (error && typeof error === 'object' && error.code === 'ENOENT') return { missing: true }; return { reason: 'machine_report_unreadable' }; }
+    let value;
+    try { value = JSON.parse(text); } catch { return { reason: 'invalid_json' }; }
+    try { return { report: validateMachineReport(value) }; } catch (error) { return { reason: qualificationReason(error) }; }
+  };
+  const [a, b] = await Promise.all([readCanonical(options.machineA), readCanonical(options.machineB)]);
   let selection;
-  try {
-    const [a, b] = await Promise.all([options.machineA, options.machineB].map(async (reportPath) => validateMachineReport(JSON.parse(await readFile(reportPath, 'utf8')))));
-    selection = mergeSelection([options.hostA, options.hostB], a, b);
-  } catch (error) {
-    selection = { schemaVersion: 1, expectedHosts: [options.hostA, options.hostB], decision: 'unqualified', reasonCodes: ['invalid_machine_report'], reports: [], error: error instanceof Error ? error.message : String(error) };
+  if (a.missing || b.missing) {
+    selection = { schemaVersion: 1, expectedHosts: [options.hostA, options.hostB], decision: 'human_needed', reasonCodes: ['machine_reports_required'], reports: [] };
+  } else if (a.reason || b.reason) {
+    selection = { schemaVersion: 1, expectedHosts: [options.hostA, options.hostB], decision: 'unqualified', reasonCodes: [...new Set([a.reason, b.reason].filter(Boolean))], reports: [] };
+  } else {
+    selection = mergeSelection([options.hostA, options.hostB], a.report, b.report);
   }
   await writeAtomically(options.selection, selection);
   console.log(JSON.stringify(selection));

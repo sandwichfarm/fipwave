@@ -95,8 +95,10 @@ type ManifestCase = { id: string; direction: LiteralDirection; size: 256 | 1536;
 const MANIFEST = new Map((manifest.cases as ManifestCase[]).map((entry) => [entry.id, entry]));
 
 export class QualificationReportError extends Error {
-  constructor(readonly reasonCode: string, detail?: string) {
+  readonly reasonCode: string;
+  constructor(reasonCode: string, detail?: string) {
     super(`qualification report ${reasonCode}${detail ? `: ${detail}` : ''}`);
+    this.reasonCode = reasonCode;
   }
 }
 function fail(reasonCode: string, detail?: string): never { throw new QualificationReportError(reasonCode, detail); }
