@@ -25,6 +25,10 @@ function composeDevice(entry) {
 function inspectDevice(entry) {
   return entry && typeof entry === 'object' && entry.PathOnHost === '/dev/net/tun' && entry.PathInContainer === '/dev/net/tun' ? '/dev/net/tun' : undefined;
 }
+function inspectCapabilities(value) {
+  if (!Array.isArray(value)) return value;
+  return value.map((entry) => entry === 'CAP_NET_ADMIN' ? 'NET_ADMIN' : entry);
+}
 function loopbackPorts(value, label) {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value) && (typeof value !== 'object' || value === null)) fail(`${label} are invalid`);
@@ -115,7 +119,10 @@ export function validateDockerInspect(inspected) {
   const host = Array.isArray(inspected) ? inspected[0]?.HostConfig : inspected?.HostConfig;
   if (!host || typeof host !== 'object') fail('inspect HostConfig is missing');
   const devices = exactSet((host.Devices ?? []).map(inspectDevice).filter(Boolean), ['/dev/net/tun'], 'devices');
-  const capabilities = exactSet(host.CapAdd, ['NET_ADMIN'], 'capabilities');
+  // Docker Engine versions may expose the same Linux capability with or
+  // without its kernel-level CAP_ prefix. Canonicalize that spelling only;
+  // exactSet still rejects duplicates and every additional capability.
+  const capabilities = exactSet(inspectCapabilities(host.CapAdd), ['NET_ADMIN'], 'capabilities');
   const securityOptions = exactSet(host.SecurityOpt, ['no-new-privileges:true'], 'security options');
   if (host.Privileged !== false) fail('privileged mode must be false');
   if (host.NetworkMode === 'host') fail('host network is forbidden');

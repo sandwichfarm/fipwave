@@ -108,6 +108,24 @@ describe('least-privilege Docker/TUN preflight', () => {
     expect(() => validateDockerInspect({ HostConfig: { ...inspect().HostConfig, NetworkMode: 'host' } })).toThrow('host network');
   });
 
+  it('canonicalizes Docker inspect CAP_NET_ADMIN without widening authority', () => {
+    const prefixedInspect = {
+      HostConfig: {
+        ...inspect().HostConfig,
+        CapAdd: ['CAP_NET_ADMIN'],
+      },
+    };
+
+    expect(validateDockerInspect(prefixedInspect).authorities.capabilities).toEqual(['NET_ADMIN']);
+    expect(combineExactHostEvidence(prefixedInspect, lifecycle()).authorities.capabilities).toEqual(['NET_ADMIN']);
+    expect(() => validateDockerInspect({
+      HostConfig: {
+        ...inspect().HostConfig,
+        CapAdd: ['CAP_NET_ADMIN', 'CAP_SYS_ADMIN'],
+      },
+    })).toThrow('capabilities');
+  });
+
   it('combines effective authority and owned lifecycle into one exact-host record', () => {
     const combined = combineExactHostEvidence(inspect(), lifecycle());
     expect(validateTunEvidence(combined)).toEqual(combined);
