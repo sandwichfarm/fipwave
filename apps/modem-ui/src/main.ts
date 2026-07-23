@@ -150,8 +150,8 @@ function handleBridgeMessage(socket: WebSocket, event: MessageEvent): void {
       }
       if (type !== 4) throw new Error(`Local bridge sent unsupported binary FWAV type ${type}`);
       const activeTransmit = transmitCase;
-      const scheduled = acceptBridgePlaybackFrame(event.data, epoch, { validate: validatePcmPlaybackFrame, enqueue: enqueuePcmPlayback }) as unknown as { completion?: Promise<unknown> };
-      if (activeTransmit && scheduled.completion) {
+      const scheduled = acceptBridgePlaybackFrame(event.data, epoch, { validate: validatePcmPlaybackFrame, enqueue: enqueuePcmPlayback });
+      if (activeTransmit) {
         void scheduled.completion.then(() => {
           if (transmitCase !== activeTransmit || !bridge || bridge.readyState !== WebSocket.OPEN) return;
           const payload = new TextEncoder().encode(JSON.stringify({ action: 'playback_complete', caseId: activeTransmit.caseId, direction: activeTransmit.direction }));
