@@ -278,6 +278,23 @@ describe('PCM playback boundary', () => {
     expect(harness.context.createBufferSource).toHaveBeenCalledTimes(1);
   });
 
+  it('resolves keyed playback completion only after the guarded source ends and rejects it on reset', async () => {
+    const harness = audioHarness();
+    await armAudio(3);
+    const first = enqueuePcmPlayback(validatePcmPlaybackFrame(playbackFrame({ epoch: 3, sequence: 10n }), 3));
+    let completed = false;
+    void first.completion.then(() => { completed = true; });
+    await Promise.resolve();
+    expect(completed).toBe(false);
+
+    harness.sources[0]!.end();
+    await expect(first.completion).resolves.toEqual({ epoch: 3, sequence: 10n, firstSampleIndex: 0n });
+
+    const second = enqueuePcmPlayback(validatePcmPlaybackFrame(playbackFrame({ epoch: 3, sequence: 11n, firstSampleIndex: 4n }), 3));
+    await resetAudio();
+    await expect(second.completion).rejects.toThrow('reset');
+  });
+
   it('clears capture ownership and all audio resources even when one scheduled source cannot stop', async () => {
     const first = audioHarness({ sourceStopThrows: true });
     await armAudio(4);
@@ -309,5 +326,32 @@ describe('audio lifecycle cleanup', () => {
     const recovered = audioHarness();
     await expect(armAudio(12)).resolves.toMatchObject({ epoch: 12, captureChannels: 1 });
     expect(recovered.context.resume).toHaveBeenCalledOnce();
+  });
+
+  it('does not let a stale arm completion tear down a newer reset epoch', async () => {
+    let resolveFirstMedia!: (value: MediaStream) => void;
+    const firstContext = {
+      state: 'suspended', sampleRate: 48_000, currentTime: 0, destination: {},
+      resume: vi.fn(async () => { firstContext.state = 'running'; }),
+      close: vi.fn(async () => { firstContext.state = 'closed'; }),
+      createBuffer: vi.fn(), createBufferSource: vi.fn(), createMediaStreamSource: vi.fn(),
+    };
+    const firstTrack = { getSettings: () => settings(), label: 'Old microphone', stop: vi.fn() };
+    const firstStream = { getAudioTracks: () => [firstTrack], getTracks: () => [firstTrack] } as unknown as MediaStream;
+    configureAudioEnvironmentForTests({
+      createAudioContext: () => firstContext as never,
+      getUserMedia: () => new Promise((resolve) => { resolveFirstMedia = resolve; }),
+    });
+    const stale = armAudio(30);
+    await Promise.resolve();
+    await resetAudio();
+
+    const current = audioHarness();
+    await expect(armAudio(31)).resolves.toMatchObject({ epoch: 31 });
+    resolveFirstMedia(firstStream);
+    await expect(stale).rejects.toThrow('stale');
+    await expect(armAudio(31)).resolves.toMatchObject({ epoch: 31 });
+    expect(current.context.resume).toHaveBeenCalledOnce();
+    expect(current.track.stop).not.toHaveBeenCalled();
   });
 });

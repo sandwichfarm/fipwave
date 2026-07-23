@@ -11,29 +11,35 @@ export const CYRINX_COMMANDS = ['geometry', 'encode', 'decode'] as const;
 export type CyrinxCommand = typeof CYRINX_COMMANDS[number];
 
 export interface CommandResult { exitCode: number; stdout: Uint8Array; stderr: string; timedOut: boolean; }
-export type PinnedCommandRunner = (request: { executable: string; command: CyrinxCommand; payload: Uint8Array; timeoutMs?: number }) => Promise<CommandResult>;
+export interface PinnedCommandRequest { executable: string; command: CyrinxCommand; payload: Uint8Array; timeoutMs?: number; signal?: AbortSignal; }
+export type PinnedCommandRunner = (request: PinnedCommandRequest) => Promise<CommandResult>;
 
 export const CYRINX_PROFILE: CodecProfile = {
   codec: 'cyrinx', name: 'bulk-qpsk-r1-2-48k-v1', audible: true, advertisedMtu: 1536, sampleRate: 48_000, channels: 1,
 };
 
 /** Runs exactly one hash-built C batch command. No shell, profile, or streaming controls are exposed. */
-export const runPinnedCommand: PinnedCommandRunner = async ({ executable, command, payload, timeoutMs = 15_000 }) => {
+export const runPinnedCommand: PinnedCommandRunner = async ({ executable, command, payload, timeoutMs = 15_000, signal }) => {
   if (!CYRINX_COMMANDS.includes(command) || payload.byteLength > MAX_COMMAND_INPUT_BYTES || !Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 30_000) throw new Error('native command request is invalid');
+  if (signal?.aborted) throw new Error('native command aborted');
   return new Promise<CommandResult>((resolve, reject) => {
     const child = spawn(executable, [command], { shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     const stdout: Buffer[] = []; const stderr: Buffer[] = []; let stdoutBytes = 0; let stderrBytes = 0; let settled = false; let timedOut = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const cleanup = (): void => { clearTimeout(timer); signal?.removeEventListener('abort', abort); };
     const finish = (error?: Error): void => {
       if (settled) return;
-      settled = true; clearTimeout(timer);
+      settled = true; cleanup();
       if (error) { child.kill('SIGKILL'); reject(error); return; }
       resolve({ exitCode: child.exitCode ?? 1, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr).toString('utf8'), timedOut });
     };
-    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeoutMs);
+    const abort = (): void => finish(new Error('native command aborted'));
+    timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeoutMs);
+    signal?.addEventListener('abort', abort, { once: true });
     child.once('error', finish);
     child.stdout.on('data', (chunk: Buffer) => { stdoutBytes += chunk.byteLength; if (stdoutBytes > MAX_COMMAND_OUTPUT_BYTES) finish(new Error('native stdout exceeds cap')); else stdout.push(Buffer.from(chunk)); });
     child.stderr.on('data', (chunk: Buffer) => { stderrBytes += chunk.byteLength; if (stderrBytes > MAX_COMMAND_STDERR_BYTES) finish(new Error('native stderr exceeds cap')); else stderr.push(Buffer.from(chunk)); });
-    child.once('close', (code) => { if (!settled) { settled = true; clearTimeout(timer); resolve({ exitCode: code ?? 1, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr).toString('utf8'), timedOut }); } });
+    child.once('close', (code) => { if (!settled) { settled = true; cleanup(); resolve({ exitCode: code ?? 1, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr).toString('utf8'), timedOut }); } });
     child.stdin.once('error', () => undefined);
     child.stdin.end(payload);
   });

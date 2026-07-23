@@ -6,6 +6,8 @@ export const MAX_MESSAGE_BYTES = 256 * 1024;
 export const MAX_PAYLOAD_BYTES = MAX_MESSAGE_BYTES - HEADER_BYTES;
 /** PCM carries its signal timeline here; FWAV sequence remains transport anti-replay only. */
 export const PCM_SAMPLE_INDEX_BYTES = 8;
+/** Exact fixed-geometry Cyrinx playback; the browser adds the documented local guard tail. */
+export const CYRINX_PCM_PLAYBACK_FLAG = 0x0001;
 
 export enum MessageType {
   HELLO = 1,
@@ -36,10 +38,13 @@ export interface FwavFrame {
 
 export function encodePcmPayload(firstSampleIndex: bigint, samples: Buffer): Buffer {
   if (firstSampleIndex < 0n || firstSampleIndex > 0xffff_ffff_ffff_ffffn) fail('PCM first sample index is out of range');
+  if (!Buffer.isBuffer(samples)) fail('PCM samples must be binary');
   const payload = Buffer.alloc(PCM_SAMPLE_INDEX_BYTES + samples.byteLength);
   payload.writeBigUInt64LE(firstSampleIndex, 0); samples.copy(payload, PCM_SAMPLE_INDEX_BYTES); return payload;
 }
 export function decodePcmPayload(payload: Buffer, channels: number): { firstSampleIndex: bigint; samples: Buffer } {
+  if (!Buffer.isBuffer(payload)) fail('PCM payload must be binary');
+  if (!Number.isInteger(channels) || channels <= 0 || channels > 0xffff) fail('PCM channel count is out of range');
   if (payload.byteLength <= PCM_SAMPLE_INDEX_BYTES || (payload.byteLength - PCM_SAMPLE_INDEX_BYTES) % (Float32Array.BYTES_PER_ELEMENT * channels) !== 0) fail('PCM payload is not sample-index aligned');
   return { firstSampleIndex: payload.readBigUInt64LE(0), samples: Buffer.from(payload.subarray(PCM_SAMPLE_INDEX_BYTES)) };
 }

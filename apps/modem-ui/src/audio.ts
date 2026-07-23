@@ -3,6 +3,10 @@ export const PCM_PLAYBACK_MESSAGE_TYPE = 4;
 export const PCM_FLOAT32_ENCODING = 1;
 export const PCM_SAMPLE_INDEX_BYTES = 8;
 export const FWAV_HEADER_BYTES = 32;
+export const CYRINX_PCM_PLAYBACK_FLAG = 1;
+export const CYRINX_FRAME_SAMPLES = 62_464;
+export const CYRINX_GUARD_SAMPLES = 14_400;
+const MAX_SCHEDULED_HORIZON_MS = 2_000;
 
 export type PermissionState = 'granted' | 'denied' | 'unknown';
 export type WorkletState = 'ready' | 'unavailable' | 'unknown';
@@ -33,6 +37,7 @@ export interface AudioPreflightResult {
 
 export interface PcmPlaybackChunk {
   epoch: number;
+  sequence: bigint;
   firstSampleIndex: bigint;
   sampleRate: number;
   channelCount: 1;
@@ -50,6 +55,14 @@ export interface PlaybackMetrics {
   highWaterDurationMs: number;
   discontinuities: number;
   scheduledSources: number;
+}
+export interface PlaybackCompletion {
+  epoch: number;
+  sequence: bigint;
+  firstSampleIndex: bigint;
+}
+export interface ScheduledPlayback extends PlaybackMetrics {
+  completion: Promise<PlaybackCompletion>;
 }
 
 export interface PcmPlaybackQueue {
@@ -95,10 +108,18 @@ let currentEpoch = 0;
 let currentContext: BrowserAudioContext | undefined;
 let currentStream: MediaStream | undefined;
 let currentWorklet: WorkletLike | undefined;
-let activeArm: { epoch: number; promise: Promise<AppliedAudioEvidence> } | undefined;
+let activeArm: { epoch: number; generation: number; promise: Promise<AppliedAudioEvidence> } | undefined;
+let armGeneration = 0;
+let currentEvidence: AppliedAudioEvidence | undefined;
 let currentQueue: PcmPlaybackQueue | undefined;
 let nextPlaybackTime = 0;
+let lastPlaybackSequence = -1n;
 const scheduledSources = new Set<AudioBufferSourceNode>();
+let pendingPlayback: {
+  source: AudioBufferSourceNode;
+  resolve(value: PlaybackCompletion): void;
+  reject(reason: Error): void;
+} | undefined;
 let captureHandler: ((batch: unknown) => void) | undefined;
 
 const mediaConstraints: MediaStreamConstraints = {
@@ -124,6 +145,10 @@ function assertCurrent(epoch: number): void {
   if (epoch !== currentEpoch) {
     fail(`stale audio completion for epoch ${epoch}`);
   }
+}
+
+function finishArm(generation: number): void {
+  if (activeArm?.generation === generation) activeArm = undefined;
 }
 
 export function evaluateAppliedSettings(evidence: AppliedAudioEvidence): AudioPreflightResult {
@@ -175,11 +200,16 @@ async function prepareWorklet(context: BrowserAudioContext, stream: MediaStream,
   assertCurrent(epoch);
   const worklet = environment.createWorklet(context, epoch);
   const source = context.createMediaStreamSource(stream);
-  source.connect(worklet as unknown as AudioNode);
-  worklet.connect(context.destination);
-  worklet.port.onmessage = (event) => {
-    if (epoch === currentEpoch) captureHandler?.(event.data);
-  };
+  try {
+    source.connect(worklet as unknown as AudioNode);
+    worklet.connect(context.destination);
+    worklet.port.onmessage = (event) => {
+      if (epoch === currentEpoch) captureHandler?.(event.data);
+    };
+  } catch (error) {
+    try { worklet.disconnect(); } catch { /* Context cleanup remains authoritative. */ }
+    throw error;
+  }
   return worklet;
 }
 
@@ -187,12 +217,17 @@ export function armAudio(epoch: number): Promise<AppliedAudioEvidence> {
   if (activeArm?.epoch === epoch) {
     return activeArm.promise;
   }
+  if (activeArm) return Promise.reject(new Error('audio reset is required before changing epoch'));
+  if (currentEvidence?.epoch === epoch && currentContext?.state === 'running') return Promise.resolve(currentEvidence);
+  if (currentContext || currentStream || currentWorklet) return Promise.reject(new Error('audio reset is required before re-arm'));
   if (epoch !== currentEpoch) {
     currentEpoch = epoch;
   }
+  const generation = ++armGeneration;
   const promise = (async () => {
     let context: BrowserAudioContext | undefined;
     let stream: MediaStream | undefined;
+    let worklet: WorkletLike | undefined;
     try {
       context = environment.createAudioContext();
       currentContext = context;
@@ -208,7 +243,7 @@ export function armAudio(epoch: number): Promise<AppliedAudioEvidence> {
       if (!track) {
         fail('microphone is unavailable');
       }
-      const worklet = await prepareWorklet(context, stream, epoch);
+      worklet = await prepareWorklet(context, stream, epoch);
       assertCurrent(epoch);
       currentWorklet = worklet;
       const evidence = toEvidence(epoch, context, track, 'ready');
@@ -218,22 +253,33 @@ export function armAudio(epoch: number): Promise<AppliedAudioEvidence> {
       }
       currentQueue = createPlaybackQueue({ maxBytes: 256 * 1024, maxDurationMs: 2_000 });
       nextPlaybackTime = context.currentTime;
+      lastPlaybackSequence = -1n;
+      currentEvidence = evidence;
       return evidence;
     } catch (error) {
-      if (stream && stream !== currentStream) {
-        stream.getTracks().forEach((track) => track.stop());
+      if (worklet) {
+        worklet.port.onmessage = null;
+        try { worklet.disconnect(); } catch { /* Continue closing every owned resource. */ }
       }
-      if (context && context !== currentContext) {
-        await context.close().catch(() => undefined);
+      if (stream) for (const track of stream.getTracks()) {
+        try { track.stop(); } catch { /* Continue closing every owned resource. */ }
+      }
+      if (context && context.state !== 'closed') await context.close().catch(() => undefined);
+      const ownsCurrentAudio = currentContext === context;
+      if (currentWorklet === worklet) currentWorklet = undefined;
+      if (currentStream === stream) currentStream = undefined;
+      if (currentContext === context) currentContext = undefined;
+      if (ownsCurrentAudio) {
+        currentQueue?.clear();
+        currentQueue = undefined;
+        currentEvidence = undefined;
       }
       throw error;
     } finally {
-      if (activeArm?.epoch === epoch) {
-        activeArm = undefined;
-      }
+      finishArm(generation);
     }
   })();
-  activeArm = { epoch, promise };
+  activeArm = { epoch, generation, promise };
   return promise;
 }
 
@@ -257,9 +303,20 @@ export function validatePcmPlaybackFrame(data: ArrayBuffer, expectedEpoch: numbe
   const payload = data.slice(FWAV_HEADER_BYTES + PCM_SAMPLE_INDEX_BYTES);
   const samples = new Float32Array(payload);
   const flags = view.getUint16(6, true);
-  if (flags !== 0 && flags !== 1) fail('PCM playback flags are unsupported');
-  if (flags === 1 && samples.length !== 62_464) fail('Cyrinx PCM frame has unexpected geometry');
-  return { epoch, firstSampleIndex: view.getBigUint64(FWAV_HEADER_BYTES, true), sampleRate, channelCount: 1, samples, byteLength: payloadBytes, durationMs: samples.length / sampleRate * 1_000, ...(flags === 1 ? { guardSamples: 14_400 } : {}) };
+  if (flags !== 0 && flags !== CYRINX_PCM_PLAYBACK_FLAG) fail('PCM playback flags are unsupported');
+  if (flags === CYRINX_PCM_PLAYBACK_FLAG && samples.length !== CYRINX_FRAME_SAMPLES) fail('Cyrinx PCM frame has unexpected geometry');
+  const guardSamples = flags === CYRINX_PCM_PLAYBACK_FLAG ? CYRINX_GUARD_SAMPLES : 0;
+  return {
+    epoch,
+    sequence: view.getBigUint64(16, true),
+    firstSampleIndex: view.getBigUint64(FWAV_HEADER_BYTES, true),
+    sampleRate,
+    channelCount: 1,
+    samples,
+    byteLength: payloadBytes,
+    durationMs: (samples.length + guardSamples) / sampleRate * 1_000,
+    ...(guardSamples ? { guardSamples } : {}),
+  };
 }
 
 export function createPlaybackQueue(options: { maxBytes: number; maxDurationMs: number }): PcmPlaybackQueue {
@@ -274,8 +331,11 @@ export function createPlaybackQueue(options: { maxBytes: number; maxDurationMs: 
   return {
     enqueue(chunk) {
       if (queuedBytes + chunk.byteLength > options.maxBytes || queuedDurationMs + chunk.durationMs > options.maxDurationMs) fail('PCM playback queue overflow');
-      if (lastEnd !== undefined && chunk.firstSampleIndex !== lastEnd) discontinuities += 1;
-      lastEnd = chunk.firstSampleIndex + BigInt(chunk.samples.length);
+      if (lastEnd !== undefined && chunk.firstSampleIndex !== lastEnd) {
+        discontinuities += 1;
+        fail('PCM playback discontinuity');
+      }
+      lastEnd = chunk.firstSampleIndex + BigInt(chunk.samples.length + (chunk.guardSamples ?? 0));
       chunks.push(chunk);
       queuedBytes += chunk.byteLength;
       queuedDurationMs += chunk.durationMs;
@@ -293,41 +353,94 @@ export function createPlaybackQueue(options: { maxBytes: number; maxDurationMs: 
   };
 }
 
-export function enqueuePcmPlayback(chunk: PcmPlaybackChunk): PlaybackMetrics {
+export function enqueuePcmPlayback(chunk: PcmPlaybackChunk): ScheduledPlayback {
   assertCurrent(chunk.epoch);
   if (!currentContext || !currentQueue || currentContext.state !== 'running') fail('audio playback is not armed');
-  currentQueue.enqueue(chunk);
+  if (chunk.sequence <= lastPlaybackSequence) fail('PCM playback sequence is a replay');
+  if (scheduledSources.size !== 0) fail('PCM playback already has a scheduled source');
   const outputSamples = chunk.samples.length + (chunk.guardSamples ?? 0);
-  const buffer = currentContext.createBuffer(2, outputSamples, chunk.sampleRate);
-  const left = new Float32Array(outputSamples); left.set(chunk.samples); buffer.copyToChannel(left, 0);
-  buffer.copyToChannel(new Float32Array(outputSamples), 1);
-  const source = currentContext.createBufferSource();
-  source.buffer = buffer;
-  source.connect(currentContext.destination);
   const startAt = Math.max(currentContext.currentTime, nextPlaybackTime);
-  nextPlaybackTime = startAt + outputSamples / chunk.sampleRate;
-  scheduledSources.add(source);
-  source.addEventListener('ended', () => scheduledSources.delete(source), { once: true });
-  source.start(startAt);
-  currentQueue.dequeue();
-  return currentQueue.metrics();
+  if ((startAt - currentContext.currentTime + outputSamples / chunk.sampleRate) * 1_000 > MAX_SCHEDULED_HORIZON_MS) fail('PCM playback scheduled horizon overflow');
+  currentQueue.enqueue(chunk);
+  let source: AudioBufferSourceNode | undefined;
+  let rejectCompletion: ((reason: Error) => void) | undefined;
+  try {
+    const buffer = currentContext.createBuffer(2, outputSamples, chunk.sampleRate);
+    const left = new Float32Array(outputSamples); left.set(chunk.samples); buffer.copyToChannel(left, 0);
+    buffer.copyToChannel(new Float32Array(outputSamples), 1);
+    source = currentContext.createBufferSource();
+    source.buffer = buffer;
+    source.connect(currentContext.destination);
+    scheduledSources.add(source);
+    const identity = { epoch: chunk.epoch, sequence: chunk.sequence, firstSampleIndex: chunk.firstSampleIndex };
+    let resolveCompletion!: (value: PlaybackCompletion) => void;
+    let reject!: (reason: Error) => void;
+    const completion = new Promise<PlaybackCompletion>((resolve, rejectPromise) => {
+      resolveCompletion = resolve;
+      reject = rejectPromise;
+    });
+    // The production consumer awaits this promise. This attached rejection
+    // handler also prevents reset from creating an unhandled rejection if a
+    // diagnostic caller intentionally ignores completion.
+    void completion.catch(() => undefined);
+    rejectCompletion = reject;
+    const ownedSource = source;
+    pendingPlayback = { source: ownedSource, resolve: resolveCompletion, reject };
+    source.addEventListener('ended', () => {
+      scheduledSources.delete(ownedSource);
+      if (pendingPlayback?.source === ownedSource) {
+        const pending = pendingPlayback;
+        pendingPlayback = undefined;
+        pending.resolve(identity);
+      }
+    }, { once: true });
+    source.start(startAt);
+    nextPlaybackTime = startAt + outputSamples / chunk.sampleRate;
+    lastPlaybackSequence = chunk.sequence;
+    currentQueue.dequeue();
+    return { ...currentQueue.metrics(), completion };
+  } catch (error) {
+    if (source) {
+      scheduledSources.delete(source);
+      try { source.disconnect(); } catch { /* A failed source is already detached from scheduling. */ }
+      if (pendingPlayback?.source === source) pendingPlayback = undefined;
+    }
+    rejectCompletion?.(error instanceof Error ? error : new Error('PCM playback failed'));
+    currentQueue.clear();
+    throw error;
+  }
 }
 
 export async function resetAudio(): Promise<number> {
   currentEpoch += 1;
   activeArm = undefined;
+  currentEvidence = undefined;
+  captureHandler = undefined;
+  const playback = pendingPlayback;
+  pendingPlayback = undefined;
+  playback?.reject(new Error('PCM playback was cancelled by reset'));
   currentQueue?.clear();
   currentQueue = undefined;
-  for (const source of scheduledSources) source.stop();
+  const sources = [...scheduledSources];
   scheduledSources.clear();
-  currentWorklet?.disconnect();
+  for (const source of sources) {
+    try { source.stop(); } catch { /* Ended sources must not block the rest of teardown. */ }
+    try { source.disconnect(); } catch { /* Ended sources must not block the rest of teardown. */ }
+  }
+  if (currentWorklet) {
+    currentWorklet.port.onmessage = null;
+    try { currentWorklet.disconnect(); } catch { /* Continue closing tracks and context. */ }
+  }
   currentWorklet = undefined;
-  currentStream?.getTracks().forEach((track) => track.stop());
+  if (currentStream) for (const track of currentStream.getTracks()) {
+    try { track.stop(); } catch { /* Continue closing tracks and context. */ }
+  }
   currentStream = undefined;
   const context = currentContext;
   currentContext = undefined;
   if (context && context.state !== 'closed') await context.close().catch(() => undefined);
   nextPlaybackTime = 0;
+  lastPlaybackSequence = -1n;
   return currentEpoch;
 }
 

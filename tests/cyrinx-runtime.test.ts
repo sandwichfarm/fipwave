@@ -255,7 +255,7 @@ describe('bounded Cyrinx worker', () => {
     let decodeSignal: AbortSignal | undefined;
     const run: PinnedCommandRunner = vi.fn(({ signal }) => {
       decodeSignal = signal;
-      return new Promise((resolve) => { resolveDecode = resolve; });
+      return new Promise<Awaited<ReturnType<PinnedCommandRunner>>>((resolve) => { resolveDecode = resolve; });
     });
     const worker = new CyrinxBatchWorker({ executable: '/pinned/cyrinx', run });
     await worker.begin(qualificationCase, EPOCH, 'listen');
