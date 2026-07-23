@@ -22,7 +22,7 @@ const sourceFiles = Object.freeze([
 
 function fail(reason) { throw new Error(`cyrinx_build_failed:${reason}`); }
 const resolvedBuildRoot = path.resolve(buildRoot);
-if (resolvedBuildRoot === path.parse(resolvedBuildRoot).root || resolvedBuildRoot === root || resolvedBuildRoot === path.resolve(assets) || resolvedBuildRoot.split(path.sep).filter(Boolean).length < 4) fail('build_root_unsafe');
+if (resolvedBuildRoot === path.parse(resolvedBuildRoot).root || resolvedBuildRoot === root || resolvedBuildRoot === path.resolve(assets)) fail('build_root_unsafe');
 function command(file, args, options = {}) {
   const result = spawnSync(file, args, { cwd: root, encoding: 'utf8', ...options });
   if (result.error || result.status !== 0) fail(`${file}:${result.error?.message ?? result.stderr?.trim() ?? result.status}`);
@@ -44,20 +44,25 @@ async function verifiedAsset(filename, digest) {
 async function regularWithin(rootPath, relative) {
   const candidate = path.join(rootPath, relative); const metadata = await lstat(candidate);
   if (!metadata.isFile() || metadata.isSymbolicLink()) fail(`source_not_regular:${relative}`);
+  const resolvedRoot = await realpath(rootPath);
   const resolved = await realpath(candidate);
-  if (!resolved.startsWith(`${rootPath}${path.sep}`)) fail(`source_escapes_root:${relative}`);
+  if (!resolved.startsWith(`${resolvedRoot}${path.sep}`)) fail(`source_escapes_root:${relative}`);
 }
 
 try {
   const archive = await verifiedAsset('cyrinx-ddbd0ce4.tar.gz', required['cyrinx-ddbd0ce4.tar.gz']);
   for (const [filename, digest] of Object.entries(required)) if (filename !== 'cyrinx-ddbd0ce4.tar.gz') await verifiedAsset(filename, digest);
   safeArchiveMembers(command('tar', ['-tzf', archive]));
-  await rm(buildRoot, { recursive: true, force: true });
   await mkdir(buildRoot, { recursive: true });
-  command('tar', ['-xzf', archive, '-C', buildRoot]);
   const sourceRoot = path.join(buildRoot, archiveRoot);
-  for (const relative of [...sourceFiles, 'Sources/CCyrinx/include/cyrinx/cyrinx_bulk.h', 'Sources/CCyrinx/include/cyrinx/cyrinx_fft.h', 'Sources/CCyrinx/kissfft/kiss_fft.h', 'Sources/CCyrinx/kissfft/kiss_fftr.h', 'Sources/CCyrinx/kissfft/COPYING', 'LICENSE', 'NOTICE']) await regularWithin(sourceRoot, relative);
   const output = path.join(buildRoot, 'cyrinx_batch');
+  // Only remove paths this script owns. CYRINX_BUILD_DIR is user-provided in
+  // tests and deployments, so recursively deleting the directory itself would
+  // make a typo capable of destroying unrelated data.
+  await rm(sourceRoot, { recursive: true, force: true });
+  await rm(output, { force: true });
+  command('tar', ['-xzf', archive, '-C', buildRoot]);
+  for (const relative of [...sourceFiles, 'Sources/CCyrinx/include/cyrinx/cyrinx_bulk.h', 'Sources/CCyrinx/include/cyrinx/cyrinx_fft.h', 'Sources/CCyrinx/kissfft/kiss_fft.h', 'Sources/CCyrinx/kissfft/kiss_fftr.h', 'Sources/CCyrinx/kissfft/COPYING', 'LICENSE', 'NOTICE']) await regularWithin(sourceRoot, relative);
   command('cc', [
     '-std=c11', '-O2', '-Dkiss_fft_scalar=double',
     '-I', path.join(sourceRoot, 'Sources/CCyrinx/include'),

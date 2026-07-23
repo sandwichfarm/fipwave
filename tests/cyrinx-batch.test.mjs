@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { access } from 'node:fs/promises';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -68,6 +68,31 @@ test('build fails closed for missing or altered pinned assets without touching t
   const altered = spawnSync(process.execPath, [script], { cwd: root, env: { ...process.env, CYRINX_ASSET_DIR: isolated, CYRINX_BUILD_DIR: path.join(isolated, 'build') }, encoding: 'utf8' });
   assert.notEqual(altered.status, 0);
   assert.match(altered.stderr, /cyrinx_build_failed:asset_hash_mismatch/);
+});
+
+test('build removes only its owned outputs inside a configured build directory', async () => {
+  const isolated = await mkdtemp(path.join(tmpdir(), 'fipwave-cyrinx-build-'));
+  const assets = path.join(root, '.artifacts', 'codecs');
+  const build = path.join(isolated, 'build');
+  const sentinel = path.join(build, 'operator-owned.txt');
+  await mkdir(build, { recursive: true });
+  await writeFile(sentinel, 'preserve');
+  for (const filename of [
+    'cyrinx-ddbd0ce4.tar.gz',
+    'cyrinx-LICENSE',
+    'cyrinx-NOTICE',
+    'cyrinx-kissfft-COPYING',
+  ]) {
+    await copyFile(path.join(assets, filename), path.join(isolated, filename));
+  }
+  const result = spawnSync(process.execPath, [path.join(root, 'scripts', 'build-cyrinx.mjs')], {
+    cwd: root,
+    env: { ...process.env, CYRINX_ASSET_DIR: isolated, CYRINX_BUILD_DIR: build },
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal((await readFile(sentinel, 'utf8')), 'preserve');
+  await access(path.join(build, 'cyrinx_batch'));
 });
 
 test('batch framing rejects invalid metadata identity and digest before modulation', () => {
