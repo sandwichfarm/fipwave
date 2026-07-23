@@ -20,6 +20,12 @@ export type CyrinxStage =
   | 'unqualified';
 export type CyrinxSessionCodec = 'idle' | 'cyrinx' | 'quiet' | 'unqualified';
 export type CyrinxInstructionAction = 'transmit' | 'listen';
+/**
+ * 131072 samples at 48 kHz (2731 ms), plus the viable ~1.3 s cold-start skew
+ * and native/browser scheduling headroom. This prevents consecutive
+ * same-direction frames from overlapping the peer's capture window.
+ */
+export const CYRINX_TRANSMIT_SETTLE_MS = 4_500;
 
 export interface CyrinxQualificationCase {
   id: string;
@@ -119,6 +125,14 @@ const ORDERED_CASES: readonly CyrinxQualificationCase[] = Object.freeze([
   ...(manifest.cases as CorpusManifestCase[]).map(corpusCase),
 ]);
 
+export function cyrinxDigitalCases(): readonly CyrinxQualificationCase[] {
+  const corpus = ORDERED_CASES.slice(2);
+  const small = corpus.find((value) => value.size === 256);
+  const large = corpus.find((value) => value.size === 1536);
+  if (!small || !large) throw new Error('committed corpus is missing digital gate cases');
+  return [small, large].map((value) => ({ ...value, payload: Buffer.from(value.payload) }));
+}
+
 export class QualificationSessionError extends Error {
   constructor(readonly reasonCode: string) {
     super(reasonCode);
@@ -170,7 +184,7 @@ export class CyrinxQualificationSession {
   #fallbackReason: CyrinxFallbackReason | null = null;
   #caseIndex: number | null = null;
   #accepted:
-    | { caseIndex: number; mode: CyrinxInstructionAction }
+    | { caseIndex: number; mode: CyrinxInstructionAction; acceptedAtMs: number }
     | undefined;
   #coldReceivePassed = false;
 
@@ -244,7 +258,7 @@ export class CyrinxQualificationSession {
     if (this.#accepted) reject('qualification_instruction_already_accepted');
     if (caseId !== value.id || direction !== value.direction) reject('qualification_instruction_mismatch');
     const mode = actionFor(this.role, value.direction);
-    this.#accepted = { caseIndex: this.#caseIndex!, mode };
+    this.#accepted = { caseIndex: this.#caseIndex!, mode, acceptedAtMs: checkedNow(nowMs) };
     return { value, mode };
   }
 
@@ -252,6 +266,16 @@ export class CyrinxQualificationSession {
     return this.#accepted?.mode === 'listen'
       && this.#accepted.caseIndex === this.#caseIndex
       && !this.terminal;
+  }
+
+  transmitSettleRemaining(nowMs: number): number {
+    const accepted = this.#accepted;
+    if (!accepted || accepted.caseIndex !== this.#caseIndex) {
+      reject('qualification_instruction_not_accepted');
+    }
+    if (accepted.mode !== 'transmit') reject('qualification_instruction_mode_mismatch');
+    const elapsed = Math.max(0, checkedNow(nowMs) - accepted.acceptedAtMs);
+    return Math.max(0, CYRINX_TRANSMIT_SETTLE_MS - elapsed);
   }
 
   completeAccepted(mode: CyrinxInstructionAction, nowMs: number): void {
@@ -332,7 +356,6 @@ export class CyrinxQualificationSession {
 
   snapshot(epoch: number, nowMs: number): CyrinxSessionSnapshot {
     if (!Number.isSafeInteger(epoch) || epoch < 0) reject('qualification_epoch_invalid');
-    this.expire(nowMs);
     const elapsedMs = this.#startedAtMs === null
       ? null
       : this.#terminalElapsedMs ?? this.#elapsed(nowMs);

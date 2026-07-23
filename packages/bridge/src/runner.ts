@@ -6,6 +6,9 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { createBridgeServer, LOOPBACK_HOST, type BridgeServer, type BridgeServerOptions, type CodecAsset, type RunnerQualificationConfig } from './server.js';
+import { NativeCommandCodecAdapter } from './codecs/command.js';
+import { CyrinxBatchWorker } from './cyrinx-worker.js';
+import { cyrinxDigitalCases } from './qualification-session.js';
 import { CYRINX_DEADLINE_MS, QUALIFICATION_DEAD_LINK_TIMEOUT_MS, QUIET_CODEC, TUN_EVIDENCE_CHECKS, validateTunEvidence, type MachineReport, type TunEvidence } from './report.js';
 
 const execFileAsync = promisify(execFile);
@@ -27,6 +30,10 @@ export interface ProductionRunnerOptions {
   reportWriterForTests?: BridgeServerOptions['reportWriter'];
   nowForTests?: () => number;
   cyrinxBuildForTests?: () => Promise<void>;
+  cyrinxDigitalForTests?: BridgeServerOptions['cyrinxDigital'];
+  cyrinxWorkerForTests?: BridgeServerOptions['cyrinxWorker'];
+  cyrinxTimerForTests?: BridgeServerOptions['cyrinxTimer'];
+  cyrinxSettleForTests?: BridgeServerOptions['cyrinxSettle'];
 }
 export interface ProductionRunner extends BridgeServer { config: Readonly<RunnerQualificationConfig>; }
 function fail(message: string): never { throw new Error(`runner ${message}`); }
@@ -91,6 +98,28 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
   const config = Object.freeze({ machineId: options.machineId, role: options.role, reportTarget: options.report, tunEvidence: options.tunEvidence, tunEvidenceSource: tunEvidence.source, evidenceMode, evidenceClass: evidenceMode, buildCommit: build.commit, codec: { ...QUIET_CODEC }, qualification } satisfies RunnerQualificationConfig);
   const codecAssetDir = options.codecAssetDir ?? path.join(PROJECT_ROOT, '.artifacts', 'codecs');
   const codecAssets = await verifiedCodecAssets(codecAssetDir, options.codecAssets ?? await loadCodecAssets());
+  const cyrinxExecutable = path.join(PROJECT_ROOT, '.artifacts', 'build', 'cyrinx', 'cyrinx_batch');
+  const cyrinxWorker = options.cyrinxWorkerForTests ?? new CyrinxBatchWorker({
+    executable: cyrinxExecutable,
+    ...(options.nowForTests ? { now: options.nowForTests } : {}),
+  });
+  const cyrinxDigital = options.cyrinxDigitalForTests ?? (async (context: { epoch: number; evidenceClass: MachineReport['evidenceClass']; nowMs: number }): Promise<void> => {
+    const adapter = new NativeCommandCodecAdapter({ executable: cyrinxExecutable });
+    for (const value of cyrinxDigitalCases()) {
+      const result = await adapter.qualify(value, context);
+      if (
+        result.adapter !== 'cyrinx'
+        || result.profile.name !== 'bulk-qpsk-r1-2-48k-v1'
+        || result.profile.advertisedMtu !== 1536
+        || result.caseId !== value.id
+        || result.direction !== value.direction
+        || result.digest !== value.digest
+        || !result.complete
+        || !result.bytePerfect
+        || result.deliveryCount !== 1
+      ) fail('Cyrinx digital encode/decode gate failed');
+    }
+  });
   const bridgeOptions = {
     host: LOOPBACK_HOST, port: options.port, artifactDir: path.join(PROJECT_ROOT, '.artifacts', 'qualification'),
     uiDir: options.uiDir ?? path.join(PROJECT_ROOT, 'dist', 'modem-ui'), qualificationConfig: config,
@@ -98,7 +127,11 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
     codecAssetDir, codecAssets,
     ...(options.reportWriterForTests ? { reportWriter: options.reportWriterForTests } : {}),
     ...(options.nowForTests ? { now: options.nowForTests } : {}),
-    cyrinxBuild: options.cyrinxBuildForTests ?? (async () => { await execFileAsync(process.execPath, [path.join(PROJECT_ROOT, 'scripts', 'build-cyrinx.mjs')], { cwd: PROJECT_ROOT }); }),
+    cyrinxBuild: options.cyrinxBuildForTests ?? (async () => { await execFileAsync(process.execPath, [path.join(PROJECT_ROOT, 'scripts', 'build-cyrinx.mjs')], { cwd: PROJECT_ROOT, timeout: 60_000, killSignal: 'SIGKILL' }); }),
+    cyrinxDigital,
+    cyrinxWorker,
+    ...(options.cyrinxTimerForTests ? { cyrinxTimer: options.cyrinxTimerForTests } : {}),
+    ...(options.cyrinxSettleForTests ? { cyrinxSettle: options.cyrinxSettleForTests } : {}),
   } satisfies BridgeServerOptions;
   const bridge = await createBridgeServer(bridgeOptions);
   return { ...bridge, config };

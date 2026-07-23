@@ -7,6 +7,7 @@ import WebSocket from 'ws';
 import { decodeFrame, encodeFrame, encodePcmPayload, MessageType, PcmEncoding } from '../packages/bridge/src/protocol.js';
 import { CYRINX_DEADLINE_MS, writeMachineReport, type MachineReport, type TunEvidence } from '../packages/bridge/src/report.js';
 import { startProductionRunner, type ProductionRunner } from '../packages/bridge/src/runner.js';
+import { CYRINX_TRANSMIT_SETTLE_MS } from '../packages/bridge/src/qualification-session.js';
 import type { CyrinxWorkerRuntime } from '../packages/bridge/src/server.js';
 import manifest from '../fixtures/corpus/manifest.json' with { type: 'json' };
 
@@ -34,9 +35,12 @@ function qualificationResult(epoch: number, sequence: bigint, caseId: string, ov
 function qualifyingCases(direction: 'A → B' | 'B → A'): string[] {
   return manifest.cases.filter((entry) => entry.direction === direction && (entry.size === 1536 || Number(entry.id.slice(-2)) <= 19)).map((entry) => entry.id);
 }
-async function openSocket(runner: ProductionRunner): Promise<WebSocket> {
+async function openSocket(runner: ProductionRunner, expectSnapshot = true): Promise<WebSocket> {
   const socket = new WebSocket(`ws://127.0.0.1:${runner.port}/bridge`, { origin: `http://127.0.0.1:${runner.port}` });
-  await new Promise<void>((resolve, reject) => { socket.once('open', resolve); socket.once('error', reject); }); return socket;
+  const initial = expectSnapshot ? nextText(socket) : undefined;
+  await new Promise<void>((resolve, reject) => { socket.once('open', resolve); socket.once('error', reject); });
+  if (initial) expect(await initial).toMatchObject({ kind: 'cyrinx-session' });
+  return socket;
 }
 function nextText(socket: WebSocket): Promise<Record<string, unknown>> {
   return new Promise((resolve) => socket.on('message', function listener(value, binary) { if (binary) return; socket.off('message', listener); resolve(JSON.parse(value.toString()) as Record<string, unknown>); }));
@@ -179,9 +183,9 @@ describe('production runner', () => {
   it('prevents multi-tab evidence combination and permits reconnect only after RESET', async () => {
     const target = await reportPath('tabs'); const runner = await startProductionRunner({ machineId: 'laptop-b', role: 'B', port: 0, report: target, tunEvidence: 'none', uiDir: await fixtureUi() }); runners.push(runner);
     const first = await openSocket(runner); const settingsAck = nextText(first); first.send(audioSettings(1, 0n)); await settingsAck;
-    const second = await openSocket(runner); await new Promise((resolve) => second.once('close', resolve));
+    const second = await openSocket(runner, false); await new Promise((resolve) => second.once('close', resolve));
     first.close(); await new Promise((resolve) => first.once('close', resolve));
-    const premature = await openSocket(runner); await new Promise((resolve) => premature.once('close', resolve));
+    const premature = await openSocket(runner, false); await new Promise((resolve) => premature.once('close', resolve));
     await runner.reset();
     const afterReset = await openSocket(runner); expect(afterReset.readyState).toBe(WebSocket.OPEN); afterReset.close();
   });
@@ -200,6 +204,7 @@ describe('production runner', () => {
     const target = await reportPath('cyrinx-success');
     const worker = fakeCyrinxWorker();
     const gateOrder: string[] = [];
+    const settleDelays: number[] = [];
     let now = 20_000;
     const runner = await startProductionRunner({
       machineId: 'laptop-a',
@@ -212,6 +217,7 @@ describe('production runner', () => {
       cyrinxBuildForTests: async () => { gateOrder.push('build'); now += 1; },
       cyrinxDigitalForTests: async () => { gateOrder.push('digital'); now += 1; },
       cyrinxWorkerForTests: worker,
+      cyrinxSettleForTests: async (delayMs) => { settleDelays.push(delayMs); now += delayMs; },
     });
     runners.push(runner);
     const inbox = await openInbox(runner);
@@ -253,6 +259,9 @@ describe('production runner', () => {
     }
 
     expect(acceptedCases).toBe(52);
+    expect(settleDelays).toHaveLength(26);
+    expect(settleDelays.every((delayMs) => delayMs === CYRINX_TRANSMIT_SETTLE_MS)).toBe(true);
+    expect(CYRINX_TRANSMIT_SETTLE_MS).toBeGreaterThan(Math.ceil(131_072 / 48_000 * 1_000) + 1_300);
     expect(worker.begin.mock.calls.slice(0, 4).map((call) => [call[0].id, call[2]])).toEqual([
       ['cyrinx-cold-a-to-b', 'transmit'],
       ['cyrinx-cold-b-to-a', 'listen'],
@@ -265,7 +274,7 @@ describe('production runner', () => {
       codec: { id: 'cyrinx', profile: 'bulk-qpsk-r1-2-48k-v1', advertisedMtu: 1536 },
       complete: true,
       qualification: {
-        deadline: { startedAtMs: 20_000, deadlineAtMs: 20_000 + CYRINX_DEADLINE_MS, elapsedMs: 2 },
+        deadline: { startedAtMs: 20_000, deadlineAtMs: 20_000 + CYRINX_DEADLINE_MS, elapsedMs: 2 + 26 * CYRINX_TRANSMIT_SETTLE_MS },
         physicalGate: 'not_physical',
         fallback: { state: 'available', reasonCode: null },
       },

@@ -7,7 +7,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
 import manifest from '../../../fixtures/corpus/manifest.json' with { type: 'json' };
+import type { CyrinxCase, CyrinxCaseMode, CyrinxResult } from './cyrinx-worker.js';
 import { decodeFrame, encodeFrame, MessageType, type FwavFrame } from './protocol.js';
+import {
+  CyrinxQualificationSession,
+  type CyrinxSessionSnapshot,
+} from './qualification-session.js';
 import {
   CYRINX_DEADLINE_MS,
   CYRINX_CODEC,
@@ -68,6 +73,15 @@ export interface BridgeState {
 export interface BridgeServer {
   port: number; sendPcmPlayback(frame: Buffer): void; startCyrinx(): Promise<{ codec: 'cyrinx' | 'quiet'; reasonCode: string | null; deadlineAtMs: number }>; reset(): Promise<number>; close(): Promise<void>; state(): BridgeState;
 }
+export interface CyrinxWorkerRuntime {
+  begin(value: CyrinxCase, epoch: number, mode: CyrinxCaseMode): Promise<Buffer | undefined>;
+  receiveCapture(encoded: Buffer): Promise<CyrinxResult | undefined>;
+  reset(): void;
+}
+export interface CyrinxTimer {
+  set(callback: () => void, delayMs: number): unknown;
+  clear(handle: unknown): void;
+}
 export interface BridgeServerOptions {
   host: typeof LOOPBACK_HOST;
   port: number;
@@ -81,6 +95,12 @@ export interface BridgeServerOptions {
   now?: () => number;
   /** Runner-owned only: this is invoked after the immutable deadline is stamped. */
   cyrinxBuild?: () => Promise<void>;
+  /** Runner-owned codec-neutral native encode/decode gate. */
+  cyrinxDigital?: (context: { epoch: number; evidenceClass: MachineReport['evidenceClass']; nowMs: number }) => Promise<void>;
+  /** Runner-owned native batch worker. The browser never receives this authority. */
+  cyrinxWorker?: CyrinxWorkerRuntime;
+  cyrinxTimer?: CyrinxTimer;
+  cyrinxSettle?: (delayMs: number) => Promise<void>;
 }
 
 class BridgeInputError extends Error {
@@ -105,7 +125,7 @@ function immutableConfig(config: RunnerQualificationConfig): RunnerQualification
 }
 function sha256(body: Buffer): string { return createHash('sha256').update(body).digest('hex'); }
 function hasForbiddenAuthority(value: unknown): boolean {
-  const forbidden = new Set(['machineId', 'role', 'reportTarget', 'report', 'tunEvidence', 'tunEvidenceSource', 'evidenceMode', 'evidenceClass', 'hostIdentity', 'buildCommit', 'codec', 'qualification', 'deadLinkTimeoutMs', 'cyrinxDeadlineMs']);
+  const forbidden = new Set(['machineId', 'role', 'reportTarget', 'report', 'tunEvidence', 'tunEvidenceSource', 'evidenceMode', 'evidenceClass', 'hostIdentity', 'buildCommit', 'codec', 'qualification', 'deadLinkTimeoutMs', 'cyrinxDeadlineMs', 'deadline', 'fallback', 'stage', 'terminal', 'instruction']);
   if (!value || typeof value !== 'object') return false;
   if (Array.isArray(value)) return value.some(hasForbiddenAuthority);
   return Object.entries(value).some(([key, child]) => forbidden.has(key) || hasForbiddenAuthority(child));
@@ -214,7 +234,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   if (!Number.isInteger(options.port) || options.port < 0 || options.port > 65_535) fail('bridge port must be an integer between 0 and 65535');
   await mkdir(options.artifactDir, { recursive: true });
   const config = options.qualificationConfig && immutableConfig(options.qualificationConfig);
-  const authority = config ? { codec: { ...config.codec }, qualification: { ...config.qualification, deadline: { ...config.qualification.deadline }, fallback: { ...config.qualification.fallback } } } : undefined;
+  const cyrinxSession = config ? new CyrinxQualificationSession(config.role) : undefined;
   const corpus = manifest.cases as CorpusEntry[];
   const expectedDirection = config?.role === 'A' ? 'B → A' : 'A → B';
   const expectedCorpus = corpus.filter((entry) => entry.direction === expectedDirection);
@@ -263,7 +283,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   let audio: BrowserAudio | undefined; let generation = 1; let writeTail: Promise<unknown> = Promise.resolve();
   let results = new Map<string, BrowserResult>(); let failureReasons = new Set<string>();
   let owner: WebSocket | undefined; let epochClaimed = false; let reconnectAllowed = false;
-  let cyrinxExpiryTimer: ReturnType<typeof setTimeout> | undefined;
+  let cyrinxExpiryTimer: unknown;
   for (const type of [MessageType.PCM_CAPTURE, MessageType.PCM_PLAYBACK, MessageType.QUALIFICATION_CASE, MessageType.QUALIFICATION_RESULT, MessageType.ERROR, MessageType.RESET]) queues.set(type, { frames: [], bytes: 0, overflowed: false });
   const refreshState = () => { for (const [type, queue] of queues) state.queueCounts[queueName(type)] = queue.frames.length; };
   const clearQueues = () => { for (const queue of queues.values()) { queue.frames = []; queue.bytes = 0; queue.overflowed = false; } refreshState(); };
@@ -281,8 +301,67 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     }
     queue.frames.push({ frame, enqueuedAt: now }); queue.bytes += frame.payload.byteLength + HEADER_BYTES; refreshState();
   };
+  const clock = (): number => options.now?.() ?? Date.now();
+  const timer: CyrinxTimer = options.cyrinxTimer ?? {
+    set: (callback, delayMs) => setTimeout(callback, delayMs),
+    clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+  };
+  function clearCyrinxTimer(): void {
+    if (cyrinxExpiryTimer !== undefined) timer.clear(cyrinxExpiryTimer);
+    cyrinxExpiryTimer = undefined;
+  }
+  const settleExpiry = (): boolean => {
+    if (!cyrinxSession || !cyrinxSession.expire(clock())) return false;
+    options.cyrinxWorker?.reset();
+    clearCyrinxTimer();
+    failureReasons.add('cyrinx_deadline_expired');
+    return true;
+  };
+  const sessionSnapshot = (): CyrinxSessionSnapshot | undefined => {
+    const changed = settleExpiry();
+    const snapshot = cyrinxSession?.snapshot(state.epoch, clock());
+    if (changed && snapshot) {
+      const encoded = JSON.stringify(snapshot);
+      queueMicrotask(() => {
+        for (const client of clients) if (client.readyState === client.OPEN) client.send(encoded);
+      });
+    }
+    return snapshot;
+  };
+  const reportAuthority = (): {
+    codec: MachineReport['codec'];
+    qualification: NonNullable<MachineReport['qualification']>;
+    snapshot?: CyrinxSessionSnapshot;
+  } | undefined => {
+    if (!config) return undefined;
+    const snapshot = sessionSnapshot();
+    if (!snapshot || snapshot.codec === 'idle') {
+      return {
+        codec: { ...config.codec },
+        qualification: {
+          ...config.qualification,
+          deadline: { ...config.qualification.deadline },
+          fallback: { ...config.qualification.fallback },
+        },
+        ...(snapshot ? { snapshot } : {}),
+      };
+    }
+    return {
+      codec: { ...(snapshot.codec === 'cyrinx' ? CYRINX_CODEC : QUIET_CODEC) },
+      qualification: {
+        deadLinkTimeoutMs: QUALIFICATION_DEAD_LINK_TIMEOUT_MS,
+        cyrinxDeadlineMs: CYRINX_DEADLINE_MS,
+        deadline: { ...snapshot.deadline },
+        physicalGate: config.evidenceClass === 'Open air' ? 'pending' : 'not_physical',
+        fallback: { ...snapshot.fallback },
+      },
+      snapshot,
+    };
+  };
   const buildReport = (): MachineReport | undefined => {
     if (!config || !options.reportAuthority || !expectedDirection) return undefined;
+    const authority = reportAuthority();
+    if (!authority) return undefined;
     const canonicalResults: MachineResult[] = expectedCorpus.map((entry) => {
       const observed = results.get(entry.id);
       return observed ? { epoch: state.epoch, direction: expectedDirection, caseId: entry.id, size: entry.size, expectedSha256: entry.sha256, receivedSha256: observed.receivedSha256 ?? null, acquisitionMs: observed.acquisitionMs, airtimeMs: observed.airtimeMs, deliveryCount: observed.deliveryCount, bytePerfect: observed.bytePerfect, coldAcquired: observed.coldAcquired, observed: true, complete: observed.complete, corrupt: observed.corrupt, missing: observed.missing, duplicates: observed.duplicates } : { epoch: state.epoch, direction: expectedDirection, caseId: entry.id, size: entry.size, expectedSha256: entry.sha256, receivedSha256: null, acquisitionMs: 0, airtimeMs: 0, deliveryCount: 0, bytePerfect: false, coldAcquired: false, observed: false, complete: false, corrupt: false, missing: 1, duplicates: 0 };
@@ -291,10 +370,14 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     const queuesEvidence = values.reduce<MachineReport['queues']>((current, value) => ({ captureHighWaterBytes: Math.max(current.captureHighWaterBytes, value.queues.captureHighWaterBytes), captureHighWaterMs: Math.max(current.captureHighWaterMs, value.queues.captureHighWaterMs), playbackHighWaterBytes: Math.max(current.playbackHighWaterBytes, value.queues.playbackHighWaterBytes), playbackHighWaterMs: Math.max(current.playbackHighWaterMs, value.queues.playbackHighWaterMs), discontinuities: Math.max(current.discontinuities, value.queues.discontinuities) }), { captureHighWaterBytes: 0, captureHighWaterMs: 0, playbackHighWaterBytes: 0, playbackHighWaterMs: 0, discontinuities: state.discontinuities });
     const good = canonicalResults.filter((value) => value.observed && value.complete && !value.corrupt && value.missing === 0 && value.duplicates === 0 && value.deliveryCount === 1 && value.bytePerfect && value.receivedSha256 === value.expectedSha256);
     const reasons = new Set(failureReasons);
+    if (authority.snapshot?.fallback.reasonCode) reasons.add(authority.snapshot.fallback.reasonCode);
     const audioPassed = Boolean(audio?.microphoneLabel && audio.contextState === 'running' && (audio.inputDeviceSampleRate === 44_100 || audio.inputDeviceSampleRate === 48_000) && (audio.inputDeviceChannels === 1 || audio.inputDeviceChannels === 2) && audio.contextSampleRate === 48_000 && audio.captureSampleRate === 48_000 && audio.channels === 1 && !audio.echoCancellation && !audio.noiseSuppression && !audio.autoGainControl);
     if (!audioPassed) reasons.add('audio_preflight_failed');
     if (good.filter((value) => value.size === 256).length < 19 || good.filter((value) => value.size === 1536).length < 5) reasons.add('corpus_incomplete');
-    if (good.length > 0 && !good.some((value) => value.coldAcquired)) reasons.add('cold_acquisition_failed');
+    const coldReceivePassed = authority.snapshot?.codec === 'cyrinx'
+      ? Boolean(cyrinxSession?.coldReceivePassed)
+      : good.some((value) => value.coldAcquired);
+    if (good.length > 0 && !coldReceivePassed) reasons.add('cold_acquisition_failed');
     if (good.length > 0 && p95(good.map((value) => value.airtimeMs)) >= QUALIFICATION_DEAD_LINK_TIMEOUT_MS / 3) reasons.add('airtime_budget_exceeded');
     if (queuesEvidence.captureHighWaterBytes > MAX_QUEUE_BYTES || queuesEvidence.playbackHighWaterBytes > MAX_QUEUE_BYTES || queuesEvidence.captureHighWaterMs > MAX_QUEUE_DURATION_MS || queuesEvidence.playbackHighWaterMs > MAX_QUEUE_DURATION_MS) reasons.add('queue_bound_exceeded');
     if (queuesEvidence.discontinuities > 0) reasons.add('queue_discontinuity');
@@ -304,8 +387,77 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       if (!value.complete || value.missing! > 0) reasons.add('partial_evidence');
     }
     const corpusComplete = !reasons.has('corpus_incomplete') && !reasons.has('bad_digest') && !reasons.has('duplicate_case') && !reasons.has('partial_evidence') && !reasons.has('airtime_budget_exceeded') && !reasons.has('cold_acquisition_failed') && !reasons.has('queue_bound_exceeded') && !reasons.has('queue_discontinuity') && audioPassed;
-    const physicalGate = config.evidenceClass !== 'Open air' ? 'not_physical' : corpusComplete ? 'passed' : values.length >= 24 || [...reasons].some((reason) => reason !== 'corpus_incomplete' && reason !== 'audio_preflight_failed') ? 'failed' : 'pending';
-    return { schemaVersion: 1, capturedAt: new Date().toISOString(), machine: { hostName: config.machineId, os: options.reportAuthority.build.os, architecture: options.reportAuthority.build.architecture, browserVersion: audio?.browserVersion ?? 'Unavailable', commit: options.reportAuthority.build.commit }, evidenceClass: config.evidenceClass, epoch: state.epoch, codec: { ...(authority?.codec ?? config.codec) }, audio: audio ? { microphoneLabel: audio.microphoneLabel, contextState: audio.contextState, inputDeviceSampleRate: audio.inputDeviceSampleRate, inputDeviceChannels: audio.inputDeviceChannels, contextSampleRate: audio.contextSampleRate, captureSampleRate: audio.captureSampleRate, channels: audio.channels, echoCancellation: audio.echoCancellation, noiseSuppression: audio.noiseSuppression, autoGainControl: audio.autoGainControl } : { microphoneLabel: 'Unavailable', contextState: 'unavailable', inputDeviceSampleRate: 0, inputDeviceChannels: 0, contextSampleRate: 0, captureSampleRate: 0, channels: 0, echoCancellation: false, noiseSuppression: false, autoGainControl: false }, queues: queuesEvidence, results: canonicalResults, complete: corpusComplete, reasonCodes: [...reasons], qualification: authority ? { ...authority.qualification, deadline: { ...authority.qualification.deadline }, fallback: { ...authority.qualification.fallback }, physicalGate } : { ...config.qualification, deadline: { ...config.qualification.deadline }, fallback: { ...config.qualification.fallback }, physicalGate }, runner: { machineId: config.machineId, role: config.role, reportTarget: config.reportTarget, evidenceClass: config.evidenceClass, tunEvidence: options.reportAuthority.tunEvidence } };
+    const stageAuthorityPassed = authority.snapshot?.codec === 'cyrinx'
+      ? authority.snapshot.stage === 'complete' && Boolean(cyrinxSession?.coldReceivePassed)
+      : authority.snapshot?.codec === 'quiet'
+        ? authority.snapshot.fallback.state === 'activated' && coldReceivePassed
+        : config.evidenceClass !== 'Open air';
+    const complete = corpusComplete && (config.evidenceClass !== 'Open air' || stageAuthorityPassed);
+    const evidenceFailed = values.length >= 24 && !corpusComplete;
+    const physicalGate: NonNullable<MachineReport['qualification']>['physicalGate'] =
+      config.evidenceClass !== 'Open air'
+        ? 'not_physical'
+        : complete && stageAuthorityPassed
+          ? 'passed'
+          : authority.snapshot?.codec === 'unqualified' || evidenceFailed
+            ? 'failed'
+            : 'pending';
+    return {
+      schemaVersion: 1,
+      capturedAt: new Date().toISOString(),
+      machine: {
+        hostName: config.machineId,
+        os: options.reportAuthority.build.os,
+        architecture: options.reportAuthority.build.architecture,
+        browserVersion: audio?.browserVersion ?? 'Unavailable',
+        commit: options.reportAuthority.build.commit,
+      },
+      evidenceClass: config.evidenceClass,
+      epoch: state.epoch,
+      codec: { ...authority.codec },
+      audio: audio
+        ? {
+            microphoneLabel: audio.microphoneLabel,
+            contextState: audio.contextState,
+            inputDeviceSampleRate: audio.inputDeviceSampleRate,
+            inputDeviceChannels: audio.inputDeviceChannels,
+            contextSampleRate: audio.contextSampleRate,
+            captureSampleRate: audio.captureSampleRate,
+            channels: audio.channels,
+            echoCancellation: audio.echoCancellation,
+            noiseSuppression: audio.noiseSuppression,
+            autoGainControl: audio.autoGainControl,
+          }
+        : {
+            microphoneLabel: 'Unavailable',
+            contextState: 'unavailable',
+            inputDeviceSampleRate: 0,
+            inputDeviceChannels: 0,
+            contextSampleRate: 0,
+            captureSampleRate: 0,
+            channels: 0,
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+          },
+      queues: queuesEvidence,
+      results: canonicalResults,
+      complete,
+      reasonCodes: [...reasons],
+      qualification: {
+        ...authority.qualification,
+        deadline: { ...authority.qualification.deadline },
+        fallback: { ...authority.qualification.fallback },
+        physicalGate,
+      },
+      runner: {
+        machineId: config.machineId,
+        role: config.role,
+        reportTarget: config.reportTarget,
+        evidenceClass: config.evidenceClass,
+        tunEvidence: options.reportAuthority.tunEvidence,
+      },
+    };
   };
   const persist = (expectedGeneration = generation): Promise<string | undefined> => {
     const snapshot = buildReport(); if (!snapshot || !config) return Promise.resolve(undefined);
@@ -313,48 +465,234 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     const task = writeTail.then(async () => expectedGeneration === generation ? writer(config.reportTarget, snapshot) : undefined);
     writeTail = task.catch(() => undefined); return task;
   };
+  const broadcastJson = (value: unknown): void => {
+    const encoded = JSON.stringify(value);
+    for (const client of clients) if (client.readyState === client.OPEN) client.send(encoded);
+  };
+  const broadcastSession = (): void => {
+    const snapshot = sessionSnapshot();
+    if (snapshot) broadcastJson(snapshot);
+  };
+  const activateCurrentFallback = async (): Promise<boolean> => {
+    if (!cyrinxSession || cyrinxSession.codec !== 'cyrinx') return false;
+    const changed = cyrinxSession.failCurrent(clock());
+    if (!changed) return false;
+    generation += 1;
+    options.cyrinxWorker?.reset();
+    clearCyrinxTimer();
+    if (cyrinxSession.fallbackReason) failureReasons.add(cyrinxSession.fallbackReason);
+    await persist(generation);
+    broadcastSession();
+    return true;
+  };
+  const expireCyrinx = async (): Promise<boolean> => {
+    if (!settleExpiry()) return false;
+    await persist();
+    broadcastSession();
+    return true;
+  };
+  const cyrinxSummary = (): { codec: 'cyrinx' | 'quiet'; reasonCode: string | null; deadlineAtMs: number } => {
+    if (!cyrinxSession) fail('cyrinx authority is unavailable');
+    const snapshot = cyrinxSession.snapshot(state.epoch, clock());
+    if (snapshot.deadline.deadlineAtMs === null) fail('cyrinx deadline is unavailable');
+    return {
+      codec: snapshot.codec === 'cyrinx' ? 'cyrinx' : 'quiet',
+      reasonCode: snapshot.fallback.reasonCode,
+      deadlineAtMs: snapshot.deadline.deadlineAtMs,
+    };
+  };
   const reset = async (): Promise<number> => {
-    generation += 1; state.epoch += 1; audio = undefined; results = new Map(); failureReasons = new Set(); state.stampedResults = []; state.overflowedQueues = []; state.discontinuities = 0; clearQueues(); reconnectAllowed = true;
+    if (cyrinxSession?.operatorReset(clock()) && cyrinxSession.fallbackReason) {
+      failureReasons.add(cyrinxSession.fallbackReason);
+    }
+    clearCyrinxTimer();
+    options.cyrinxWorker?.reset();
+    generation += 1; state.epoch += 1; audio = undefined; results = new Map(); failureReasons = new Set(cyrinxSession?.fallbackReason ? [cyrinxSession.fallbackReason] : []); state.stampedResults = []; state.overflowedQueues = []; state.discontinuities = 0; clearQueues(); reconnectAllowed = true;
     await persist(generation);
     const resetFrame = encodeFrame({ type: MessageType.RESET, epoch: state.epoch, sequence: 0n, payload: Buffer.alloc(0) });
     for (const client of clients) if (client.readyState === client.OPEN) client.send(resetFrame);
+    broadcastSession();
     return state.epoch;
   };
   const startCyrinx = async (): Promise<{ codec: 'cyrinx' | 'quiet'; reasonCode: string | null; deadlineAtMs: number }> => {
-    if (!authority || !config) fail('cyrinx authority is unavailable');
-    if (authority.qualification.deadline.startedAtMs !== null) return { codec: authority.codec.id === 'cyrinx' ? 'cyrinx' : 'quiet', reasonCode: authority.qualification.fallback.reasonCode, deadlineAtMs: authority.qualification.deadline.deadlineAtMs! };
-    const startedAtMs = options.now?.() ?? Date.now();
-    authority.codec = { ...CYRINX_CODEC }; authority.qualification = { ...authority.qualification, deadline: { startedAtMs, deadlineAtMs: startedAtMs + CYRINX_DEADLINE_MS, elapsedMs: 0 }, fallback: { codecId: 'quiet', state: 'available', reasonCode: null } };
+    if (!cyrinxSession || !config) fail('cyrinx authority is unavailable');
+    if (!cyrinxSession.start(clock())) {
+      await expireCyrinx();
+      return cyrinxSummary();
+    }
+    cyrinxExpiryTimer = timer.set(() => { void expireCyrinx(); }, CYRINX_DEADLINE_MS);
     await persist();
-    const expire = async (): Promise<void> => {
-      if (!authority || authority.codec.id !== 'cyrinx' || authority.qualification.fallback.state !== 'available') return;
-      const now = options.now?.() ?? Date.now(); authority.codec = { ...QUIET_CODEC }; authority.qualification = { ...authority.qualification, deadline: { ...authority.qualification.deadline, elapsedMs: Math.max(CYRINX_DEADLINE_MS, now - startedAtMs) }, fallback: { codecId: 'quiet', state: 'activated', reasonCode: 'cyrinx_deadline_expired' } }; await persist();
-    };
-    cyrinxExpiryTimer = setTimeout(() => { void expire(); }, CYRINX_DEADLINE_MS);
+    broadcastSession();
     try {
       await options.cyrinxBuild?.();
-      if ((options.now?.() ?? Date.now()) >= startedAtMs + CYRINX_DEADLINE_MS) { await expire(); return { codec: 'quiet', reasonCode: 'cyrinx_deadline_expired', deadlineAtMs: startedAtMs + CYRINX_DEADLINE_MS }; }
+      if (await expireCyrinx()) return cyrinxSummary();
+      cyrinxSession.completeBuild(clock());
+      await persist();
+      broadcastSession();
+      await options.cyrinxDigital?.({ epoch: state.epoch, evidenceClass: config.evidenceClass, nowMs: clock() });
+      if (await expireCyrinx()) return cyrinxSummary();
+      cyrinxSession.completeDigital(clock());
+      await persist();
+      broadcastSession();
+    } catch {
+      await activateCurrentFallback();
     }
-    catch {
-      const now = options.now?.() ?? Date.now(); authority.codec = { ...QUIET_CODEC }; authority.qualification = { ...authority.qualification, deadline: { ...authority.qualification.deadline, elapsedMs: Math.max(0, now - startedAtMs) }, fallback: { codecId: 'quiet', state: 'activated', reasonCode: 'cyrinx_build_failed' } }; await persist(); return { codec: 'quiet', reasonCode: 'cyrinx_build_failed', deadlineAtMs: startedAtMs + CYRINX_DEADLINE_MS };
-    }
-    return { codec: 'cyrinx', reasonCode: null, deadlineAtMs: startedAtMs + CYRINX_DEADLINE_MS };
+    return cyrinxSummary();
   };
   if (config && options.reportAuthority) await persist();
+  const instructionRequest = (
+    payload: Record<string, unknown>,
+    action: 'accept_cyrinx_instruction' | 'playback_complete',
+  ): { caseId: string; direction: MachineResult['direction'] } => {
+    if (!exactObject(payload, ['action', 'caseId', 'direction']) || payload.action !== action) fail('qualification_instruction_shape_invalid');
+    const direction = payload.direction;
+    if (direction !== 'A → B' && direction !== 'B → A') fail('qualification_instruction_direction_invalid');
+    return { caseId: asText(payload.caseId, 'qualification_instruction_case_invalid'), direction };
+  };
+  const forwardPlayback = (encoded: Buffer): void => {
+    const frame = decodeFrame(encoded);
+    if (frame.type !== MessageType.PCM_PLAYBACK) fail('bridge only forwards PCM_PLAYBACK frames');
+    if (frame.epoch !== state.epoch) fail('bridge rejects stale PCM playback epoch');
+    for (const client of clients) if (client.readyState === client.OPEN) client.send(encoded);
+  };
+  const acceptCyrinxInstruction = async (payload: Record<string, unknown>): Promise<void> => {
+    if (!cyrinxSession || cyrinxSession.codec !== 'cyrinx' || !options.cyrinxWorker) fail('cyrinx_instruction_unavailable');
+    if (await expireCyrinx()) return;
+    const request = instructionRequest(payload, 'accept_cyrinx_instruction');
+    const accepted = cyrinxSession.acceptInstruction(request.caseId, request.direction, clock());
+    const acceptedGeneration = generation;
+    try {
+      const playback = await options.cyrinxWorker.begin(accepted.value, state.epoch, accepted.mode);
+      if (acceptedGeneration !== generation || cyrinxSession.codec !== 'cyrinx' || await expireCyrinx()) return;
+      if (accepted.mode === 'transmit') {
+        if (!playback) throw new Error('cyrinx_transmit_playback_missing');
+        forwardPlayback(playback);
+      } else if (playback !== undefined) {
+        throw new Error('cyrinx_listener_created_playback');
+      }
+    } catch {
+      if (acceptedGeneration === generation) await activateCurrentFallback();
+    }
+  };
+  const completeCyrinxPlayback = async (payload: Record<string, unknown>): Promise<void> => {
+    if (!cyrinxSession || cyrinxSession.codec !== 'cyrinx') fail('cyrinx_instruction_unavailable');
+    const request = instructionRequest(payload, 'playback_complete');
+    const current = cyrinxSession.currentCase();
+    if (!current || current.id !== request.caseId || current.direction !== request.direction) fail('qualification_instruction_mismatch');
+    const acceptedGeneration = generation;
+    const remaining = cyrinxSession.transmitSettleRemaining(clock());
+    if (remaining > 0) {
+      if (options.cyrinxSettle) await options.cyrinxSettle(remaining);
+      else await new Promise<void>((resolve) => setTimeout(resolve, remaining));
+    }
+    if (acceptedGeneration !== generation || cyrinxSession.codec !== 'cyrinx' || await expireCyrinx()) return;
+    cyrinxSession.completeAccepted('transmit', clock());
+    await persist(acceptedGeneration);
+    if (acceptedGeneration === generation) broadcastSession();
+  };
+  const acceptCyrinxCapture = async (socket: WebSocket, encoded: Buffer): Promise<void> => {
+    if (!cyrinxSession || cyrinxSession.codec !== 'cyrinx') return;
+    if (await expireCyrinx() || !cyrinxSession.canReceiveCapture() || !options.cyrinxWorker) return;
+    const acceptedGeneration = generation;
+    let nativeResult: CyrinxResult | undefined;
+    try {
+      nativeResult = await options.cyrinxWorker.receiveCapture(encoded);
+    } catch {
+      if (acceptedGeneration === generation) await activateCurrentFallback();
+      return;
+    }
+    if (!nativeResult || acceptedGeneration !== generation || cyrinxSession.codec !== 'cyrinx' || await expireCyrinx()) return;
+    const current = cyrinxSession.currentCase();
+    if (
+      !current
+      || nativeResult.epoch !== state.epoch
+      || nativeResult.direction !== current.direction
+      || nativeResult.caseId !== current.id
+      || nativeResult.digest !== current.digest
+      || !nativeResult.complete
+      || nativeResult.corrupt
+      || nativeResult.missing !== 0
+      || nativeResult.duplicates !== 0
+      || nativeResult.deliveryCount !== 1
+      || !nativeResult.bytePerfect
+    ) {
+      await activateCurrentFallback();
+      return;
+    }
+    if (!current.cold) {
+      const committed = expectedById.get(current.id);
+      if (!committed) {
+        await activateCurrentFallback();
+        return;
+      }
+      if (results.has(current.id)) {
+        failureReasons.add('duplicate_case');
+        await activateCurrentFallback();
+        return;
+      }
+      const result: BrowserResult = {
+        epoch: state.epoch,
+        caseId: current.id,
+        digest: nativeResult.digest,
+        receivedSha256: nativeResult.digest,
+        acquisitionMs: nativeResult.acquisitionMs,
+        airtimeMs: nativeResult.airtimeMs,
+        deliveryCount: nativeResult.deliveryCount,
+        bytePerfect: nativeResult.bytePerfect,
+        coldAcquired: false,
+        complete: nativeResult.complete,
+        corrupt: nativeResult.corrupt,
+        missing: nativeResult.missing,
+        duplicates: nativeResult.duplicates,
+        queues: { ...nativeResult.queues },
+      };
+      results.set(current.id, result);
+      state.stampedResults.push({ caseId: current.id, epoch: state.epoch, machineId: config?.machineId, role: config?.role, evidenceClass: config?.evidenceClass, source: 'native-cyrinx' });
+    }
+    const cold = current.cold;
+    cyrinxSession.completeAccepted('listen', clock());
+    await persist(acceptedGeneration);
+    if (acceptedGeneration !== generation) return;
+    socket.send(JSON.stringify({ kind: 'cyrinx-result', epoch: state.epoch, caseId: current.id, direction: current.direction, accepted: true, cold }));
+    broadcastSession();
+  };
   const handleFrame = async (socket: WebSocket, rawData: RawData, isBinary: boolean, lastSequence: { value: bigint }): Promise<void> => {
     try {
       if (!isBinary) fail('binary_frames_required');
-      const frame = decodeFrame(asBuffer(rawData));
+      const encoded = asBuffer(rawData);
+      const frame = decodeFrame(encoded);
       if (frame.type === MessageType.AUDIO_SETTINGS && lastSequence.value < 0n && state.epoch === 1) state.epoch = frame.epoch;
       if (frame.epoch !== state.epoch || frame.sequence <= lastSequence.value) fail('stale_or_duplicate_frame');
       lastSequence.value = frame.sequence;
+      await expireCyrinx();
       if (frame.type === MessageType.RESET) { await reset(); lastSequence.value = -1n; return; }
+      if (frame.type === MessageType.PCM_CAPTURE && cyrinxSession?.codec === 'cyrinx') {
+        await acceptCyrinxCapture(socket, encoded);
+        return;
+      }
       if ([MessageType.QUALIFICATION_CASE, MessageType.QUALIFICATION_RESULT, MessageType.ERROR].includes(frame.type)) {
         const payload = parseJsonPayload(frame); if (hasForbiddenAuthority(payload)) fail('browser_authority_forbidden');
         if (frame.type === MessageType.QUALIFICATION_CASE && payload.action === 'start_cyrinx' && Object.keys(payload).length === 1) {
-          const snapshot = await startCyrinx(); socket.send(JSON.stringify({ kind: 'cyrinx-session', ...snapshot })); return;
+          await startCyrinx(); return;
+        }
+        if (frame.type === MessageType.QUALIFICATION_CASE && payload.action === 'accept_cyrinx_instruction') {
+          await acceptCyrinxInstruction(payload); return;
+        }
+        if (frame.type === MessageType.QUALIFICATION_CASE && payload.action === 'playback_complete') {
+          await completeCyrinxPlayback(payload); return;
+        }
+        if (frame.type === MessageType.ERROR && cyrinxSession?.codec === 'cyrinx') {
+          await activateCurrentFallback(); return;
+        }
+        if (frame.type === MessageType.ERROR && cyrinxSession?.codec === 'quiet' && cyrinxSession.fallbackState === 'activated') {
+          cyrinxSession.markQuietFailed();
+          options.cyrinxWorker?.reset();
+          await persist();
+          broadcastSession();
+          return;
         }
         if (frame.type === MessageType.QUALIFICATION_RESULT && config) {
+          if (cyrinxSession?.codec === 'cyrinx' || cyrinxSession?.codec === 'unqualified') fail('browser_result_forbidden_during_cyrinx');
           let result: BrowserResult;
           try {
             result = parseBrowserResult(payload, frame.epoch);
@@ -396,8 +734,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     }
   };
   const sendPcmPlayback = (encoded: Buffer): void => {
-    const frame = decodeFrame(encoded); if (frame.type !== MessageType.PCM_PLAYBACK) fail('bridge only forwards PCM_PLAYBACK frames'); if (frame.epoch !== state.epoch) fail('bridge rejects stale PCM playback epoch');
-    enqueue(frame); for (const client of clients) if (client.readyState === client.OPEN) client.send(encoded);
+    forwardPlayback(encoded);
   };
   server.on('upgrade', (request: IncomingMessage, socket, head) => {
     const port = (server.address() as import('node:net').AddressInfo | null)?.port; const route = new URL(request.url ?? '/', `http://${LOOPBACK_HOST}`).pathname;
@@ -408,10 +745,15 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     if (owner?.readyState === socket.OPEN || epochClaimed && !reconnectAllowed) { state.rejectedFrames += 1; socket.close(1008, 'one browser tab owns each qualification epoch'); return; }
     owner = socket; epochClaimed = true; reconnectAllowed = false; clients.add(socket);
     const lastSequence = { value: -1n }; let processing = Promise.resolve();
+    void expireCyrinx().then((expired) => {
+      if (expired) return;
+      const snapshot = sessionSnapshot();
+      if (snapshot && socket.readyState === socket.OPEN) socket.send(JSON.stringify(snapshot));
+    });
     socket.once('close', () => { clients.delete(socket); if (owner === socket) owner = undefined; });
     socket.on('message', (rawData, isBinary) => { processing = processing.then(() => handleFrame(socket, rawData, isBinary, lastSequence)); });
   });
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(options.port, LOOPBACK_HOST, () => { server.off('error', reject); resolve(); }); });
   const address = server.address(); if (!address || typeof address === 'string') { await closeServer(server, webSocketServer); fail('bridge did not bind a TCP loopback address'); }
-  return { port: address.port, sendPcmPlayback, startCyrinx, reset, close: async () => { if (cyrinxExpiryTimer) clearTimeout(cyrinxExpiryTimer); for (const client of clients) client.terminate(); await writeTail; await closeServer(server, webSocketServer); }, state: () => ({ ...state, queueCounts: { ...state.queueCounts }, overflowedQueues: [...state.overflowedQueues], stampedResults: state.stampedResults.map((result) => ({ ...result })) }) };
+  return { port: address.port, sendPcmPlayback, startCyrinx, reset, close: async () => { clearCyrinxTimer(); options.cyrinxWorker?.reset(); for (const client of clients) client.terminate(); await writeTail; await closeServer(server, webSocketServer); }, state: () => ({ ...state, queueCounts: { ...state.queueCounts }, overflowedQueues: [...state.overflowedQueues], stampedResults: state.stampedResults.map((result) => ({ ...result })) }) };
 }

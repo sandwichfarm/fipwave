@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import manifest from '../../../fixtures/corpus/manifest.json' with { type: 'json' };
 import {
+  CYRINX_TRANSMIT_SETTLE_MS,
   CyrinxQualificationSession,
   QualificationSessionError,
   failureReasonForStage,
@@ -108,6 +109,11 @@ describe('runner-owned Cyrinx qualification session', () => {
     expect(roleB.snapshot(1, startAt + 3).instruction).toBeNull();
     expect(roleA.canReceiveCapture()).toBe(false);
     expect(roleB.canReceiveCapture()).toBe(true);
+    expect(roleA.transmitSettleRemaining(startAt + 3)).toBe(CYRINX_TRANSMIT_SETTLE_MS);
+    expect(roleA.transmitSettleRemaining(startAt + 3 + CYRINX_TRANSMIT_SETTLE_MS)).toBe(0);
+    expect(() => roleB.transmitSettleRemaining(startAt + 3)).toThrow(
+      'qualification_instruction_mode_mismatch',
+    );
     expect(() => roleA.completeAccepted('listen', startAt + 4)).toThrow(
       'qualification_instruction_mode_mismatch',
     );
