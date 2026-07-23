@@ -16,8 +16,8 @@ describe('bounded Cyrinx worker', () => {
     } });
     const playback = await worker.begin({ id: 'a-to-b-256-01', direction: 'A → B', payload, digest }, 4);
     expect(playback.byteLength).toBe(249896);
-    const capture = (sequence: bigint, samples: number) => encodeFrame({ type: MessageType.PCM_CAPTURE, epoch: 4, sequence, sampleRate: 48000, channels: 1, encoding: PcmEncoding.FLOAT32_LE, payload: encodePcmPayload(sequence * BigInt(samples), Buffer.alloc(samples * 4)) });
-    expect(await worker.receiveCapture(capture(1n, 48000))).toBeUndefined();
-    expect(await worker.receiveCapture(capture(2n, 48000))).toMatchObject({ caseId: 'a-to-b-256-01', complete: true, deliveryCount: 1, airtimeMs: 1302 });
+    const capture = (sequence: bigint, samples: number) => encodeFrame({ type: MessageType.PCM_CAPTURE, epoch: 4, sequence, sampleRate: 48000, channels: 1, encoding: PcmEncoding.FLOAT32_LE, payload: encodePcmPayload((sequence - 1n) * BigInt(samples), Buffer.alloc(samples * 4)) });
+    for (let index = 0; index < 63; index += 1) expect(await worker.receiveCapture(capture(BigInt(index + 1), 2048))).toBeUndefined();
+    expect(await worker.receiveCapture(capture(64n, 2048))).toMatchObject({ caseId: 'a-to-b-256-01', complete: true, deliveryCount: 1, airtimeMs: 1302 });
   });
 });
