@@ -1,6 +1,7 @@
 import './style.css';
 import { armAudio, enqueuePcmPlayback, resetAudio, validatePcmPlaybackFrame, type AppliedAudioEvidence } from './audio.js';
 import { acceptBridgePlaybackFrame } from '../../../packages/bridge/src/codecs/websocket.js';
+import { QuietClient, fetchRunnerConfig, type RunnerConfig, type ReceiveCaseEvidence } from './quiet-client.js';
 
 type UiState = 'idle' | 'requesting' | 'ready' | 'failed' | 'disconnected';
 
@@ -13,8 +14,11 @@ let evidence: AppliedAudioEvidence | undefined;
 let uiState: UiState = 'idle';
 let failure = '';
 let bridge: WebSocket | undefined;
+let runnerConfig: Readonly<RunnerConfig> | undefined;
+let configFailure = '';
+const quiet = new QuietClient((received) => appendQuietEvidence(received));
 type GateState = 'not-started' | 'cyrinx-running';
-type CorpusRow = { direction: string; caseId: string; evidenceClass: 'Fixture' | 'Open air'; result: string; airtime: string };
+type CorpusRow = { direction: string; caseId: string; evidenceClass: 'Fixture' | 'Loopback' | 'Open air'; result: string; airtime: string };
 let gateState: GateState = 'not-started';
 let corpusRows: CorpusRow[] = [];
 
@@ -85,7 +89,7 @@ function render(): void {
   appRoot.replaceChildren();
   const header = element('header');
   header.append(element('h1', 'Modem qualification'));
-  const meta = element('p', `Machine: this browser · Chromium: ${navigator.userAgent} · Local epoch: ${epoch}`);
+  const meta = element('p', `Machine: ${runnerConfig?.machineId ?? 'runner config pending'} · Role: ${runnerConfig?.role ?? 'Unknown'} · Evidence: ${runnerConfig?.evidenceClass ?? 'Unknown'} · Chromium: ${navigator.userAgent} · Local epoch: ${epoch}`);
   meta.className = 'measurements';
   header.append(meta);
   const badge = element('p', `● ${labels[uiState]}`);
@@ -105,7 +109,9 @@ function render(): void {
   announcement.id = 'audio-status';
   announcement.setAttribute('aria-live', uiState === 'failed' ? 'assertive' : 'polite');
   operator.append(announcement);
-  if (uiState === 'idle') operator.append(control('Arm modem', arm));
+  if (configFailure) operator.append(element('p', `Runner configuration failed: ${configFailure}`));
+  operator.append(element('p', `Report target: ${runnerConfig?.reportTarget ?? 'Unknown'} · TUN mode: ${runnerConfig?.tunEvidence ?? 'Unknown'}`));
+  if (uiState === 'idle') operator.append(control('Arm modem', arm, !runnerConfig));
   if (uiState === 'requesting') operator.append(control('Arm modem', arm, true));
   if (uiState === 'ready') {
     operator.append(control('Start Cyrinx qualification', startQualification));
@@ -121,15 +127,15 @@ function render(): void {
   evidenceCard.append(element('p', 'Required: mono · 48 kHz-compatible · echo cancellation off · noise suppression off · auto gain control off.'));
   const table = element('table');
   table.append(element('caption', 'Actual browser and bridge observations'));
-  appendSetting(table, 'Microphone label', evidence?.microphoneLabel);
+  appendSetting(table, 'Microphone label', quiet.applied?.microphoneLabel ?? evidence?.microphoneLabel);
   appendSetting(table, 'Permission', evidence?.permission);
   appendSetting(table, 'Audio-context state', evidence?.contextState);
   appendSetting(table, 'Context sample rate', evidence?.contextSampleRate);
-  appendSetting(table, 'Track sample rate', evidence?.trackSampleRate);
-  appendSetting(table, 'Channel count', evidence?.channelCount);
-  appendSetting(table, 'Echo cancellation', evidence?.echoCancellation);
-  appendSetting(table, 'Noise suppression', evidence?.noiseSuppression);
-  appendSetting(table, 'Automatic gain control', evidence?.autoGainControl);
+  appendSetting(table, 'Track sample rate', quiet.applied?.trackSampleRate ?? evidence?.trackSampleRate);
+  appendSetting(table, 'Channel count', quiet.applied?.channelCount ?? evidence?.channelCount);
+  appendSetting(table, 'Echo cancellation', quiet.applied?.echoCancellation ?? evidence?.echoCancellation);
+  appendSetting(table, 'Noise suppression', quiet.applied?.noiseSuppression ?? evidence?.noiseSuppression);
+  appendSetting(table, 'Automatic gain control', quiet.applied?.autoGainControl ?? evidence?.autoGainControl);
   appendSetting(table, 'AudioWorklet status', evidence?.workletState);
   appendSetting(table, 'Bridge endpoint', evidence ? 'localhost only' : undefined);
   evidenceCard.append(table);
@@ -199,17 +205,40 @@ async function arm(): Promise<void> {
 }
 
 function startQualification(): void {
-  if (uiState !== 'ready' || gateState === 'cyrinx-running') return;
+  if (uiState !== 'ready' || gateState === 'cyrinx-running' || !runnerConfig) return;
   gateState = 'cyrinx-running';
-  corpusRows = [{ direction: 'A → B', caseId: `fixture-epoch-${epoch}`, evidenceClass: 'Fixture', result: 'Byte-perfect loopback (non-physical)', airtime: '0 ms' }];
+  render();
+  void startQuietFallback();
+}
+
+async function startQuietFallback(): Promise<void> {
+  if (!runnerConfig) return;
+  try {
+    // Quiet owns its own classic-script AudioContext and microphone, so close the
+    // normal worklet pipeline before it is permitted to arm.
+    epoch = await resetAudio(); evidence = undefined;
+    await quiet.arm(epoch);
+    await quiet.sendCorpus(runnerConfig.role, epoch, (entry, index, total) => {
+      corpusRows = [...corpusRows, { direction: entry.direction, caseId: entry.id, evidenceClass: runnerConfig!.evidenceClass, result: `Sent locally ${index}/${total}; receiver evidence is independent`, airtime: 'pending' }];
+      render();
+    });
+  } catch (error) { uiState = 'failed'; failure = error instanceof Error ? error.message : 'Quiet qualification failed'; }
+  render();
+}
+
+function appendQuietEvidence(received: ReceiveCaseEvidence): void {
+  const evidenceClass = runnerConfig?.evidenceClass ?? 'Loopback';
+  corpusRows = [...corpusRows, { direction: received.direction, caseId: received.caseId, evidenceClass, result: received.corrupt || received.duplicates ? 'Failed receiver integrity' : 'Passed independent receiver evidence', airtime: `${Math.round(received.airtimeMs)} ms` }];
   render();
 }
 
 async function reset(): Promise<void> {
   bridge?.close(); bridge = undefined;
+  await quiet.reset();
   epoch = await resetAudio();
   evidence = undefined; uiState = 'requesting'; failure = ''; gateState = 'not-started'; corpusRows = []; render();
   await arm();
 }
 
 render();
+void fetchRunnerConfig().then((config) => { runnerConfig = config; render(); }, (error: unknown) => { configFailure = error instanceof Error ? error.message : 'unknown configuration error'; render(); });
