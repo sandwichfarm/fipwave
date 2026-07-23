@@ -171,5 +171,5 @@ export function mergeSelection(expectedHosts: readonly [string, string], first: 
   }
   const uniqueReasons = [...new Set(reasons)];
   const selected = codec.profile === 'audible-7k-channel-0' ? 'quiet' : codec.profile.includes('cyrinx') ? 'cyrinx' : 'unqualified';
-  return { schemaVersion: 1, expectedHosts, decision: uniqueReasons.length === 0 ? selected : selected === 'unqualified' ? 'unqualified' : 'human_needed', reasonCodes: uniqueReasons, reports };
+  return { schemaVersion: 1, expectedHosts, decision: uniqueReasons.length === 0 ? selected : 'human_needed', reasonCodes: uniqueReasons, reports };
 }

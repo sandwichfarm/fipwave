@@ -8,6 +8,7 @@ type UiState = 'idle' | 'requesting' | 'ready' | 'failed' | 'disconnected';
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Modem UI root is unavailable');
 const appRoot: HTMLDivElement = app;
+const developmentDiagnostic = import.meta.env.DEV;
 
 let epoch = 1;
 let evidence: AppliedAudioEvidence | undefined;
@@ -111,7 +112,7 @@ function render(): void {
   operator.append(announcement);
   if (configFailure) operator.append(element('p', `Runner configuration failed: ${configFailure}`));
   operator.append(element('p', `Report target: ${runnerConfig?.reportTarget ?? 'Unknown'} · TUN mode: ${runnerConfig?.tunEvidence ?? 'Unknown'}`));
-  if (uiState === 'idle') operator.append(control('Arm modem', arm, !runnerConfig));
+  if (uiState === 'idle') operator.append(control('Arm modem', arm, !runnerConfig && !developmentDiagnostic));
   if (uiState === 'requesting') operator.append(control('Arm modem', arm, true));
   if (uiState === 'ready') {
     operator.append(control('Start Cyrinx qualification', startQualification));
@@ -205,8 +206,14 @@ async function arm(): Promise<void> {
 }
 
 function startQualification(): void {
-  if (uiState !== 'ready' || gateState === 'cyrinx-running' || !runnerConfig) return;
+  if (uiState !== 'ready' || gateState === 'cyrinx-running') return;
   gateState = 'cyrinx-running';
+  if (!runnerConfig && developmentDiagnostic) {
+    corpusRows = [{ direction: 'A → B', caseId: `fixture-epoch-${epoch}`, evidenceClass: 'Fixture', result: 'Byte-perfect loopback (non-physical)', airtime: '0 ms' }];
+    render();
+    return;
+  }
+  if (!runnerConfig) return;
   render();
   void startQuietFallback();
 }

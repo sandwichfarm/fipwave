@@ -1,8 +1,52 @@
 # Qualification Runbook
 
 This runbook records deterministic preflight evidence for each demo laptop. It
-does **not** prove the two-laptop acoustic hop or FIPS ping. Those exact-host
-claims remain the Plan 01-07 hardware checkpoint.
+does **not** prove the two-laptop acoustic hop or FIPS ping. Only two reports
+with runner-stamped `Open air` identity and passed `exact_host` TUN records can
+do that; all other paths remain explicitly `human_needed` or `unqualified`.
+
+## Browser Quiet fallback (two independent local roles)
+
+Populate the pinned cache once on each laptop, build, and start one runner per
+laptop. The runner is the only authority for machine identity, literal role,
+report target, TUN path, and evidence class; the page only displays them.
+
+```sh
+npm run fetch:codecs
+npm run build
+npm run start:runner -- --machine-id laptop-a --role A --port 4173 \
+  --report .artifacts/qualification/laptop-a.json \
+  --tun-evidence .artifacts/qualification/laptop-a-tun.json --physical-open-air
+```
+
+Open `http://127.0.0.1:4173/` in Chromium, grant the microphone, and choose
+`Arm modem`. The fixed fallback is `audible-7k-channel-0` with frame clamping;
+there is no profile or asset override. Quiet takes exclusive ownership of its
+microphone and audio context after the normal audio lifecycle has been reset.
+
+Operate the pages independently. On laptop A locally schedule **A → B**. The
+sender starts one corpus case at a time only after its own Quiet `onFinish` and
+a fixed guard; it never waits for a receiver result, acknowledgement, retry,
+or ARQ. After the operator sees A's local transmitter finish, locally schedule
+**B → A** on laptop B. Each receiver independently records and deduplicates
+fragments, reassembles complete cases, and validates the committed SHA-256.
+The pages never exchange control messages.
+
+Copy the two completed canonical reports to one operator machine and reconcile
+them only after both local runs have ended:
+
+```sh
+npm run qualify:verify -- \
+  --machine-a .artifacts/qualification/laptop-a.json \
+  --machine-b .artifacts/qualification/laptop-b.json \
+  --host-a laptop-a --host-b laptop-b \
+  --selection .artifacts/qualification/selection.json
+```
+
+The exact `--selection` path is atomically written. Its decision is one of
+`cyrinx`, `quiet`, `unqualified`, or `human_needed`; Fixture/Loopback reports,
+missing/mismatched roles or hosts, incomplete/duplicate/corrupt corpus cases,
+or any absent/non-passed/non-`exact_host` TUN evidence cannot select a codec.
 
 ## Deterministic checks (any development machine)
 
@@ -16,6 +60,11 @@ npm run test:unit -- tests/tun-preflight.test.ts
 The first command emits one `TunEvidence` JSON object with `source: "static"`.
 The second uses a fake `ip` binary and `/dev/null`, never Docker or a real TUN
 device. Both are diagnostic evidence only.
+
+For deterministic browser/bridge plumbing, start the runner without
+`--physical-open-air` (it defaults to `Loopback`). This is intentionally useful
+for the production Chromium test and reports, but its output is not eligible
+for selection and must never be relabelled Open air.
 
 ## Exact-host Docker/TUN evidence
 

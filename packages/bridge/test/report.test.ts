@@ -58,11 +58,11 @@ describe('canonical qualification reports', () => {
   it('fails closed unless named exact hosts have runner-stamped roles, exact-host TUN evidence, and complete corpus evidence', () => {
     const alpha = report('alpha');
     const beta = report('beta');
-    expect(mergeSelection(['alpha', 'beta'], alpha, beta)).toMatchObject({ decision: 'unqualified', reasonCodes: expect.arrayContaining(['runner_authority_required', 'corpus_incomplete']) });
+    expect(mergeSelection(['alpha', 'beta'], alpha, beta)).toMatchObject({ decision: 'human_needed', reasonCodes: expect.arrayContaining(['runner_authority_required', 'corpus_incomplete']) });
     alpha.runner = { machineId: 'alpha', role: 'A', reportTarget: 'alpha.json', evidenceClass: 'Open air', tunEvidence: exactTun() };
     beta.runner = { machineId: 'beta', role: 'B', reportTarget: 'beta.json', evidenceClass: 'Open air', tunEvidence: { ...exactTun(), source: 'lifecycle' } };
-    expect(mergeSelection(['alpha', 'beta'], alpha, beta)).toMatchObject({ decision: 'unqualified', reasonCodes: expect.arrayContaining(['exact_host_tun_required']) });
-    expect(mergeSelection(['alpha', 'beta'], alpha, report('beta', 'Fixture'))).toMatchObject({ decision: 'unqualified' });
-    expect(mergeSelection(['alpha', 'beta'], alpha, report('other'))).toMatchObject({ decision: 'unqualified' });
+    expect(mergeSelection(['alpha', 'beta'], alpha, beta)).toMatchObject({ decision: 'human_needed', reasonCodes: expect.arrayContaining(['exact_host_tun_required']) });
+    expect(mergeSelection(['alpha', 'beta'], alpha, report('beta', 'Fixture'))).toMatchObject({ decision: 'human_needed' });
+    expect(mergeSelection(['alpha', 'beta'], alpha, report('other'))).toMatchObject({ decision: 'human_needed' });
   });
 });
