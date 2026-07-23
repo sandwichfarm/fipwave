@@ -81,5 +81,6 @@ async function verifyReports(firstPath, secondPath, expectedHosts) {
 
 const [command, ...args] = process.argv.slice(2);
 if (command === 'fixture') await runFixture();
+else if (command === 'verify' && args.length === 0) console.log('No machine reports supplied; qualification remains human_needed.');
 else if (command === 'verify') await verifyReports(args[0], args[1], args.slice(2));
 else throw new Error('usage: qualify.mjs fixture | verify <machine-a.json> <machine-b.json> <host-a> <host-b>');
