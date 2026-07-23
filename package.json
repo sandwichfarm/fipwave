@@ -20,6 +20,8 @@
     "start:runner": "node dist/server/packages/bridge/src/runner.js",
     "fetch:codecs": "node scripts/fetch-codec-assets.mjs",
     "fetch:codecs:check": "node scripts/fetch-codec-assets.mjs --check",
+    "cyrinx:build": "node scripts/build-cyrinx.mjs",
+    "cyrinx:test": "node --test tests/cyrinx-batch.test.mjs",
     "generate:corpus": "node scripts/generate-corpus.mjs",
     "qualify:fixture": "node scripts/qualify.mjs fixture",
     "qualify:verify": "node scripts/qualify.mjs verify",
