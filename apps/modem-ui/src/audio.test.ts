@@ -48,7 +48,9 @@ describe('applied audio preflight', () => {
     ['unknown permission', { permission: 'unknown' as const }],
     ['context state', { contextState: 'suspended' as const }],
     ['context sample rate', { contextSampleRate: 44_100 }],
-    ['track sample rate', { trackSampleRate: 44_100 }],
+    ['codec capture sample rate', { captureSampleRate: 44_100 }],
+    ['unknown input-device sample rate', { inputDeviceSampleRate: undefined }],
+    ['unsupported input-device sample rate', { inputDeviceSampleRate: 32_000 }],
     ['channel count', { channelCount: 2 }],
     ['echo cancellation', { echoCancellation: true }],
     ['noise suppression', { noiseSuppression: true }],
@@ -60,7 +62,8 @@ describe('applied audio preflight', () => {
       permission: 'granted',
       contextState: 'running',
       contextSampleRate: 48_000,
-      trackSampleRate: 48_000,
+      captureSampleRate: 48_000,
+      inputDeviceSampleRate: 48_000,
       channelCount: 1,
       echoCancellation: false,
       noiseSuppression: false,
@@ -73,6 +76,25 @@ describe('applied audio preflight', () => {
     });
     expect(result.ready).toBe(false);
     expect(result.failure).toBeTruthy();
+  });
+
+  it.each([44_100, 48_000])('accepts an observed %i Hz input device only across a real 48 kHz Web Audio codec boundary', (inputDeviceSampleRate) => {
+    const evidence = {
+      permission: 'granted' as const,
+      contextState: 'running',
+      contextSampleRate: 48_000,
+      captureSampleRate: 48_000,
+      inputDeviceSampleRate,
+      channelCount: 1,
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+      workletState: 'ready' as const,
+      bridgeState: 'connected' as const,
+      microphoneLabel: 'Built-in microphone',
+      epoch: 1,
+    };
+    expect(evaluateAppliedSettings(evidence)).toEqual({ ready: true, evidence });
   });
 
   it('arms once per epoch with applied settings and cancels stale completion after reset', async () => {
