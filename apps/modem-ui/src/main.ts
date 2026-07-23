@@ -341,7 +341,7 @@ function render(): void {
   if (uiState === 'idle') operator.append(control('Arm modem', arm, !runnerConfig && !developmentDiagnostic));
   if (uiState === 'requesting') operator.append(control('Arm modem', arm, true));
   if (uiState === 'ready') {
-    operator.append(control('Start Cyrinx qualification', startQualification));
+    if (cyrinxSession.canRequestStart) operator.append(control('Start Cyrinx qualification', startQualification));
     operator.append(control('Reset / re-arm', reset, false, 'secondary'));
   }
   if (uiState === 'failed' || uiState === 'disconnected') operator.append(control('Reset / re-arm', reset, false, 'secondary'));
@@ -525,6 +525,7 @@ async function reset(): Promise<void> {
     uiState = 'idle';
     render();
     await arm();
+    if (cyrinxSession.snapshot.codec === 'quiet') void startQuietFallback();
   } catch (error) {
     const message = asError(error, 'Reset / re-arm failed').message;
     uiState = message.includes('bridge') || message.includes('RESET') ? 'disconnected' : 'failed';

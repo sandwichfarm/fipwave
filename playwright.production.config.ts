@@ -8,6 +8,7 @@ export default defineConfig({
     url: 'http://127.0.0.1:4173/qualification-config',
     reuseExistingServer: false,
     timeout: 120_000,
+    env: { ...process.env, CYRINX_ASSET_DIR: '/tmp/fipwave-e2e-missing-cyrinx-assets' },
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'], launchOptions: { args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] } } }],
 });

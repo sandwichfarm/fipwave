@@ -38,9 +38,9 @@ test('production Quiet route performs verified RESET, arm, teardown, and re-arm 
   await expect(page.getByText('Audio preflight passed on this laptop.')).toBeVisible({ timeout: 30_000 });
   await expect(page.getByText('Bridge delivery: Audio settings accepted for epoch 3')).toBeVisible();
   await expect(page.getByText(/Local epoch: 3/)).toBeVisible();
-
-  await page.getByRole('button', { name: 'Start Cyrinx qualification' }).click();
   await expect(page.getByText('Quiet armed · audible-7k-channel-0 · epoch 4')).toBeVisible({ timeout: 30_000 });
   await expect(page.getByText('Bridge delivery: Quiet audio settings accepted for epoch 4')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Start Cyrinx qualification' })).toHaveCount(0);
   await expect(page.getByText('Passed independent receiver evidence')).toHaveCount(0);
+  await expect(page.getByText(/Cyrinx rejected: cyrinx_build_failed/)).toBeVisible();
 });
