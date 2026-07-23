@@ -18,7 +18,7 @@ npm run fetch:codecs
 npm run build
 npm run start:runner -- --machine-id laptop-a --role A --port 4173 \
   --report .artifacts/qualification/laptop-a.json \
-  --tun-evidence .artifacts/qualification/laptop-a-tun.json --physical-open-air
+  --tun-evidence .artifacts/qualification/tun-exact-host.json --physical-open-air
 ```
 
 Open `http://127.0.0.1:4173/` in Chromium, grant the microphone, and choose
@@ -28,11 +28,14 @@ microphone and audio context after the normal audio lifecycle has been reset.
 Physical mode refuses a dirty worktree, an unresolved/default build identity,
 or any exact-host TUN field that is not passed.
 
-Operate the pages independently. On laptop A locally schedule **A → B**. The
+After a Cyrinx rejection, both pages automatically arm Quiet for listening but
+neither transmits automatically. On laptop A choose **Send Quiet A → B
+corpus**. The
 sender starts one corpus case at a time only after its own Quiet `onFinish` and
 a fixed guard; it never waits for a receiver result, acknowledgement, retry,
 or ARQ. After the operator sees A's local transmitter finish, locally schedule
-**B → A** on laptop B. Each receiver independently records and deduplicates
+**B → A** with **Send Quiet B → A corpus** on laptop B. Each receiver
+independently records and deduplicates
 fragments, reassembles complete cases, and validates the committed SHA-256.
 The pages never exchange control messages. One browser tab owns an epoch; a
 second tab cannot contribute evidence. Reconnection is accepted only after a
@@ -98,8 +101,11 @@ npm run test:unit -- tests/tun-preflight.test.ts
 
 ## Cyrinx early-abandonment gate
 
-Cyrinx is a bounded batch experiment, not an acoustic qualification claim. Start
-its runner-owned 90-minute deadline **before** the build command, then execute
+Cyrinx is a bounded batch experiment, not an acoustic qualification claim.
+The commands below are deterministic preflight only; they do not create or
+replace physical evidence. After both pages are armed, start Cyrinx on both
+laptops within one second. Each runner stamps its own immutable 90-minute
+deadline **before** it repeats the verified build and digital gate, then executes
 only this order: locked archive/hash/licenses and portable C build; digital
 256- and 1,536-byte round trips; one cold A → B frame; one cold B → A frame;
 then the corpus. The first miss records one immutable reason and activates the
@@ -113,7 +119,7 @@ npm run cyrinx:build
 npm run cyrinx:test
 npm run qualification:serve -- --machine-id laptop-a --role A --port 4173 \
   --report .artifacts/qualification/laptop-a.json \
-  --tun-evidence .artifacts/qualification/laptop-a-tun.json --physical-open-air
+  --tun-evidence .artifacts/qualification/tun-exact-host.json --physical-open-air
 ```
 
 The pinned profile is `bulk-qpsk-r1-2-48k-v1`: 48 kHz mono, QPSK rate 1/2,

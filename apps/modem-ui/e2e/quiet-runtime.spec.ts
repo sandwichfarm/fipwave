@@ -39,8 +39,9 @@ test('production Quiet route performs verified RESET, arm, teardown, and re-arm 
   await expect(page.getByRole('cell', { name: '48000', exact: true })).toHaveCount(2);
 
   await page.getByRole('button', { name: 'Start Cyrinx qualification' }).click();
-  await expect(page.getByText('Quiet armed · audible-7k-channel-0 · epoch 2')).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText('Quiet armed and listening · audible-7k-channel-0 · send A → B when the operator is ready · epoch 2')).toBeVisible({ timeout: 30_000 });
   await expect(page.getByText('Bridge delivery: Quiet audio settings accepted for epoch 2')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Send Quiet A → B corpus' })).toBeEnabled();
   expect([...assets]).toEqual(expect.arrayContaining([
     ['/codec-assets/quiet.js', 200],
     ['/codec-assets/libfec.js', 200],
@@ -56,8 +57,9 @@ test('production Quiet route performs verified RESET, arm, teardown, and re-arm 
   await expect(page.getByText('Audio preflight passed on this laptop.')).toBeVisible({ timeout: 30_000 });
   // Quiet is already runner-selected, so the intermediate reset/arm epoch may
   // advance immediately to its Quiet-owned epoch before the DOM can render it.
-  await expect(page.getByText('Quiet armed · audible-7k-channel-0 · epoch 4')).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText('Quiet armed and listening · audible-7k-channel-0 · send A → B when the operator is ready · epoch 4')).toBeVisible({ timeout: 30_000 });
   await expect(page.getByText('Bridge delivery: Quiet audio settings accepted for epoch 4')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Send Quiet A → B corpus' })).toBeEnabled();
   await expect(page.getByText(/Local epoch: 4/)).toBeVisible();
   await expect(page.getByRole('button', { name: 'Start Cyrinx qualification' })).toHaveCount(0);
   await expect(page.getByText('Passed independent receiver evidence')).toHaveCount(0);
