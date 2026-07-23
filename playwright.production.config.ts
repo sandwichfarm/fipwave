@@ -1,4 +1,8 @@
 import { defineConfig, devices } from '@playwright/test';
+import path from 'node:path';
+import { tmpdir } from 'node:os';
+
+const missingCyrinxAssets = path.join(tmpdir(), `fipwave-e2e-missing-cyrinx-assets-${process.pid}`);
 
 export default defineConfig({
   testDir: './apps/modem-ui/e2e',
@@ -8,7 +12,7 @@ export default defineConfig({
     url: 'http://127.0.0.1:4173/qualification-config',
     reuseExistingServer: false,
     timeout: 120_000,
-    env: { ...process.env, CYRINX_ASSET_DIR: '/tmp/fipwave-e2e-missing-cyrinx-assets' },
+    env: { ...process.env, CYRINX_ASSET_DIR: missingCyrinxAssets },
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'], launchOptions: { args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] } } }],
 });

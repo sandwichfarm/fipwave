@@ -1,6 +1,20 @@
 import { expect, test } from '@playwright/test';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 
 const origin = 'http://127.0.0.1:4173';
+const reportPath = path.resolve('.artifacts/qualification/playwright.json');
+
+async function canonicalFallback() {
+  const report = JSON.parse(await readFile(reportPath, 'utf8')) as { qualification: { deadline: { startedAtMs: number; deadlineAtMs: number } } } & Record<string, unknown>;
+  expect(report).toMatchObject({
+    evidenceClass: 'Loopback', complete: false,
+    codec: { id: 'quiet', profile: 'audible-7k-channel-0', advertisedMtu: 1357 },
+    qualification: { physicalGate: 'not_physical', fallback: { codecId: 'quiet', state: 'activated', reasonCode: 'cyrinx_build_failed' } },
+  });
+  expect(report.qualification.deadline.deadlineAtMs - report.qualification.deadline.startedAtMs).toBe(5_400_000);
+  return report;
+}
 
 test('production Quiet route performs verified RESET, arm, teardown, and re-arm without claiming acoustic success', async ({ page }) => {
   const assets = new Map<string, number>();
@@ -34,6 +48,8 @@ test('production Quiet route performs verified RESET, arm, teardown, and re-arm 
   ]));
   await expect(page.getByText('Passed independent receiver evidence')).toHaveCount(0);
 
+  const firstReport = await canonicalFallback();
+
   await page.getByRole('button', { name: 'Reset / re-arm' }).click();
   await expect(page.getByText('Audio preflight passed on this laptop.')).toBeVisible({ timeout: 30_000 });
   await expect(page.getByText('Bridge delivery: Audio settings accepted for epoch 3')).toBeVisible();
@@ -43,4 +59,6 @@ test('production Quiet route performs verified RESET, arm, teardown, and re-arm 
   await expect(page.getByRole('button', { name: 'Start Cyrinx qualification' })).toHaveCount(0);
   await expect(page.getByText('Passed independent receiver evidence')).toHaveCount(0);
   await expect(page.getByText(/Cyrinx rejected: cyrinx_build_failed/)).toBeVisible();
+  const secondReport = await canonicalFallback();
+  expect(secondReport.qualification.deadline).toEqual(firstReport.qualification.deadline);
 });
