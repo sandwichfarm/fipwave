@@ -1,6 +1,8 @@
 import { expect, test } from '@playwright/test';
 
-const origin = 'http://127.0.0.1:4173';
+const requestedPort = Number(process.env.FIPWAVE_E2E_PORT ?? '4173');
+if (!Number.isInteger(requestedPort) || requestedPort < 1024 || requestedPort > 65_535) throw new Error('FIPWAVE_E2E_PORT must be a valid unprivileged TCP port');
+const origin = `http://127.0.0.1:${requestedPort}`;
 
 test('production origin serves only immutable, allowlisted codec files with fixed MIME and hash identity', async ({ page, request }) => {
   const expected = [
