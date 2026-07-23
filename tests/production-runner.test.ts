@@ -367,6 +367,122 @@ describe('production runner', () => {
     expect(runner.state().stampedResults).toEqual([]);
   });
 
+  it('passes the post-RESET epoch into the digital gate and an active RESET irreversibly falls back', async () => {
+    const target = await reportPath('cyrinx-reset-authority');
+    const worker = fakeCyrinxWorker();
+    const digitalContexts: Array<{ epoch: number; evidenceClass: MachineReport['evidenceClass']; nowMs: number }> = [];
+    let now = 80_000;
+    const runner = await startProductionRunner({
+      machineId: 'laptop-a',
+      role: 'A',
+      port: 0,
+      report: target,
+      tunEvidence: 'none',
+      uiDir: await fixtureUi(),
+      nowForTests: () => now,
+      cyrinxBuildForTests: async () => { now += 1; },
+      cyrinxDigitalForTests: async (context) => { digitalContexts.push(context); now += 1; },
+      cyrinxWorkerForTests: worker,
+    });
+    runners.push(runner);
+
+    expect(await runner.reset()).toBe(2);
+    expect(await runner.startCyrinx()).toEqual({
+      codec: 'cyrinx',
+      reasonCode: null,
+      deadlineAtMs: 80_000 + CYRINX_DEADLINE_MS,
+    });
+    expect(digitalContexts).toEqual([{ epoch: 2, evidenceClass: 'Loopback', nowMs: 80_001 }]);
+
+    expect(await runner.reset()).toBe(3);
+    expect(await runner.startCyrinx()).toEqual({
+      codec: 'quiet',
+      reasonCode: 'cyrinx_cold_a_to_b_failed',
+      deadlineAtMs: 80_000 + CYRINX_DEADLINE_MS,
+    });
+    expect(digitalContexts).toHaveLength(1);
+    const report = JSON.parse(await readFile(target, 'utf8')) as MachineReport;
+    expect(report).toMatchObject({
+      epoch: 3,
+      codec: { id: 'quiet' },
+      qualification: {
+        deadline: { startedAtMs: 80_000, deadlineAtMs: 80_000 + CYRINX_DEADLINE_MS, elapsedMs: 2 },
+        fallback: { state: 'activated', reasonCode: 'cyrinx_cold_a_to_b_failed' },
+      },
+    });
+  });
+
+  it('maps digital failure exactly once and suppresses a late native receive after active RESET', async () => {
+    const digitalTarget = await reportPath('cyrinx-digital-failure');
+    const digitalRunner = await startProductionRunner({
+      machineId: 'laptop-a',
+      role: 'A',
+      port: 0,
+      report: digitalTarget,
+      tunEvidence: 'none',
+      uiDir: await fixtureUi(),
+      cyrinxBuildForTests: async () => undefined,
+      cyrinxDigitalForTests: async () => { throw new Error('digital mismatch'); },
+      cyrinxWorkerForTests: fakeCyrinxWorker(),
+    });
+    runners.push(digitalRunner);
+    expect(await digitalRunner.startCyrinx()).toMatchObject({ codec: 'quiet', reasonCode: 'cyrinx_digital_roundtrip_failed' });
+    expect((JSON.parse(await readFile(digitalTarget, 'utf8')) as MachineReport).qualification?.fallback).toEqual({
+      codecId: 'quiet',
+      state: 'activated',
+      reasonCode: 'cyrinx_digital_roundtrip_failed',
+    });
+
+    const target = await reportPath('cyrinx-late-native');
+    const worker = fakeCyrinxWorker();
+    let release!: (result: Awaited<ReturnType<CyrinxWorkerRuntime['receiveCapture']>>) => void;
+    worker.receiveCapture.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    const runner = await startProductionRunner({
+      machineId: 'laptop-b',
+      role: 'B',
+      port: 0,
+      report: target,
+      tunEvidence: 'none',
+      uiDir: await fixtureUi(),
+      cyrinxBuildForTests: async () => undefined,
+      cyrinxDigitalForTests: async () => undefined,
+      cyrinxWorkerForTests: worker,
+    });
+    runners.push(runner);
+    const inbox = await openInbox(runner);
+    await runner.startCyrinx();
+    await inbox.text(); await inbox.text();
+    const cold = await inbox.text() as { instruction: { caseId: string; direction: 'A → B' } };
+    inbox.socket.send(frame(MessageType.QUALIFICATION_CASE, 1, 0n, { action: 'accept_cyrinx_instruction', caseId: cold.instruction.caseId, direction: cold.instruction.direction }));
+    await vi.waitFor(() => expect(worker.begin).toHaveBeenCalledOnce());
+    inbox.socket.send(pcm(1, 1n));
+    await vi.waitFor(() => expect(worker.receiveCapture).toHaveBeenCalledOnce());
+    await runner.reset();
+    const active = worker.begin.mock.calls[0]![0];
+    release({
+      epoch: 1,
+      direction: active.direction,
+      caseId: active.id,
+      digest: active.digest,
+      acquisitionMs: 1,
+      airtimeMs: 1,
+      complete: true,
+      corrupt: false,
+      missing: 0,
+      duplicates: 0,
+      deliveryCount: 1,
+      bytePerfect: true,
+      coldAcquired: true,
+      queues: { captureHighWaterBytes: 1, captureHighWaterMs: 1, playbackHighWaterBytes: 0, playbackHighWaterMs: 0, discontinuities: 0 },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const report = JSON.parse(await readFile(target, 'utf8')) as MachineReport;
+    expect(report).toMatchObject({ epoch: 2, complete: false, qualification: { fallback: { reasonCode: 'cyrinx_cold_a_to_b_failed' } } });
+    expect(report.results.every((entry) => entry.observed === false)).toBe(true);
+    expect(runner.state().stampedResults).toEqual([]);
+    inbox.socket.close();
+  });
+
   it('does not count routine control-frame aging as an acoustic discontinuity', async () => {
     let now = 0; const runner = await startProductionRunner({ machineId: 'laptop-b', role: 'B', port: 0, report: await reportPath('aging'), tunEvidence: 'none', uiDir: await fixtureUi(), nowForTests: () => now }); runners.push(runner);
     const socket = await openSocket(runner); socket.send(frame(MessageType.QUALIFICATION_CASE, 1, 0n, { caseId: 'one' })); await new Promise((resolve) => setTimeout(resolve, 10));
