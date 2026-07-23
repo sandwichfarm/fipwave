@@ -6,6 +6,7 @@ describe('self-loop smoke harness', () => {
     expect(parseArgs([
       '--output-volume', '45',
       '--input-volume', '70',
+      '--playback-gain-percent', '200',
       '--port-a', '4180',
       '--port-b', '4181',
       '--direction-timeout-ms', '120000',
@@ -13,6 +14,7 @@ describe('self-loop smoke harness', () => {
       help: false,
       outputVolume: 45,
       inputVolume: 70,
+      playbackGainPercent: 200,
       portA: 4180,
       portB: 4181,
       directionTimeoutMs: 120_000,

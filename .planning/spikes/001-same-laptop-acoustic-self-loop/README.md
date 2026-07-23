@@ -74,6 +74,12 @@ speaker and microphone are the macOS defaults, then run:
 npm run smoke:self-loop -- --output-volume 65 --input-volume 90
 ```
 
+For an experimental 2× browser playback signal, add
+`--playback-gain-percent 200`. The default remains 100% because the Quiet
+profile is calibrated for its committed amplitude; increasing it can
+overdrive the near-field speaker/microphone path and must be validated on the
+target hardware.
+
 No browser interaction is required. The command builds the production bundles,
 starts two isolated diagnostic runners, opens headed Chrome, grants microphone
 permission to both origins, arms both roles, forces the runner-authorized Quiet
@@ -133,6 +139,17 @@ Each run records:
 - The harness closed its Chrome process and both runners, freed ports
   4174/4175, and restored output/input volume from the test levels 65/90 to the
   original 100/100.
+
+### 2026-07-24 — 2× playback-gain experiment
+
+- Added an opt-in browser destination gain controlled by
+  `--playback-gain-percent`; `200` maps to a 2× Web Audio multiplier while
+  keeping system volume bounded.
+- The 2× path armed successfully in headed Chrome and reported the real
+  built-in microphone, but did not produce a byte-perfect receive at either
+  output level 30 or 65 during bounded diagnostic attempts. Both attempts
+  cleaned up and restored 100/100. The default remains 100% until the
+  amplified profile is retuned for the target acoustic geometry.
 
 Primary evidence:
 

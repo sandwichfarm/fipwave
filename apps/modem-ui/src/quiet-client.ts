@@ -158,6 +158,11 @@ interface ReceiverSession { epoch: number; localRole: Role; startedAtMs: number;
 interface PartialCase { fragment: QuietFragment; parts: Map<number, Uint8Array>; duplicates: number; startedAtMs: number; }
 interface ReceiverMetrics { captureHighWaterBytes: number; captureHighWaterMs: number; discontinuities: number; }
 
+export interface QuietClientOptions {
+  /** Multiplier applied only to the browser playback destination. */
+  playbackGain?: number;
+}
+
 export class QuietReceiverEvidence {
   #parts = new Map<string, PartialCase>();
   #session: ReceiverSession;
@@ -262,11 +267,17 @@ export class QuietClient {
   #contexts = new Set<AudioContext>();
   #runtimeFrame: HTMLIFrameElement | undefined;
   #runtimeWindow: QuietRuntimeWindow | undefined;
+  #playbackGain: number;
   #generation = 0;
   #cancelTransmission: (() => void) | undefined;
   #metrics: QuietMetrics = { captureHighWaterBytes: 0, captureHighWaterMs: 0, playbackHighWaterBytes: 0, playbackHighWaterMs: 0, discontinuities: 0 };
 
-  constructor(onReceive: (evidence: ReceiveCaseEvidence) => void = () => undefined) { this.#onReceive = onReceive; }
+  constructor(onReceive: (evidence: ReceiveCaseEvidence) => void = () => undefined, options: QuietClientOptions = {}) {
+    const playbackGain = options.playbackGain ?? 1;
+    if (!Number.isFinite(playbackGain) || playbackGain <= 0 || playbackGain > 4) throw new Error('Quiet playback gain must be greater than 0 and no more than 4');
+    this.#onReceive = onReceive;
+    this.#playbackGain = playbackGain;
+  }
   get applied(): AppliedQuietSettings | undefined { return this.#applied; }
   get metrics(): Readonly<QuietMetrics> {
     const capture = this.#receiverEvidence.metrics();
@@ -296,7 +307,19 @@ export class QuietClient {
     this.#originalAudioContext = runtime.AudioContext;
     if (!this.#originalAudioContext) throw new Error('Quiet AudioContext is unavailable');
     const client = this;
-    runtime.AudioContext = new Proxy(this.#originalAudioContext, { construct(Target, args) { const context = Reflect.construct(Target, args) as AudioContext; client.#contexts.add(context); client.#contextSampleRate = context.sampleRate; return context; } });
+    runtime.AudioContext = new Proxy(this.#originalAudioContext, { construct(Target, args) {
+      const context = Reflect.construct(Target, args) as AudioContext;
+      client.#contexts.add(context);
+      client.#contextSampleRate = context.sampleRate;
+      if (client.#playbackGain !== 1) {
+        const destination = context.destination;
+        const outputGain = context.createGain();
+        outputGain.gain.value = client.#playbackGain;
+        outputGain.connect(destination);
+        Object.defineProperty(context, 'destination', { configurable: true, value: outputGain });
+      }
+      return context;
+    } });
     await loadClassicScript(runtime.document, '/codec-assets/quiet.js');
     const quiet = runtime.Quiet; if (!quiet) throw new Error('verified Quiet runtime did not load');
     const ready = new Promise<void>((resolve, reject) => quiet.init({ profilesPrefix: '/codec-assets/', memoryInitializerPrefix: '/codec-assets/', libfecPrefix: '/codec-assets/', onReady: resolve, onError: (reason) => reject(new Error(`Quiet initialization failed: ${reason}`)) }));

@@ -39,7 +39,13 @@ let quietCorpusSendState: QuietCorpusSendState = 'unavailable';
 let quietFailureReportedEpoch: number | undefined;
 let runnerConfig: Readonly<RunnerConfig> | undefined;
 let configFailure = '';
-const quiet = new QuietClient((received) => { void appendQuietEvidence(received); });
+function requestedPlaybackGain(): number {
+  const raw = new URLSearchParams(window.location.hash.replace(/^#/, '')).get('playbackGain');
+  if (raw === null || raw.trim() === '') return 1;
+  const gain = Number(raw);
+  return Number.isFinite(gain) && gain > 0 && gain <= 4 ? gain : 1;
+}
+const quiet = new QuietClient((received) => { void appendQuietEvidence(received); }, { playbackGain: requestedPlaybackGain() });
 type GateState = 'not-started' | 'cyrinx-running';
 type CorpusRow = { direction: string; caseId: string; evidenceClass: 'Fixture' | 'Loopback' | 'Open air'; result: string; airtime: string };
 let gateState: GateState = 'not-started';

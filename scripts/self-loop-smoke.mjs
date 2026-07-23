@@ -11,6 +11,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULTS = Object.freeze({
   outputVolume: 65,
   inputVolume: 90,
+  playbackGainPercent: 100,
   portA: 4174,
   portB: 4175,
   startupTimeoutMs: 60_000,
@@ -28,6 +29,7 @@ function usage() {
     'Options:',
     '  --output-volume 0..100        macOS output level during the run (default: 65)',
     '  --input-volume 0..100         macOS input level during the run (default: 90)',
+    '  --playback-gain-percent N     browser playback multiplier (default: 100; try 200 for diagnostics)',
     '  --port-a 1024..65535          role A runner port (default: 4174)',
     '  --port-b 1024..65535          role B runner port (default: 4175)',
     '  --startup-timeout-ms N        runner/browser startup timeout (default: 60000)',
@@ -49,6 +51,7 @@ export function parseArgs(values) {
   const definitions = new Map([
     ['--output-volume', ['outputVolume', 0, 100]],
     ['--input-volume', ['inputVolume', 0, 100]],
+    ['--playback-gain-percent', ['playbackGainPercent', 1, 400]],
     ['--port-a', ['portA', 1024, 65_535]],
     ['--port-b', ['portB', 1024, 65_535]],
     ['--startup-timeout-ms', ['startupTimeoutMs', 1_000, 60 * 60_000]],
@@ -579,8 +582,8 @@ async function main() {
     recorder.event('browser-launched', { ...summary.browser, message: `${summary.browser.version}, PID ${summary.browser.pid}` }, true);
 
     const origins = {
-      A: `http://127.0.0.1:${specs.A.port}`,
-      B: `http://127.0.0.1:${specs.B.port}`,
+      A: `http://127.0.0.1:${specs.A.port}/#playbackGain=${options.playbackGainPercent / 100}`,
+      B: `http://127.0.0.1:${specs.B.port}/#playbackGain=${options.playbackGainPercent / 100}`,
     };
     const contexts = {
       A: await browser.newContext({ viewport: { width: 1280, height: 900 } }),
