@@ -16,8 +16,8 @@
     "test:skeleton": "vitest run tests/skeleton.test.ts",
     "build": "vite build",
     "generate:corpus": "node scripts/generate-corpus.mjs",
-    "qualify:fixture": "node --input-type=module --eval \"console.log('Fixture qualification is introduced by Plan 01-05.')\" --",
-    "qualify:verify": "node --input-type=module --eval \"console.log('Physical qualification verification is introduced by Plan 01-07.')\" --",
+    "qualify:fixture": "node scripts/qualify.mjs fixture",
+    "qualify:verify": "node scripts/qualify.mjs verify",
     "test:compose": "node --input-type=module --eval \"console.log('Compose TUN preflight is introduced by Plan 01-06.')\" --",
     "check": "npm run verify:dependencies && npm run lint && npm run typecheck && npm run test:unit && npm run test:browser && npm run build && npm run generate:corpus -- --check && npm run qualify:fixture && npm run qualify:verify && npm run test:compose"
   },

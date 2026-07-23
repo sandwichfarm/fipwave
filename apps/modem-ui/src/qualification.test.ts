@@ -5,7 +5,7 @@ import { FixtureCodecAdapter } from '../../../packages/bridge/src/codecs/fixture
 import { QualificationGate, evaluateSelection } from './qualification.js';
 
 const case256 = {
-  id: 'a-to-b-256-01', direction: 'A → B' as const, size: 256,
+  id: 'a-to-b-256-01', direction: 'A → B' as const, size: 256 as const,
   digest: createHash('sha256').update(new Uint8Array(256)).digest('hex'), payload: new Uint8Array(256),
 };
 
