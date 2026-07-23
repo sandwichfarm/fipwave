@@ -9,6 +9,7 @@ export const MAX_QUEUE_BYTES = 256 * 1024;
 export const MAX_QUEUE_DURATION_MS = 10_000;
 export const QUALIFICATION_DEAD_LINK_TIMEOUT_MS = 30_000;
 export const CYRINX_DEADLINE_MS = 90 * 60 * 1_000;
+export const CYRINX_FALLBACK_REASONS = ['cyrinx_build_failed', 'cyrinx_digital_roundtrip_failed', 'cyrinx_cold_a_to_b_failed', 'cyrinx_cold_b_to_a_failed', 'cyrinx_corpus_failed', 'cyrinx_deadline_expired'] as const;
 export const QUIET_CODEC = Object.freeze({ id: 'quiet', commit: '72782542a41f1b615a02c2ab43a0edb56edb6ce4', profile: 'audible-7k-channel-0', audible: true, advertisedMtu: 1357 });
 export const CYRINX_CODEC = Object.freeze({ id: 'cyrinx', commit: 'ddbd0ce4f78963403f96b0100eb49950b544aef8', profile: 'bulk-qpsk-r1-2-48k-v1', audible: true, advertisedMtu: 1536 });
 
@@ -173,7 +174,9 @@ export function validateMachineReport(candidate: unknown): MachineReport {
     for (const value of [deadline.startedAtMs, deadline.deadlineAtMs, deadline.elapsedMs]) if (value !== null) finiteNonNegative(value, 'qualification_deadline_invalid');
     if ((deadline.startedAtMs === null) !== (deadline.deadlineAtMs === null) || (deadline.startedAtMs !== null && deadline.deadlineAtMs! - deadline.startedAtMs !== CYRINX_DEADLINE_MS)) fail('qualification_deadline_invalid');
     if (!['pending', 'failed', 'passed'].includes(qualification.physicalGate)) fail('physical_gate_invalid');
-    if (!qualification.fallback || qualification.fallback.codecId !== 'quiet' || !['available', 'activated', 'failed'].includes(qualification.fallback.state) || (qualification.fallback.reasonCode !== null && (typeof qualification.fallback.reasonCode !== 'string' || qualification.fallback.reasonCode.trim() === ''))) fail('fallback_state_invalid');
+    if (!qualification.fallback || qualification.fallback.codecId !== 'quiet' || !['available', 'activated', 'failed'].includes(qualification.fallback.state)) fail('fallback_state_invalid');
+    if (qualification.fallback.state === 'available' && qualification.fallback.reasonCode !== null) fail('fallback_state_invalid');
+    if (qualification.fallback.state !== 'available' && (!CYRINX_FALLBACK_REASONS.includes(qualification.fallback.reasonCode as typeof CYRINX_FALLBACK_REASONS[number]))) fail('fallback_state_invalid');
   }
   for (const result of report.results) {
     if (result.epoch !== report.epoch) fail('stale_epoch');

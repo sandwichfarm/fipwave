@@ -104,6 +104,16 @@ describe('production runner', () => {
     const afterReset = await openSocket(runner); expect(afterReset.readyState).toBe(WebSocket.OPEN); afterReset.close();
   });
 
+  it('stamps the Cyrinx deadline before the runner build and atomically preserves a build-failure Quiet fallback in the canonical report', async () => {
+    const target = await reportPath('cyrinx-fallback'); let now = 1_000; let sawBuild = false;
+    const runner = await startProductionRunner({ machineId: 'laptop-b', role: 'B', port: 0, report: target, tunEvidence: 'none', uiDir: await fixtureUi(), nowForTests: () => now, cyrinxBuildForTests: async () => { sawBuild = true; now = 1_050; throw new Error('build failed'); } }); runners.push(runner);
+    expect(await runner.startCyrinx()).toEqual({ codec: 'quiet', reasonCode: 'cyrinx_build_failed', deadlineAtMs: 5_401_000 });
+    expect(sawBuild).toBe(true);
+    const report = JSON.parse(await readFile(target, 'utf8')) as MachineReport;
+    expect(report).toMatchObject({ codec: { id: 'quiet', profile: 'audible-7k-channel-0' }, qualification: { deadline: { startedAtMs: 1_000, deadlineAtMs: 5_401_000, elapsedMs: 50 }, fallback: { state: 'activated', reasonCode: 'cyrinx_build_failed' } } });
+    expect(await runner.startCyrinx()).toEqual({ codec: 'quiet', reasonCode: 'cyrinx_build_failed', deadlineAtMs: 5_401_000 });
+  });
+
   it('does not count routine control-frame aging as an acoustic discontinuity', async () => {
     let now = 0; const runner = await startProductionRunner({ machineId: 'laptop-b', role: 'B', port: 0, report: await reportPath('aging'), tunEvidence: 'none', uiDir: await fixtureUi(), nowForTests: () => now }); runners.push(runner);
     const socket = await openSocket(runner); socket.send(frame(MessageType.QUALIFICATION_CASE, 1, 0n, { caseId: 'one' })); await new Promise((resolve) => setTimeout(resolve, 10));

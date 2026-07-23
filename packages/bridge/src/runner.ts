@@ -26,6 +26,7 @@ export interface ProductionRunnerOptions {
   qualificationTrace?: Pick<NonNullable<MachineReport['qualification']>, 'deadline' | 'fallback'>;
   reportWriterForTests?: BridgeServerOptions['reportWriter'];
   nowForTests?: () => number;
+  cyrinxBuildForTests?: () => Promise<void>;
 }
 export interface ProductionRunner extends BridgeServer { config: Readonly<RunnerQualificationConfig>; }
 function fail(message: string): never { throw new Error(`runner ${message}`); }
@@ -97,6 +98,7 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
     codecAssetDir, codecAssets,
     ...(options.reportWriterForTests ? { reportWriter: options.reportWriterForTests } : {}),
     ...(options.nowForTests ? { now: options.nowForTests } : {}),
+    cyrinxBuild: options.cyrinxBuildForTests ?? (async () => { await execFileAsync(process.execPath, [path.join(PROJECT_ROOT, 'scripts', 'build-cyrinx.mjs')], { cwd: PROJECT_ROOT }); }),
   } satisfies BridgeServerOptions;
   const bridge = await createBridgeServer(bridgeOptions);
   return { ...bridge, config };

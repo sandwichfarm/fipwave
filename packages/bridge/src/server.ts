@@ -10,6 +10,7 @@ import manifest from '../../../fixtures/corpus/manifest.json' with { type: 'json
 import { decodeFrame, encodeFrame, MessageType, type FwavFrame } from './protocol.js';
 import {
   CYRINX_DEADLINE_MS,
+  CYRINX_CODEC,
   MAX_QUEUE_BYTES,
   MAX_QUEUE_DURATION_MS,
   QUALIFICATION_DEAD_LINK_TIMEOUT_MS,
@@ -65,7 +66,7 @@ export interface BridgeState {
   stampedResults: Array<Record<string, unknown>>;
 }
 export interface BridgeServer {
-  port: number; sendPcmPlayback(frame: Buffer): void; reset(): Promise<number>; close(): Promise<void>; state(): BridgeState;
+  port: number; sendPcmPlayback(frame: Buffer): void; startCyrinx(): Promise<{ codec: 'cyrinx' | 'quiet'; reasonCode: string | null; deadlineAtMs: number }>; reset(): Promise<number>; close(): Promise<void>; state(): BridgeState;
 }
 export interface BridgeServerOptions {
   host: typeof LOOPBACK_HOST;
@@ -78,6 +79,8 @@ export interface BridgeServerOptions {
   codecAssets?: readonly CodecAsset[];
   reportWriter?: (reportPath: string, report: MachineReport) => Promise<string>;
   now?: () => number;
+  /** Runner-owned only: this is invoked after the immutable deadline is stamped. */
+  cyrinxBuild?: () => Promise<void>;
 }
 
 class BridgeInputError extends Error {
@@ -211,6 +214,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   if (!Number.isInteger(options.port) || options.port < 0 || options.port > 65_535) fail('bridge port must be an integer between 0 and 65535');
   await mkdir(options.artifactDir, { recursive: true });
   const config = options.qualificationConfig && immutableConfig(options.qualificationConfig);
+  const authority = config ? { codec: { ...config.codec }, qualification: { ...config.qualification, deadline: { ...config.qualification.deadline }, fallback: { ...config.qualification.fallback } } } : undefined;
   const corpus = manifest.cases as CorpusEntry[];
   const expectedDirection = config?.role === 'A' ? 'B → A' : 'A → B';
   const expectedCorpus = corpus.filter((entry) => entry.direction === expectedDirection);
@@ -300,7 +304,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     }
     const corpusComplete = !reasons.has('corpus_incomplete') && !reasons.has('bad_digest') && !reasons.has('duplicate_case') && !reasons.has('partial_evidence') && !reasons.has('airtime_budget_exceeded') && !reasons.has('cold_acquisition_failed') && !reasons.has('queue_bound_exceeded') && !reasons.has('queue_discontinuity') && audioPassed;
     const physicalGate = config.evidenceClass !== 'Open air' ? 'not_physical' : corpusComplete ? 'passed' : values.length >= 24 || [...reasons].some((reason) => reason !== 'corpus_incomplete' && reason !== 'audio_preflight_failed') ? 'failed' : 'pending';
-    return { schemaVersion: 1, capturedAt: new Date().toISOString(), machine: { hostName: config.machineId, os: options.reportAuthority.build.os, architecture: options.reportAuthority.build.architecture, browserVersion: audio?.browserVersion ?? 'Unavailable', commit: options.reportAuthority.build.commit }, evidenceClass: config.evidenceClass, epoch: state.epoch, codec: { ...config.codec }, audio: audio ? { microphoneLabel: audio.microphoneLabel, contextState: audio.contextState, inputDeviceSampleRate: audio.inputDeviceSampleRate, inputDeviceChannels: audio.inputDeviceChannels, contextSampleRate: audio.contextSampleRate, captureSampleRate: audio.captureSampleRate, channels: audio.channels, echoCancellation: audio.echoCancellation, noiseSuppression: audio.noiseSuppression, autoGainControl: audio.autoGainControl } : { microphoneLabel: 'Unavailable', contextState: 'unavailable', inputDeviceSampleRate: 0, inputDeviceChannels: 0, contextSampleRate: 0, captureSampleRate: 0, channels: 0, echoCancellation: false, noiseSuppression: false, autoGainControl: false }, queues: queuesEvidence, results: canonicalResults, complete: corpusComplete, reasonCodes: [...reasons], qualification: { ...config.qualification, deadline: { ...config.qualification.deadline }, fallback: { ...config.qualification.fallback }, physicalGate }, runner: { machineId: config.machineId, role: config.role, reportTarget: config.reportTarget, evidenceClass: config.evidenceClass, tunEvidence: options.reportAuthority.tunEvidence } };
+    return { schemaVersion: 1, capturedAt: new Date().toISOString(), machine: { hostName: config.machineId, os: options.reportAuthority.build.os, architecture: options.reportAuthority.build.architecture, browserVersion: audio?.browserVersion ?? 'Unavailable', commit: options.reportAuthority.build.commit }, evidenceClass: config.evidenceClass, epoch: state.epoch, codec: { ...(authority?.codec ?? config.codec) }, audio: audio ? { microphoneLabel: audio.microphoneLabel, contextState: audio.contextState, inputDeviceSampleRate: audio.inputDeviceSampleRate, inputDeviceChannels: audio.inputDeviceChannels, contextSampleRate: audio.contextSampleRate, captureSampleRate: audio.captureSampleRate, channels: audio.channels, echoCancellation: audio.echoCancellation, noiseSuppression: audio.noiseSuppression, autoGainControl: audio.autoGainControl } : { microphoneLabel: 'Unavailable', contextState: 'unavailable', inputDeviceSampleRate: 0, inputDeviceChannels: 0, contextSampleRate: 0, captureSampleRate: 0, channels: 0, echoCancellation: false, noiseSuppression: false, autoGainControl: false }, queues: queuesEvidence, results: canonicalResults, complete: corpusComplete, reasonCodes: [...reasons], qualification: authority ? { ...authority.qualification, deadline: { ...authority.qualification.deadline }, fallback: { ...authority.qualification.fallback }, physicalGate } : { ...config.qualification, deadline: { ...config.qualification.deadline }, fallback: { ...config.qualification.fallback }, physicalGate }, runner: { machineId: config.machineId, role: config.role, reportTarget: config.reportTarget, evidenceClass: config.evidenceClass, tunEvidence: options.reportAuthority.tunEvidence } };
   };
   const persist = (expectedGeneration = generation): Promise<string | undefined> => {
     const snapshot = buildReport(); if (!snapshot || !config) return Promise.resolve(undefined);
@@ -315,6 +319,18 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     for (const client of clients) if (client.readyState === client.OPEN) client.send(resetFrame);
     return state.epoch;
   };
+  const startCyrinx = async (): Promise<{ codec: 'cyrinx' | 'quiet'; reasonCode: string | null; deadlineAtMs: number }> => {
+    if (!authority || !config) fail('cyrinx authority is unavailable');
+    if (authority.qualification.deadline.startedAtMs !== null) return { codec: authority.codec.id === 'cyrinx' ? 'cyrinx' : 'quiet', reasonCode: authority.qualification.fallback.reasonCode, deadlineAtMs: authority.qualification.deadline.deadlineAtMs! };
+    const startedAtMs = options.now?.() ?? Date.now();
+    authority.codec = { ...CYRINX_CODEC }; authority.qualification = { ...authority.qualification, deadline: { startedAtMs, deadlineAtMs: startedAtMs + CYRINX_DEADLINE_MS, elapsedMs: 0 }, fallback: { codecId: 'quiet', state: 'available', reasonCode: null } };
+    await persist();
+    try { await options.cyrinxBuild?.(); }
+    catch {
+      const now = options.now?.() ?? Date.now(); authority.codec = { ...QUIET_CODEC }; authority.qualification = { ...authority.qualification, deadline: { ...authority.qualification.deadline, elapsedMs: Math.max(0, now - startedAtMs) }, fallback: { codecId: 'quiet', state: 'activated', reasonCode: 'cyrinx_build_failed' } }; await persist(); return { codec: 'quiet', reasonCode: 'cyrinx_build_failed', deadlineAtMs: startedAtMs + CYRINX_DEADLINE_MS };
+    }
+    return { codec: 'cyrinx', reasonCode: null, deadlineAtMs: startedAtMs + CYRINX_DEADLINE_MS };
+  };
   if (config && options.reportAuthority) await persist();
   const handleFrame = async (socket: WebSocket, rawData: RawData, isBinary: boolean, lastSequence: { value: bigint }): Promise<void> => {
     try {
@@ -326,6 +342,9 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       if (frame.type === MessageType.RESET) { await reset(); lastSequence.value = -1n; return; }
       if ([MessageType.QUALIFICATION_CASE, MessageType.QUALIFICATION_RESULT, MessageType.ERROR].includes(frame.type)) {
         const payload = parseJsonPayload(frame); if (hasForbiddenAuthority(payload)) fail('browser_authority_forbidden');
+        if (frame.type === MessageType.QUALIFICATION_CASE && payload.action === 'start_cyrinx' && Object.keys(payload).length === 1) {
+          const snapshot = await startCyrinx(); socket.send(JSON.stringify({ kind: 'cyrinx-session', ...snapshot })); return;
+        }
         if (frame.type === MessageType.QUALIFICATION_RESULT && config) {
           let result: BrowserResult;
           try {
@@ -385,5 +404,5 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   });
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(options.port, LOOPBACK_HOST, () => { server.off('error', reject); resolve(); }); });
   const address = server.address(); if (!address || typeof address === 'string') { await closeServer(server, webSocketServer); fail('bridge did not bind a TCP loopback address'); }
-  return { port: address.port, sendPcmPlayback, reset, close: async () => { for (const client of clients) client.terminate(); await writeTail; await closeServer(server, webSocketServer); }, state: () => ({ ...state, queueCounts: { ...state.queueCounts }, overflowedQueues: [...state.overflowedQueues], stampedResults: state.stampedResults.map((result) => ({ ...result })) }) };
+  return { port: address.port, sendPcmPlayback, startCyrinx, reset, close: async () => { for (const client of clients) client.terminate(); await writeTail; await closeServer(server, webSocketServer); }, state: () => ({ ...state, queueCounts: { ...state.queueCounts }, overflowedQueues: [...state.overflowedQueues], stampedResults: state.stampedResults.map((result) => ({ ...result })) }) };
 }

@@ -139,6 +139,12 @@ function handleBridgeMessage(socket: WebSocket, event: MessageEvent): void {
       pending.resolve();
       return;
     }
+    if (message.kind === 'cyrinx-session' && (message.codec === 'cyrinx' || message.codec === 'quiet') && typeof message.deadlineAtMs === 'number') {
+      bridgeDelivery = message.codec === 'cyrinx' ? `Cyrinx gate started; deadline ${new Date(message.deadlineAtMs).toLocaleTimeString()}` : `Cyrinx rejected: ${typeof message.reasonCode === 'string' ? message.reasonCode : 'unknown reason'}; activating Quiet`;
+      if (message.codec === 'quiet') void startQuietFallback();
+      render();
+      return;
+    }
     if (pendingSettings && typeof message.reportPath === 'string') {
       const pending = pendingSettings;
       window.clearTimeout(pending.timer);
@@ -399,9 +405,11 @@ function startQualification(): void {
     render();
     return;
   }
-  if (!runnerConfig) return;
+  if (!runnerConfig || !bridge || bridge.readyState !== WebSocket.OPEN) return;
   render();
-  void startQuietFallback();
+  const payload = new TextEncoder().encode(JSON.stringify({ action: 'start_cyrinx' }));
+  try { bridge.send(encodeControlFrame({ type: 5, epoch, sequence: bridgeSequence++, payload })); }
+  catch (error) { failBridge(bridge, asError(error, 'Cyrinx start request failed')); }
 }
 
 async function startQuietFallback(): Promise<void> {
