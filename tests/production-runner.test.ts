@@ -205,6 +205,7 @@ describe('production runner', () => {
     const worker = fakeCyrinxWorker();
     const gateOrder: string[] = [];
     const settleDelays: number[] = [];
+    const clearDeadline = vi.fn();
     let now = 20_000;
     const runner = await startProductionRunner({
       machineId: 'laptop-a',
@@ -218,6 +219,7 @@ describe('production runner', () => {
       cyrinxDigitalForTests: async () => { gateOrder.push('digital'); now += 1; },
       cyrinxWorkerForTests: worker,
       cyrinxSettleForTests: async (delayMs) => { settleDelays.push(delayMs); now += delayMs; },
+      cyrinxTimerForTests: { set: () => 1, clear: clearDeadline },
     });
     runners.push(runner);
     const inbox = await openInbox(runner);
@@ -269,6 +271,7 @@ describe('production runner', () => {
       ['a-to-b-256-02', 'transmit'],
     ]);
     expect(snapshot).toMatchObject({ codec: 'cyrinx', stage: 'complete', instruction: null, terminal: true });
+    expect(clearDeadline).toHaveBeenCalledOnce();
     const report = JSON.parse(await readFile(target, 'utf8')) as MachineReport;
     expect(report).toMatchObject({
       codec: { id: 'cyrinx', profile: 'bulk-qpsk-r1-2-48k-v1', advertisedMtu: 1536 },

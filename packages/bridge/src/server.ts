@@ -587,6 +587,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     }
     if (acceptedGeneration !== generation || cyrinxSession.codec !== 'cyrinx' || await expireCyrinx()) return;
     cyrinxSession.completeAccepted('transmit', clock());
+    if (cyrinxSession.terminal) clearCyrinxTimer();
     await persist(acceptedGeneration);
     if (acceptedGeneration === generation) broadcastSession();
   };
@@ -651,6 +652,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     }
     const cold = current.cold;
     cyrinxSession.completeAccepted('listen', clock());
+    if (cyrinxSession.terminal) clearCyrinxTimer();
     await persist(acceptedGeneration);
     if (acceptedGeneration !== generation) return;
     socket.send(JSON.stringify({ kind: 'cyrinx-result', epoch: state.epoch, caseId: current.id, direction: current.direction, accepted: true, cold }));
