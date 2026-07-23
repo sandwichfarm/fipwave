@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 import manifest from '../../../fixtures/corpus/manifest.json' with { type: 'json' };
 import {
+  CYRINX_CODEC,
   CYRINX_DEADLINE_MS,
   QUALIFICATION_DEAD_LINK_TIMEOUT_MS,
   QUIET_CODEC,
@@ -29,6 +30,8 @@ function report(hostName: string, role: 'A' | 'B', options: {
   codec?: MachineReport['codec'];
   commit?: string;
   p95Boundary?: boolean;
+  fallback?: NonNullable<MachineReport['qualification']>['fallback'];
+  deadline?: NonNullable<MachineReport['qualification']>['deadline'];
 } = {}): MachineReport {
   const evidenceClass = options.evidenceClass ?? 'Open air';
   const direction = role === 'A' ? 'B → A' : 'A → B';
@@ -70,9 +73,9 @@ function report(hostName: string, role: 'A' | 'B', options: {
     qualification: {
       deadLinkTimeoutMs: QUALIFICATION_DEAD_LINK_TIMEOUT_MS,
       cyrinxDeadlineMs: CYRINX_DEADLINE_MS,
-      deadline: { startedAtMs: 1_000, deadlineAtMs: 1_000 + CYRINX_DEADLINE_MS, elapsedMs: 100 },
+      deadline: options.deadline ?? { startedAtMs: 1_000, deadlineAtMs: 1_000 + CYRINX_DEADLINE_MS, elapsedMs: 100 },
       physicalGate: evidenceClass === 'Open air' ? (complete ? 'passed' : 'failed') : 'not_physical',
-      fallback: { codecId: 'quiet', state: 'activated', reasonCode: 'cyrinx_cold_acquisition_failed' },
+      fallback: options.fallback ?? { codecId: 'quiet', state: 'activated', reasonCode: 'cyrinx_cold_a_to_b_failed' },
     },
     runner: { machineId: hostName, role, reportTarget: `${hostName}.json`, evidenceClass, tunEvidence: exactTun() },
   };
@@ -151,6 +154,52 @@ describe('canonical qualification reports', () => {
     expect(mergeSelection(['host-a', 'host-b'], report('host-a', 'A', { codec: spoof }), report('host-b', 'B', { codec: spoof }))).toMatchObject({ decision: 'unqualified', reasonCodes: expect.arrayContaining(['unsupported_codec']) });
     const unknownQuiet = { ...QUIET_CODEC, profile: 'audible-7k-channel-0-ish' };
     expect(mergeSelection(['host-a', 'host-b'], report('host-a', 'A', { codec: unknownQuiet }), report('host-b', 'B', { codec: unknownQuiet }))).toMatchObject({ decision: 'unqualified', reasonCodes: expect.arrayContaining(['unsupported_codec']) });
+  });
+
+  it('enforces exact integral deadline/fallback evidence with reason-specific timing', () => {
+    const fractional = report('host-a', 'A');
+    fractional.qualification!.deadline.elapsedMs = 1.5;
+    expect(() => validateMachineReport(fractional)).toThrow('qualification_deadline_invalid');
+
+    const partialNull = report('host-a', 'A');
+    partialNull.qualification!.deadline = { startedAtMs: null, deadlineAtMs: null, elapsedMs: 0 };
+    expect(() => validateMachineReport(partialNull)).toThrow('qualification_deadline_invalid');
+
+    const extraFallback = report('host-a', 'A');
+    (extraFallback.qualification!.fallback as unknown as Record<string, unknown>).browserReason = 'spoof';
+    expect(() => validateMachineReport(extraFallback)).toThrow('fallback_state_invalid');
+
+    const lateNonDeadline = report('host-a', 'A');
+    lateNonDeadline.qualification!.deadline.elapsedMs = CYRINX_DEADLINE_MS;
+    expect(() => validateMachineReport(lateNonDeadline)).toThrow('fallback_timing_invalid');
+
+    const expiry = report('host-a', 'A', {
+      fallback: { codecId: 'quiet', state: 'activated', reasonCode: 'cyrinx_deadline_expired' },
+      deadline: { startedAtMs: 1_000, deadlineAtMs: 1_000 + CYRINX_DEADLINE_MS, elapsedMs: CYRINX_DEADLINE_MS },
+    });
+    expect(validateMachineReport(expiry)).toEqual(expiry);
+  });
+
+  it('selects Cyrinx only with pre-deadline available fallback and rejects failed/activated loopholes', () => {
+    const available = { codecId: 'quiet' as const, state: 'available' as const, reasonCode: null };
+    const cyrinxA = report('host-a', 'A', { codec: { ...CYRINX_CODEC }, fallback: available });
+    const cyrinxB = report('host-b', 'B', { codec: { ...CYRINX_CODEC }, fallback: available });
+    for (const result of [...cyrinxA.results, ...cyrinxB.results]) result.coldAcquired = false;
+    expect(mergeSelection(['host-a', 'host-b'], cyrinxA, cyrinxB)).toMatchObject({ decision: 'cyrinx', reasonCodes: [] });
+
+    const activated = report('host-a', 'A', { codec: { ...CYRINX_CODEC } });
+    expect(mergeSelection(['host-a', 'host-b'], activated, cyrinxB)).toMatchObject({
+      decision: 'unqualified',
+      reasonCodes: expect.arrayContaining(['unexpected_fallback_activation']),
+    });
+
+    const failedQuiet = report('host-a', 'A', {
+      fallback: { codecId: 'quiet', state: 'failed', reasonCode: 'cyrinx_cold_a_to_b_failed' },
+    });
+    expect(mergeSelection(['host-a', 'host-b'], failedQuiet, report('host-b', 'B'))).toMatchObject({
+      decision: 'unqualified',
+      reasonCodes: expect.arrayContaining(['quiet_fallback_failed']),
+    });
   });
 
   it('reserves human-needed for absent/manual or explicitly nonphysical evidence', () => {
