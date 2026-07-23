@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { mergeSelection, readMachineReport, validateMachineReport, writeMachineReport, type MachineReport } from '../src/report.js';
+import { mergeSelection, readMachineReport, validateMachineReport, validateTunEvidence, writeMachineReport, type MachineReport } from '../src/report.js';
 
 function report(hostName = 'alpha', evidenceClass: MachineReport['evidenceClass'] = 'Open air'): MachineReport {
   return {
@@ -21,6 +21,20 @@ function report(hostName = 'alpha', evidenceClass: MachineReport['evidenceClass'
 }
 
 describe('canonical qualification reports', () => {
+  it('validates a fixed-shape TunEvidence contract without accepting unknown authority or check keys', () => {
+    const evidence = {
+      schemaVersion: 1 as const, source: 'static' as const, status: 'passed' as const,
+      image: 'alpine:3.21.3@sha256:a8560b36e8b8210634f77d9f7f9efd7ffa463e380b75e2e74aff4511df3ef88c',
+      interfaceName: 'fips-preflight0', ipv6Address: 'fd42:6677:6677::1/64',
+      authorities: { devices: ['/dev/net/tun'], capabilities: ['NET_ADMIN'], securityOptions: ['no-new-privileges:true'], privileged: false, networkMode: 'none', publishedPorts: [] },
+      checks: { imagePinned: 'passed', tunDevice: 'passed', netAdmin: 'passed', noNewPrivileges: 'passed', notPrivileged: 'passed', sysAdminAbsent: 'passed', hostNetworkAbsent: 'passed', loopbackPortsOnly: 'passed', interfaceCreated: 'not_run', ipv6Assigned: 'not_run', cleanupComplete: 'not_run' },
+      errors: [],
+    };
+    expect(validateTunEvidence(evidence)).toEqual(evidence);
+    expect(() => validateTunEvidence({ ...evidence, authorities: { ...evidence.authorities, capabilities: ['NET_ADMIN', 'SYS_ADMIN'] } })).toThrow('capabilities');
+    expect(() => validateTunEvidence({ ...evidence, checks: { ...evidence.checks, surprise: 'passed' } })).toThrow('checks');
+  });
+
   it('persists validated reports atomically', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'fipwave-report-'));
     const reportPath = path.join(directory, 'alpha.json');
