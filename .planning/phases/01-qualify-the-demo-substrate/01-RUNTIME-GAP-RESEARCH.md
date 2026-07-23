@@ -93,7 +93,7 @@ fetch the classic-script assets by exact URL and verify SHA-256 before use.
 | Quiet `LICENSE` | `135138cd4304aa637836758dc5edfb5f21b7d09ecc637d25288d206b151a5768` |
 | Quiet `LICENSE-3RD-PARTY` | `ff4e4efcbcddde5cbc1aaf2b69ee40fceaeabdc715cba84cfcb47693ed884bbe` |
 | libfec 1.0 `libfec.js` | `a6a437efb5b13755cd4e27420e3d21383427bd3c7406137664f9f6e321303ffe` |
-| libfec LGPL notice | `0b62e767be034b3fe9c6baea15592459ca7fa9fcf060e48b80a3b0b361b8288b` |
+| libfec LGPL notice (`lesser.txt` at commit `9750ca0a6d0a786b506e44692776b541f90daa91`) | `0b62e767be034b3fe9c6baea15592459ca7fa9fcf060e48b80a3b0b361b8288b` |
 
 Use stock profile `audible-7k-channel-0` with `clampFrame: true`.
 
