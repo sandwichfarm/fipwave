@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: Qualify the Demo Substrate
 status: executing
-stopped_at: Completed 01-03-PLAN.md
-last_updated: "2026-07-23T15:12:55.851Z"
+stopped_at: Completed 01-04-PLAN.md
+last_updated: "2026-07-23T15:19:12.767Z"
 last_activity: 2026-07-23
 last_activity_desc: Phase 01 execution started
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 7
-  completed_plans: 3
+  completed_plans: 4
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-23)
 ## Current Position
 
 Phase: 01 (Qualify the Demo Substrate) — EXECUTING
-Plan: 4 of 7
+Plan: 5 of 7
 Status: Ready to execute
 Last activity: 2026-07-23 — Phase 01 execution started
 
-Progress: [████░░░░░░] 43%
+Progress: [██████░░░░] 57%
 
 ## Performance Metrics
 
@@ -60,6 +60,7 @@ Progress: [████░░░░░░] 43%
 | Phase 01-qualify-the-demo-substrate P01 | 4min | 1 tasks | 4 files |
 | Phase 01-qualify-the-demo-substrate P02 | 6min | 2 tasks | 11 files |
 | Phase 01-qualify-the-demo-substrate P03 | 14min | 2 tasks | 10 files |
+| Phase 01-qualify-the-demo-substrate P04 | 4min | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -76,6 +77,7 @@ Recent decisions affecting current work:
 - [Phase ?]: Future Wave 0 commands terminate as argument-safe seams until their owning plans implement them.
 - [Phase ?]: Browser audio readiness is derived from applied settings and live context/worklet evidence; unknown values fail closed.
 - [Phase ?]: Browser audio reset increments an epoch and rejects stale media, worklet, and PCM playback completion.
+- [Phase ?]: FWAV v1 evidence is codec-neutral and only two exact named Open air reports can select a profile.
 
 ### Pending Todos
 
@@ -94,6 +96,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-23T15:12:55.846Z
-Stopped at: Completed 01-03-PLAN.md
+Last session: 2026-07-23T15:19:12.761Z
+Stopped at: Completed 01-04-PLAN.md
 Resume file: None
