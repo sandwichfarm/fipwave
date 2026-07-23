@@ -75,7 +75,13 @@ status: complete
 
 ## Known Stubs
 
-None. A physical acoustic pass is intentionally not modelled as a fixture or inferred from the deterministic runner.
+The runner currently stamps accepted qualification-result frames in bridge
+memory but does not yet persist a complete `MachineReport` from the browser's
+measured Quiet receiver evidence. The named CLI and its canonical report
+validation are complete and tested, but an exact-laptop run needs this small
+runner-persistence follow-up before it can emit the two input files itself.
+A physical acoustic pass is intentionally not modelled as a fixture or inferred
+from the deterministic runner.
 
 ## User Setup Required
 
