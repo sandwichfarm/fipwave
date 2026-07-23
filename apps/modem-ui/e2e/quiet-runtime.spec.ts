@@ -1,24 +1,43 @@
 import { expect, test } from '@playwright/test';
-import { readFile } from 'node:fs/promises';
 
 const origin = 'http://127.0.0.1:4173';
 
-test('production Quiet page receives immutable runner identity and only loads the fixed audible profile assets', async ({ page }) => {
-  const requests: string[] = [];
-  page.on('request', (request) => requests.push(request.url()));
+test('production Quiet route performs verified RESET, arm, teardown, and re-arm without claiming acoustic success', async ({ page }) => {
+  const assets = new Map<string, number>();
+  page.on('response', (response) => {
+    if (response.url().includes('/codec-assets/')) assets.set(new URL(response.url()).pathname, response.status());
+  });
   await page.goto(`${origin}/`);
   await expect(page.getByText('Machine: playwright · Role: A · Evidence: Loopback')).toBeVisible();
   await expect(page.getByText('Report target: .artifacts/qualification/playwright.json')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Arm modem' })).toBeEnabled();
-  expect(requests).toContain(`${origin}/qualification-config`);
   expect(await page.locator('select').count()).toBe(0);
   await expect(page.getByText('audible-7k-channel-0')).toHaveCount(0);
-  await page.evaluate(async () => {
-    await new Promise<void>((resolve, reject) => {
-      const socket = new WebSocket(`ws://${location.host}/bridge`); socket.binaryType = 'arraybuffer';
-      socket.onopen = () => { const payload = new TextEncoder().encode(JSON.stringify({ browserVersion: navigator.userAgent, contextSampleRate: 48_000, captureSampleRate: 48_000, channels: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false })); const frame = new ArrayBuffer(32 + payload.byteLength); const view = new DataView(frame); [0x46, 0x57, 0x41, 0x56].forEach((byte, index) => view.setUint8(index, byte)); view.setUint8(4, 1); view.setUint8(5, 2); view.setUint32(8, payload.byteLength, true); view.setUint32(12, 1, true); new Uint8Array(frame, 32).set(payload); socket.send(frame); };
-      socket.onmessage = () => { socket.close(); resolve(); }; socket.onerror = () => reject(new Error('production bridge did not persist diagnostic audio evidence'));
-    });
-  });
-  await expect.poll(async () => JSON.parse(await readFile('.artifacts/qualification/loopback-qualification.json', 'utf8')).reportPath).toContain('loopback-qualification.json');
+
+  await page.getByRole('button', { name: 'Arm modem' }).click();
+  await expect(page.getByText('Audio preflight passed on this laptop.')).toBeVisible();
+  await expect(page.getByText('Bridge delivery: Audio settings accepted for epoch 1')).toBeVisible();
+  await expect(page.getByRole('cell', { name: '48000', exact: true })).toHaveCount(2);
+  await expect(page.getByRole('cell', { name: '1', exact: true })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Start Cyrinx qualification' }).click();
+  await expect(page.getByText('Quiet armed · audible-7k-channel-0 · epoch 2')).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText('Bridge delivery: Quiet audio settings accepted for epoch 2')).toBeVisible();
+  expect(assets).toMatchObject(new Map([
+    ['/codec-assets/quiet.js', 200],
+    ['/codec-assets/libfec.js', 200],
+    ['/codec-assets/quiet-emscripten.js', 200],
+    ['/codec-assets/quiet-profiles.json', 200],
+  ]));
+  await expect(page.getByText('Passed independent receiver evidence')).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Reset / re-arm' }).click();
+  await expect(page.getByText('Audio preflight passed on this laptop.')).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText('Bridge delivery: Audio settings accepted for epoch 3')).toBeVisible();
+  await expect(page.getByText(/Local epoch: 3/)).toBeVisible();
+
+  await page.getByRole('button', { name: 'Start Cyrinx qualification' }).click();
+  await expect(page.getByText('Quiet armed · audible-7k-channel-0 · epoch 4')).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText('Bridge delivery: Quiet audio settings accepted for epoch 4')).toBeVisible();
+  await expect(page.getByText('Passed independent receiver evidence')).toHaveCount(0);
 });
