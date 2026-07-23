@@ -32,6 +32,9 @@ peer link whose only connection to the isolated node is sound.
 - [ ] Encode complete FIPS transport packets into acoustic frames and decode
       them on the peer, including any link-local fragmentation and reassembly
       needed beneath FIPS.
+- [ ] Keep the FIPS-facing modem boundary codec-neutral and select the physical
+      codec through a strict 90-minute two-laptop Cyrinx gate with an immediate
+      browser-ready fallback.
 - [ ] Carry traffic bidirectionally over microphones and speakers so FIPS
       handshake, heartbeat, peering, and reply traffic all work.
 - [ ] Bridge each Dockerized FIPS daemon to a browser that exclusively owns
@@ -84,8 +87,14 @@ peer link whose only connection to the isolated node is sound.
   69-byte handshake frames. Acoustic encoding research must balance the
   reported MTU, packet duration, error rate, and demo-room noise.
 - The bridge between browser and container is not yet selected. It must carry
-  binary packets bidirectionally with low implementation overhead; a local
-  WebSocket is the leading candidate, subject to research.
+  binary data bidirectionally with low implementation overhead; a local
+  WebSocket is the leading candidate. The selected codec may run in the
+  browser, or the browser may stream PCM to a container-side codec worker.
+- `ggwave` is too slow to be the default FIPS codec at its documented
+  8–16 bytes/second. Cyrinx 2 is the primary time-boxed spike because its
+  measured wideband PHY operates in the tens-of-kilobits-per-second range, but
+  its batch decoder and lack of browser/laptop-to-laptop qualification prevent
+  committing to it without an empirical gate.
 - Likely hardware is two MacBooks or one MacBook and one Linux laptop. Docker
   and a Chromium-class browser should be the only platform-specific runtime
   assumptions.
@@ -108,6 +117,9 @@ peer link whose only connection to the isolated node is sound.
 - **Protocol**: FIPS must receive complete transport packets; any acoustic
   fragmentation, sequencing, checksums, retransmission, or reassembly belongs
   below its transport interface.
+- **MTU**: The sound transport should expose at least 1357 bytes so FIPS can
+  provide a 1280-byte effective IPv6 MTU after its 77-byte overhead; codec
+  blocks may be smaller and reassembled below FIPS.
 - **Scope**: Duplex peering, heartbeat, and ping are mandatory; visualization,
   multiplexing, ultrasonic mode, and stronger interference resistance are
   subordinate stretch goals.
@@ -123,6 +135,9 @@ peer link whose only connection to the isolated node is sound.
 | Use audible signalling by default | The recognizable modem sound is central to the memeable demo experience | — Pending |
 | Treat near-ultrasonic signalling as opportunistic | It is useful but cannot threaten the one-day core deliverable | — Pending |
 | Fragment only beneath the FIPS transport boundary if needed | FIPS itself does not fragment; acoustic frames need manageable on-air duration and recovery | — Pending |
+| Keep the modem bridge codec-neutral | The one-day implementation must be able to replace a failed PHY spike without rewriting the FIPS fork | — Pending |
+| Gate Cyrinx for 90 minutes before selection | Its measured throughput fits FIPS, but its live browser and two-laptop path is not yet qualified | — Pending |
+| Advertise a minimum 1357-byte sound MTU | FIPS subtracts 77 bytes from its transport MTU and IPv6 requires an effective 1280-byte path | — Pending |
 
 ## Evolution
 
@@ -142,4 +157,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-23 after initialization*
+*Last updated: 2026-07-23 after high-throughput codec decision*
