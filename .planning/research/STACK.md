@@ -4,6 +4,12 @@
 **Researched:** 2026-07-23
 **Confidence:** MEDIUM
 
+> **Superseding note:** The `ggwave`-first recommendation below was reassessed
+> after evaluating Cyrinx and Hush. See
+> [HIGH_THROUGHPUT_CODECS.md](./HIGH_THROUGHPUT_CODECS.md). The current
+> recommendation is a codec-neutral bridge with a 90-minute Cyrinx 2 physical
+> spike; `ggwave` is retained only as a diagnostic/bootstrap fallback.
+
 ## Recommended Stack
 
 ### Core Technologies

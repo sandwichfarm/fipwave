@@ -5,6 +5,30 @@
 **Researched:** 2026-07-23
 **Confidence:** MEDIUM
 
+## Throughput Reassessment
+
+The original `ggwave`-first codec recommendation is superseded by
+[HIGH_THROUGHPUT_CODECS.md](./HIGH_THROUGHPUT_CODECS.md).
+
+- There is no FIPS-level downside to a higher-throughput acoustic PHY; it is
+  preferable because it reduces handshake, heartbeat, queue, and ping risk.
+- Keep the FIPS transport/bridge codec-neutral.
+- Run a strict 90-minute Cyrinx 2 spike using its portable C batch codec in the
+  container and a browser PCM capture/playback bridge. Cyrinx has measured
+  36–66 kbps-class results, but not a shipped browser/streaming or
+  laptop-to-laptop transport, so it must earn selection on the exact hardware.
+- Do not select Hush by headline rate. Its MFSK modes remain slow and its fast
+  OFDM path is tested only in noiseless loopback and lacks key real-channel
+  correction mechanisms.
+- Retain `ggwave` as a browser-path diagnostic/bootstrap fallback, not the
+  primary FIPS codec.
+- Advertise at least a 1357-byte FIPS transport MTU to yield a 1280-byte
+  effective IPv6 MTU; fragment only below FIPS. The earlier 256-byte advertised
+  MTU proposal is withdrawn.
+
+All roadmap and requirements work after this point should follow this
+reassessment when it conflicts with the original sections below.
+
 ## Executive Summary
 
 FIPS over Sound is a one-day systems-integration proof: two ordinary laptops
