@@ -121,7 +121,16 @@ function contentType(file: string): string {
   return 'application/octet-stream';
 }
 function immutableConfig(config: RunnerQualificationConfig): RunnerQualificationConfig {
-  return Object.freeze({ ...config, codec: Object.freeze({ ...config.codec }), qualification: Object.freeze({ ...config.qualification, deadline: Object.freeze({ ...config.qualification.deadline }), fallback: Object.freeze({ ...config.qualification.fallback }) }) });
+  return Object.freeze({
+    ...config,
+    codec: Object.freeze({ ...config.codec }),
+    qualification: Object.freeze({
+      ...config.qualification,
+      deadline: Object.freeze({ ...config.qualification.deadline }),
+      fallback: Object.freeze({ ...config.qualification.fallback }),
+      cyrinx: Object.freeze({ ...config.qualification.cyrinx }),
+    }),
+  });
 }
 function sha256(body: Buffer): string { return createHash('sha256').update(body).digest('hex'); }
 function hasForbiddenAuthority(value: unknown): boolean {
@@ -222,6 +231,11 @@ export async function readQualificationReport(reportPath: string): Promise<Quali
 function closeServer(server: Server, webSocketServer: WebSocketServer): Promise<void> { return new Promise((resolve, reject) => webSocketServer.close((webSocketError) => webSocketError ? reject(webSocketError) : server.close((serverError) => serverError ? reject(serverError) : resolve()))); }
 interface QueueEntry { frame: FwavFrame; enqueuedAt: number; }
 interface Queue { frames: QueueEntry[]; bytes: number; overflowed: boolean; }
+interface BrowserConnectionState {
+  mustResetBeforeUse: boolean;
+  errorOrigins: Map<bigint, 'cyrinx' | 'quiet' | 'other'>;
+  preemptedControls: Set<bigint>;
+}
 function queueName(type: MessageType): string { return MessageType[type]; }
 function acoustic(type: MessageType): boolean { return type === MessageType.PCM_CAPTURE || type === MessageType.PCM_PLAYBACK; }
 function p95(values: number[]): number {
@@ -282,7 +296,8 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   const state: BridgeState = { epoch: 1, rejectedFrames: 0, overflowedQueues: [], discontinuities: 0, queueCounts: {}, stampedResults: [] };
   let audio: BrowserAudio | undefined; let generation = 1; let writeTail: Promise<unknown> = Promise.resolve();
   let results = new Map<string, BrowserResult>(); let failureReasons = new Set<string>();
-  let owner: WebSocket | undefined; let epochClaimed = false; let reconnectAllowed = false;
+  let owner: WebSocket | undefined; let epochClaimed = false; let reconnectAllowed = false; let reconnectRequiresReset = false;
+  let operationGeneration = 1; let settleAbort: AbortController | undefined; let shuttingDown = false;
   let cyrinxExpiryTimer: unknown;
   for (const type of [MessageType.PCM_CAPTURE, MessageType.PCM_PLAYBACK, MessageType.QUALIFICATION_CASE, MessageType.QUALIFICATION_RESULT, MessageType.ERROR, MessageType.RESET]) queues.set(type, { frames: [], bytes: 0, overflowed: false });
   const refreshState = () => { for (const [type, queue] of queues) state.queueCounts[queueName(type)] = queue.frames.length; };
@@ -310,9 +325,38 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     if (cyrinxExpiryTimer !== undefined) timer.clear(cyrinxExpiryTimer);
     cyrinxExpiryTimer = undefined;
   }
+  const abortCyrinxOperation = (): void => {
+    operationGeneration += 1;
+    settleAbort?.abort();
+    settleAbort = undefined;
+    options.cyrinxWorker?.reset();
+  };
+  const waitForCyrinxSettle = async (delayMs: number): Promise<boolean> => {
+    if (delayMs <= 0) return true;
+    const controller = new AbortController();
+    settleAbort?.abort();
+    settleAbort = controller;
+    const aborted = new Promise<false>((resolve) => {
+      controller.signal.addEventListener('abort', () => resolve(false), { once: true });
+    });
+    const settleWork = options.cyrinxSettle
+      ? options.cyrinxSettle(delayMs)
+      : new Promise<void>((resolve) => {
+          const handle = setTimeout(resolve, delayMs);
+          controller.signal.addEventListener('abort', () => clearTimeout(handle), { once: true });
+        });
+    const settled = settleWork
+      .then(() => true as const);
+    try {
+      return await Promise.race([settled, aborted]);
+    } finally {
+      if (settleAbort === controller) settleAbort = undefined;
+    }
+  };
   const settleExpiry = (): boolean => {
     if (!cyrinxSession || !cyrinxSession.expire(clock())) return false;
-    options.cyrinxWorker?.reset();
+    generation += 1;
+    abortCyrinxOperation();
     clearCyrinxTimer();
     failureReasons.add('cyrinx_deadline_expired');
     return true;
@@ -354,6 +398,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
         deadline: { ...snapshot.deadline },
         physicalGate: config.evidenceClass === 'Open air' ? 'pending' : 'not_physical',
         fallback: { ...snapshot.fallback },
+        cyrinx: { stage: snapshot.stage, coldReceivePassed: Boolean(cyrinxSession?.coldReceivePassed) },
       },
       snapshot,
     };
@@ -374,9 +419,10 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     const audioPassed = Boolean(audio?.microphoneLabel && audio.contextState === 'running' && (audio.inputDeviceSampleRate === 44_100 || audio.inputDeviceSampleRate === 48_000) && (audio.inputDeviceChannels === 1 || audio.inputDeviceChannels === 2) && audio.contextSampleRate === 48_000 && audio.captureSampleRate === 48_000 && audio.channels === 1 && !audio.echoCancellation && !audio.noiseSuppression && !audio.autoGainControl);
     if (!audioPassed) reasons.add('audio_preflight_failed');
     if (good.filter((value) => value.size === 256).length < 19 || good.filter((value) => value.size === 1536).length < 5) reasons.add('corpus_incomplete');
+    const canonicalColdCase = expectedCorpus[0];
     const coldReceivePassed = authority.snapshot?.codec === 'cyrinx'
       ? Boolean(cyrinxSession?.coldReceivePassed)
-      : good.some((value) => value.coldAcquired);
+      : Boolean(canonicalColdCase && good.some((value) => value.caseId === canonicalColdCase.id && value.coldAcquired));
     if (good.length > 0 && !coldReceivePassed) reasons.add('cold_acquisition_failed');
     if (good.length > 0 && p95(good.map((value) => value.airtimeMs)) >= QUALIFICATION_DEAD_LINK_TIMEOUT_MS / 3) reasons.add('airtime_budget_exceeded');
     if (queuesEvidence.captureHighWaterBytes > MAX_QUEUE_BYTES || queuesEvidence.playbackHighWaterBytes > MAX_QUEUE_BYTES || queuesEvidence.captureHighWaterMs > MAX_QUEUE_DURATION_MS || queuesEvidence.playbackHighWaterMs > MAX_QUEUE_DURATION_MS) reasons.add('queue_bound_exceeded');
@@ -459,10 +505,11 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       },
     };
   };
-  const persist = (expectedGeneration = generation): Promise<string | undefined> => {
+  const persist = (expectedGeneration?: number): Promise<string | undefined> => {
     const snapshot = buildReport(); if (!snapshot || !config) return Promise.resolve(undefined);
+    const reportGeneration = expectedGeneration ?? generation;
     const writer = options.reportWriter ?? writeMachineReport;
-    const task = writeTail.then(async () => expectedGeneration === generation ? writer(config.reportTarget, snapshot) : undefined);
+    const task = writeTail.then(async () => reportGeneration === generation ? writer(config.reportTarget, snapshot) : undefined);
     writeTail = task.catch(() => undefined); return task;
   };
   const broadcastJson = (value: unknown): void => {
@@ -473,12 +520,12 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     const snapshot = sessionSnapshot();
     if (snapshot) broadcastJson(snapshot);
   };
-  const activateCurrentFallback = async (): Promise<boolean> => {
+  const activateCurrentFallback = async (alreadyPreempted = false): Promise<boolean> => {
     if (!cyrinxSession || cyrinxSession.codec !== 'cyrinx') return false;
     const changed = cyrinxSession.failCurrent(clock());
     if (!changed) return false;
     generation += 1;
-    options.cyrinxWorker?.reset();
+    if (!alreadyPreempted) abortCyrinxOperation();
     clearCyrinxTimer();
     if (cyrinxSession.fallbackReason) failureReasons.add(cyrinxSession.fallbackReason);
     await persist(generation);
@@ -487,7 +534,17 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   };
   const expireCyrinx = async (): Promise<boolean> => {
     if (!settleExpiry()) return false;
-    await persist();
+    await persist(generation);
+    broadcastSession();
+    return true;
+  };
+  const forceExpireCyrinx = async (): Promise<boolean> => {
+    if (!cyrinxSession || !cyrinxSession.forceDeadlineExpiry(clock())) return false;
+    generation += 1;
+    abortCyrinxOperation();
+    clearCyrinxTimer();
+    failureReasons.add('cyrinx_deadline_expired');
+    await persist(generation);
     broadcastSession();
     return true;
   };
@@ -501,13 +558,14 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       deadlineAtMs: snapshot.deadline.deadlineAtMs,
     };
   };
-  const reset = async (): Promise<number> => {
+  const reset = async (alreadyPreempted = false): Promise<number> => {
+    if (state.epoch >= 0xffff_ffff) fail('epoch_exhausted');
     if (cyrinxSession?.operatorReset(clock()) && cyrinxSession.fallbackReason) {
       failureReasons.add(cyrinxSession.fallbackReason);
     }
     clearCyrinxTimer();
-    options.cyrinxWorker?.reset();
-    generation += 1; state.epoch += 1; audio = undefined; results = new Map(); failureReasons = new Set(cyrinxSession?.fallbackReason ? [cyrinxSession.fallbackReason] : []); state.stampedResults = []; state.overflowedQueues = []; state.discontinuities = 0; clearQueues(); reconnectAllowed = true;
+    if (!alreadyPreempted) abortCyrinxOperation();
+    generation += 1; state.epoch += 1; audio = undefined; results = new Map(); failureReasons = new Set(cyrinxSession?.fallbackReason ? [cyrinxSession.fallbackReason] : []); state.stampedResults = []; state.overflowedQueues = []; state.discontinuities = 0; clearQueues(); reconnectAllowed = true; reconnectRequiresReset = false;
     await persist(generation);
     const resetFrame = encodeFrame({ type: MessageType.RESET, epoch: state.epoch, sequence: 0n, payload: Buffer.alloc(0) });
     for (const client of clients) if (client.readyState === client.OPEN) client.send(resetFrame);
@@ -520,7 +578,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       await expireCyrinx();
       return cyrinxSummary();
     }
-    cyrinxExpiryTimer = timer.set(() => { void expireCyrinx(); }, CYRINX_DEADLINE_MS);
+    cyrinxExpiryTimer = timer.set(() => { void forceExpireCyrinx().catch(() => undefined); }, CYRINX_DEADLINE_MS);
     await persist();
     broadcastSession();
     try {
@@ -561,9 +619,12 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     const request = instructionRequest(payload, 'accept_cyrinx_instruction');
     const accepted = cyrinxSession.acceptInstruction(request.caseId, request.direction, clock());
     const acceptedGeneration = generation;
+    const acceptedOperation = operationGeneration;
     try {
       const playback = await options.cyrinxWorker.begin(accepted.value, state.epoch, accepted.mode);
-      if (acceptedGeneration !== generation || cyrinxSession.codec !== 'cyrinx' || await expireCyrinx()) return;
+      if (acceptedGeneration !== generation || acceptedOperation !== operationGeneration || cyrinxSession.codec !== 'cyrinx') return;
+      if (await expireCyrinx()) return;
+      if (acceptedGeneration !== generation || acceptedOperation !== operationGeneration || cyrinxSession.codec !== 'cyrinx') return;
       if (accepted.mode === 'transmit') {
         if (!playback) throw new Error('cyrinx_transmit_playback_missing');
         forwardPlayback(playback);
@@ -571,7 +632,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
         throw new Error('cyrinx_listener_created_playback');
       }
     } catch {
-      if (acceptedGeneration === generation) await activateCurrentFallback();
+      if (acceptedGeneration === generation && acceptedOperation === operationGeneration && cyrinxSession.codec === 'cyrinx') await activateCurrentFallback();
     }
   };
   const completeCyrinxPlayback = async (payload: Record<string, unknown>): Promise<void> => {
@@ -580,29 +641,37 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     const current = cyrinxSession.currentCase();
     if (!current || current.id !== request.caseId || current.direction !== request.direction) fail('qualification_instruction_mismatch');
     const acceptedGeneration = generation;
-    const remaining = cyrinxSession.transmitSettleRemaining(clock());
-    if (remaining > 0) {
-      if (options.cyrinxSettle) await options.cyrinxSettle(remaining);
-      else await new Promise<void>((resolve) => setTimeout(resolve, remaining));
+    const acceptedOperation = operationGeneration;
+    try {
+      const remaining = cyrinxSession.caseSettleRemaining('transmit', clock());
+      if (!await waitForCyrinxSettle(remaining)) return;
+    } catch {
+      if (acceptedGeneration === generation && acceptedOperation === operationGeneration && cyrinxSession.codec === 'cyrinx') await activateCurrentFallback();
+      return;
     }
-    if (acceptedGeneration !== generation || cyrinxSession.codec !== 'cyrinx' || await expireCyrinx()) return;
+    if (acceptedGeneration !== generation || acceptedOperation !== operationGeneration || cyrinxSession.codec !== 'cyrinx') return;
+    if (await expireCyrinx()) return;
+    if (acceptedGeneration !== generation || acceptedOperation !== operationGeneration || cyrinxSession.codec !== 'cyrinx') return;
     cyrinxSession.completeAccepted('transmit', clock());
     if (cyrinxSession.terminal) clearCyrinxTimer();
     await persist(acceptedGeneration);
-    if (acceptedGeneration === generation) broadcastSession();
+    if (acceptedGeneration === generation && acceptedOperation === operationGeneration) broadcastSession();
   };
   const acceptCyrinxCapture = async (socket: WebSocket, encoded: Buffer): Promise<void> => {
     if (!cyrinxSession || cyrinxSession.codec !== 'cyrinx') return;
     if (await expireCyrinx() || !cyrinxSession.canReceiveCapture() || !options.cyrinxWorker) return;
     const acceptedGeneration = generation;
+    const acceptedOperation = operationGeneration;
     let nativeResult: CyrinxResult | undefined;
     try {
       nativeResult = await options.cyrinxWorker.receiveCapture(encoded);
     } catch {
-      if (acceptedGeneration === generation) await activateCurrentFallback();
+      if (acceptedGeneration === generation && acceptedOperation === operationGeneration && cyrinxSession.codec === 'cyrinx') await activateCurrentFallback();
       return;
     }
-    if (!nativeResult || acceptedGeneration !== generation || cyrinxSession.codec !== 'cyrinx' || await expireCyrinx()) return;
+    if (!nativeResult || acceptedGeneration !== generation || acceptedOperation !== operationGeneration || cyrinxSession.codec !== 'cyrinx') return;
+    if (await expireCyrinx()) return;
+    if (acceptedGeneration !== generation || acceptedOperation !== operationGeneration || cyrinxSession.codec !== 'cyrinx') return;
     const current = cyrinxSession.currentCase();
     if (
       !current
@@ -620,6 +689,16 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       await activateCurrentFallback();
       return;
     }
+    try {
+      const remaining = cyrinxSession.caseSettleRemaining('listen', clock());
+      if (!await waitForCyrinxSettle(remaining)) return;
+    } catch {
+      if (acceptedGeneration === generation && acceptedOperation === operationGeneration && cyrinxSession.codec === 'cyrinx') await activateCurrentFallback();
+      return;
+    }
+    if (acceptedGeneration !== generation || acceptedOperation !== operationGeneration || cyrinxSession.codec !== 'cyrinx') return;
+    if (await expireCyrinx()) return;
+    if (acceptedGeneration !== generation || acceptedOperation !== operationGeneration || cyrinxSession.codec !== 'cyrinx') return;
     if (!current.cold) {
       const committed = expectedById.get(current.id);
       if (!committed) {
@@ -654,20 +733,69 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     cyrinxSession.completeAccepted('listen', clock());
     if (cyrinxSession.terminal) clearCyrinxTimer();
     await persist(acceptedGeneration);
-    if (acceptedGeneration !== generation) return;
-    socket.send(JSON.stringify({ kind: 'cyrinx-result', epoch: state.epoch, caseId: current.id, direction: current.direction, accepted: true, cold }));
+    if (acceptedGeneration !== generation || acceptedOperation !== operationGeneration) return;
+    if (socket.readyState === socket.OPEN) socket.send(JSON.stringify({ kind: 'cyrinx-result', epoch: state.epoch, caseId: current.id, direction: current.direction, accepted: true, cold }));
     broadcastSession();
   };
-  const handleFrame = async (socket: WebSocket, rawData: RawData, isBinary: boolean, lastSequence: { value: bigint }): Promise<void> => {
+  const preemptUrgentControl = (
+    rawData: RawData,
+    isBinary: boolean,
+    lastSequence: { value: bigint },
+    connection: BrowserConnectionState,
+  ): void => {
+    if (!isBinary) return;
+    try {
+      const urgent = decodeFrame(asBuffer(rawData));
+      if (urgent.type !== MessageType.RESET && urgent.type !== MessageType.ERROR) return;
+      if (urgent.epoch !== state.epoch || urgent.sequence <= lastSequence.value) return;
+      if (urgent.type === MessageType.RESET) {
+        if (urgent.payload.length !== 0) return;
+        if (cyrinxSession?.codec === 'cyrinx') {
+          connection.preemptedControls.add(urgent.sequence);
+          abortCyrinxOperation();
+        }
+        return;
+      }
+      const payload = parseJsonPayload(urgent);
+      if (hasForbiddenAuthority(payload)) return;
+      const origin = cyrinxSession?.codec === 'cyrinx'
+        ? 'cyrinx'
+        : cyrinxSession?.codec === 'quiet'
+          ? 'quiet'
+          : 'other';
+      connection.errorOrigins.set(urgent.sequence, origin);
+      if (origin === 'cyrinx') {
+        connection.preemptedControls.add(urgent.sequence);
+        abortCyrinxOperation();
+      }
+    } catch {
+      // Unsafe or malformed urgent controls remain in the serialized path,
+      // where normal validation rejects them without interrupting native work.
+    }
+  };
+  const handleFrame = async (
+    socket: WebSocket,
+    rawData: RawData,
+    isBinary: boolean,
+    lastSequence: { value: bigint },
+    connection: BrowserConnectionState,
+  ): Promise<void> => {
     try {
       if (!isBinary) fail('binary_frames_required');
       const encoded = asBuffer(rawData);
       const frame = decodeFrame(encoded);
-      if (frame.type === MessageType.AUDIO_SETTINGS && lastSequence.value < 0n && state.epoch === 1) state.epoch = frame.epoch;
       if (frame.epoch !== state.epoch || frame.sequence <= lastSequence.value) fail('stale_or_duplicate_frame');
+      if (connection.mustResetBeforeUse && frame.type !== MessageType.RESET) fail('recovery_reset_required');
       lastSequence.value = frame.sequence;
       await expireCyrinx();
-      if (frame.type === MessageType.RESET) { await reset(); lastSequence.value = -1n; return; }
+      if (frame.type === MessageType.RESET) {
+        if (frame.payload.length !== 0) fail('reset_payload_not_empty');
+        const alreadyPreempted = connection.preemptedControls.delete(frame.sequence);
+        connection.mustResetBeforeUse = false;
+        await reset(alreadyPreempted);
+        lastSequence.value = -1n;
+        return;
+      }
       if (frame.type === MessageType.PCM_CAPTURE && cyrinxSession?.codec === 'cyrinx') {
         await acceptCyrinxCapture(socket, encoded);
         return;
@@ -683,14 +811,23 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
         if (frame.type === MessageType.QUALIFICATION_CASE && payload.action === 'playback_complete') {
           await completeCyrinxPlayback(payload); return;
         }
-        if (frame.type === MessageType.ERROR && cyrinxSession?.codec === 'cyrinx') {
-          await activateCurrentFallback(); return;
-        }
-        if (frame.type === MessageType.ERROR && cyrinxSession?.codec === 'quiet' && cyrinxSession.fallbackState === 'activated') {
-          cyrinxSession.markQuietFailed();
-          options.cyrinxWorker?.reset();
-          await persist();
-          broadcastSession();
+        if (frame.type === MessageType.ERROR) {
+          const origin = connection.errorOrigins.get(frame.sequence)
+            ?? (cyrinxSession?.codec === 'cyrinx' ? 'cyrinx' : cyrinxSession?.codec === 'quiet' ? 'quiet' : 'other');
+          connection.errorOrigins.delete(frame.sequence);
+          const alreadyPreempted = connection.preemptedControls.delete(frame.sequence);
+          if (origin === 'cyrinx') {
+            if (cyrinxSession?.codec === 'cyrinx') await activateCurrentFallback(alreadyPreempted);
+            return;
+          }
+          if (origin === 'quiet' && cyrinxSession?.codec === 'quiet' && cyrinxSession.fallbackState === 'activated') {
+            if (cyrinxSession.markQuietFailed()) {
+              generation += 1;
+              abortCyrinxOperation();
+              await persist(generation);
+              broadcastSession();
+            }
+          }
           return;
         }
         if (frame.type === MessageType.QUALIFICATION_RESULT && config) {
@@ -699,6 +836,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
           try {
             result = parseBrowserResult(payload, frame.epoch);
             if (!expectedById.has(result.caseId)) fail('unknown_case');
+            if (result.coldAcquired && (result.caseId !== expectedCorpus[0]?.id || results.size !== 0)) fail('quiet_cold_case_invalid');
           } catch (error) {
             failureReasons.add(error instanceof BridgeInputError ? error.reasonCode : 'qualification_result_invalid');
             await persist(); throw error;
@@ -745,6 +883,11 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   });
   webSocketServer.on('connection', (socket) => {
     if (owner?.readyState === socket.OPEN || epochClaimed && !reconnectAllowed) { state.rejectedFrames += 1; socket.close(1008, 'one browser tab owns each qualification epoch'); return; }
+    const connection: BrowserConnectionState = {
+      mustResetBeforeUse: epochClaimed && reconnectAllowed && reconnectRequiresReset,
+      errorOrigins: new Map(),
+      preemptedControls: new Set(),
+    };
     owner = socket; epochClaimed = true; reconnectAllowed = false; clients.add(socket);
     const lastSequence = { value: -1n }; let processing = Promise.resolve();
     void expireCyrinx().then((expired) => {
@@ -752,10 +895,43 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       const snapshot = sessionSnapshot();
       if (snapshot && socket.readyState === socket.OPEN) socket.send(JSON.stringify(snapshot));
     });
-    socket.once('close', () => { clients.delete(socket); if (owner === socket) owner = undefined; });
-    socket.on('message', (rawData, isBinary) => { processing = processing.then(() => handleFrame(socket, rawData, isBinary, lastSequence)); });
+    socket.once('close', () => {
+      clients.delete(socket);
+      if (owner !== socket) return;
+      owner = undefined;
+      if (shuttingDown) return;
+      if (connection.mustResetBeforeUse) {
+        reconnectAllowed = true;
+        reconnectRequiresReset = true;
+        return;
+      }
+      if (reconnectAllowed) return;
+      reconnectAllowed = true;
+      reconnectRequiresReset = true;
+      if (cyrinxSession?.codec === 'cyrinx') {
+        void activateCurrentFallback().catch(() => undefined);
+      }
+    });
+    socket.on('message', (rawData, isBinary) => {
+      preemptUrgentControl(rawData, isBinary, lastSequence, connection);
+      processing = processing.then(() => handleFrame(socket, rawData, isBinary, lastSequence, connection));
+    });
   });
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(options.port, LOOPBACK_HOST, () => { server.off('error', reject); resolve(); }); });
   const address = server.address(); if (!address || typeof address === 'string') { await closeServer(server, webSocketServer); fail('bridge did not bind a TCP loopback address'); }
-  return { port: address.port, sendPcmPlayback, startCyrinx, reset, close: async () => { clearCyrinxTimer(); options.cyrinxWorker?.reset(); for (const client of clients) client.terminate(); await writeTail; await closeServer(server, webSocketServer); }, state: () => ({ ...state, queueCounts: { ...state.queueCounts }, overflowedQueues: [...state.overflowedQueues], stampedResults: state.stampedResults.map((result) => ({ ...result })) }) };
+  return {
+    port: address.port,
+    sendPcmPlayback,
+    startCyrinx,
+    reset,
+    close: async () => {
+      shuttingDown = true;
+      clearCyrinxTimer();
+      abortCyrinxOperation();
+      for (const client of clients) client.terminate();
+      await writeTail;
+      await closeServer(server, webSocketServer);
+    },
+    state: () => ({ ...state, queueCounts: { ...state.queueCounts }, overflowedQueues: [...state.overflowedQueues], stampedResults: state.stampedResults.map((result) => ({ ...result })) }),
+  };
 }

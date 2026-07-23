@@ -25,12 +25,15 @@ function pcm(epoch: number, sequence: bigint): Buffer {
 function frame(type: MessageType, epoch: number, sequence: bigint, payload: object = {}): Buffer {
   return encodeFrame({ type, epoch, sequence, payload: Buffer.from(JSON.stringify(payload)) });
 }
+function resetFrame(epoch: number, sequence: bigint): Buffer {
+  return encodeFrame({ type: MessageType.RESET, epoch, sequence, payload: Buffer.alloc(0) });
+}
 function audioSettings(epoch: number, sequence: bigint): Buffer {
   return frame(MessageType.AUDIO_SETTINGS, epoch, sequence, { browserVersion: 'Chromium test', microphoneLabel: 'Test microphone', contextState: 'running', inputDeviceSampleRate: 44_100, inputDeviceChannels: 2, contextSampleRate: 48_000, captureSampleRate: 48_000, channels: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false });
 }
 function qualificationResult(epoch: number, sequence: bigint, caseId: string, overrides: Record<string, unknown> = {}): Buffer {
   const digest = manifest.cases.find((entry) => entry.id === caseId)?.sha256; if (!digest) throw new Error(`missing test corpus case ${caseId}`);
-  return frame(MessageType.QUALIFICATION_RESULT, epoch, sequence, { caseId, digest, acquisitionMs: 1, airtimeMs: 1, deliveryCount: 1, bytePerfect: true, coldAcquired: caseId.endsWith('-01'), complete: true, corrupt: false, missing: 0, duplicates: 0, queues: { captureHighWaterBytes: 1, captureHighWaterMs: 1, playbackHighWaterBytes: 1, playbackHighWaterMs: 1, discontinuities: 0 }, ...overrides });
+  return frame(MessageType.QUALIFICATION_RESULT, epoch, sequence, { caseId, digest, acquisitionMs: 1, airtimeMs: 1, deliveryCount: 1, bytePerfect: true, coldAcquired: caseId === 'a-to-b-256-01' || caseId === 'b-to-a-256-01', complete: true, corrupt: false, missing: 0, duplicates: 0, queues: { captureHighWaterBytes: 1, captureHighWaterMs: 1, playbackHighWaterBytes: 1, playbackHighWaterMs: 1, discontinuities: 0 }, ...overrides });
 }
 function qualifyingCases(direction: 'A → B' | 'B → A'): string[] {
   return manifest.cases.filter((entry) => entry.direction === direction && (entry.size === 1536 || Number(entry.id.slice(-2)) <= 19)).map((entry) => entry.id);
@@ -75,11 +78,11 @@ class SocketInbox {
     return queued ? Promise.resolve(queued) : new Promise((resolve) => this.binaryWaiters.push(resolve));
   }
 }
-async function openInbox(runner: ProductionRunner): Promise<SocketInbox> {
+async function openInbox(runner: ProductionRunner, expected: Record<string, unknown> = { codec: 'idle', stage: 'idle', instruction: null, terminal: false }): Promise<SocketInbox> {
   const socket = new WebSocket(`ws://127.0.0.1:${runner.port}/bridge`, { origin: `http://127.0.0.1:${runner.port}` });
   const inbox = new SocketInbox(socket);
   await new Promise<void>((resolve, reject) => { socket.once('open', resolve); socket.once('error', reject); });
-  expect(await inbox.text()).toMatchObject({ kind: 'cyrinx-session', codec: 'idle', stage: 'idle', instruction: null, terminal: false });
+  expect(await inbox.text()).toMatchObject({ kind: 'cyrinx-session', ...expected });
   return inbox;
 }
 
@@ -161,10 +164,23 @@ describe('production runner', () => {
     const socket = await openSocket(runner); const settingsAck = nextText(socket); socket.send(audioSettings(1, 0n)); await settingsAck;
     const caseId = 'a-to-b-256-01'; const corruptAck = nextText(socket);
     socket.send(qualificationResult(1, 1n, caseId, { digest: 'f'.repeat(64), bytePerfect: false, corrupt: true })); expect(await corruptAck).toEqual({ kind: 'qualification-result', caseId, epoch: 1, accepted: true });
-    socket.send(qualificationResult(1, 2n, caseId)); await new Promise((resolve) => socket.once('close', resolve));
+    socket.send(qualificationResult(1, 2n, caseId, { coldAcquired: false })); await new Promise((resolve) => socket.once('close', resolve));
     const report = JSON.parse(await readFile(target, 'utf8')) as MachineReport;
     expect(report.reasonCodes).toEqual(expect.arrayContaining(['bad_digest', 'duplicate_case']));
     expect(report.results.find((entry) => entry.caseId === caseId)).toMatchObject({ observed: true, duplicates: 1, deliveryCount: 2 });
+  });
+
+  it('rejects Quiet cold authority on a later or noncanonical receive result', async () => {
+    const target = await reportPath('quiet-cold-spoof');
+    const runner = await startProductionRunner({ machineId: 'laptop-b', role: 'B', port: 0, report: target, tunEvidence: 'none', uiDir: await fixtureUi() });
+    runners.push(runner);
+    const socket = await openSocket(runner);
+    const settings = nextText(socket); socket.send(audioSettings(1, 0n)); await settings;
+    socket.send(qualificationResult(1, 1n, 'a-to-b-256-02', { coldAcquired: true }));
+    await new Promise((resolve) => socket.once('close', resolve));
+    const report = JSON.parse(await readFile(target, 'utf8')) as MachineReport;
+    expect(report.reasonCodes).toContain('quiet_cold_case_invalid');
+    expect(report.results.every((entry) => entry.observed === false)).toBe(true);
   });
 
   it('serializes writes and leaves a new-epoch invalidating report after a reset races an older write', async () => {
@@ -185,7 +201,7 @@ describe('production runner', () => {
     const first = await openSocket(runner); const settingsAck = nextText(first); first.send(audioSettings(1, 0n)); await settingsAck;
     const second = await openSocket(runner, false); await new Promise((resolve) => second.once('close', resolve));
     first.close(); await new Promise((resolve) => first.once('close', resolve));
-    const premature = await openSocket(runner, false); await new Promise((resolve) => premature.once('close', resolve));
+    const premature = await openSocket(runner); premature.send(audioSettings(1, 0n)); await new Promise((resolve) => premature.once('close', resolve));
     await runner.reset();
     const afterReset = await openSocket(runner); expect(afterReset.readyState).toBe(WebSocket.OPEN); afterReset.close();
   });
@@ -261,7 +277,7 @@ describe('production runner', () => {
     }
 
     expect(acceptedCases).toBe(52);
-    expect(settleDelays).toHaveLength(26);
+    expect(settleDelays).toHaveLength(52);
     expect(settleDelays.every((delayMs) => delayMs === CYRINX_TRANSMIT_SETTLE_MS)).toBe(true);
     expect(CYRINX_TRANSMIT_SETTLE_MS).toBeGreaterThan(Math.ceil(131_072 / 48_000 * 1_000) + 1_300);
     expect(worker.begin.mock.calls.slice(0, 4).map((call) => [call[0].id, call[2]])).toEqual([
@@ -277,7 +293,7 @@ describe('production runner', () => {
       codec: { id: 'cyrinx', profile: 'bulk-qpsk-r1-2-48k-v1', advertisedMtu: 1536 },
       complete: true,
       qualification: {
-        deadline: { startedAtMs: 20_000, deadlineAtMs: 20_000 + CYRINX_DEADLINE_MS, elapsedMs: 2 + 26 * CYRINX_TRANSMIT_SETTLE_MS },
+        deadline: { startedAtMs: 20_000, deadlineAtMs: 20_000 + CYRINX_DEADLINE_MS, elapsedMs: 2 + 52 * CYRINX_TRANSMIT_SETTLE_MS },
         physicalGate: 'not_physical',
         fallback: { state: 'available', reasonCode: null },
       },
@@ -285,6 +301,55 @@ describe('production runner', () => {
     expect(report.results).toHaveLength(25);
     expect(report.results.every((entry) => entry.direction === 'B → A' && !entry.caseId.startsWith('cyrinx-cold-'))).toBe(true);
     inbox.socket.close();
+  });
+
+  it('holds both roles at the same case barrier before the cold direction change', async () => {
+    let nowA = 10_000;
+    let nowB = 10_000;
+    let releaseA!: () => void;
+    let releaseB!: () => void;
+    const settleA = vi.fn((delayMs: number) => new Promise<void>((resolve) => {
+      releaseA = () => { nowA += delayMs; resolve(); };
+    }));
+    const settleB = vi.fn((delayMs: number) => new Promise<void>((resolve) => {
+      releaseB = () => { nowB += delayMs; resolve(); };
+    }));
+    const workerA = fakeCyrinxWorker();
+    const workerB = fakeCyrinxWorker();
+    const runnerA = await startProductionRunner({
+      machineId: 'paired-a', role: 'A', port: 0, report: await reportPath('paired-a'), tunEvidence: 'none', uiDir: await fixtureUi(),
+      nowForTests: () => nowA, cyrinxBuildForTests: async () => undefined, cyrinxDigitalForTests: async () => undefined,
+      cyrinxWorkerForTests: workerA, cyrinxSettleForTests: settleA,
+    });
+    const runnerB = await startProductionRunner({
+      machineId: 'paired-b', role: 'B', port: 0, report: await reportPath('paired-b'), tunEvidence: 'none', uiDir: await fixtureUi(),
+      nowForTests: () => nowB, cyrinxBuildForTests: async () => undefined, cyrinxDigitalForTests: async () => undefined,
+      cyrinxWorkerForTests: workerB, cyrinxSettleForTests: settleB,
+    });
+    runners.push(runnerA, runnerB);
+    const inboxA = await openInbox(runnerA);
+    const inboxB = await openInbox(runnerB);
+    await Promise.all([runnerA.startCyrinx(), runnerB.startCyrinx()]);
+    for (let index = 0; index < 3; index += 1) { await inboxA.text(); await inboxB.text(); }
+
+    inboxA.socket.send(frame(MessageType.QUALIFICATION_CASE, 1, 0n, { action: 'accept_cyrinx_instruction', caseId: 'cyrinx-cold-a-to-b', direction: 'A → B' }));
+    await inboxA.binary();
+    inboxB.socket.send(frame(MessageType.QUALIFICATION_CASE, 1, 0n, { action: 'accept_cyrinx_instruction', caseId: 'cyrinx-cold-a-to-b', direction: 'A → B' }));
+    await vi.waitFor(() => expect(workerB.begin).toHaveBeenCalledOnce());
+    inboxB.socket.send(pcm(1, 1n));
+    await vi.waitFor(() => expect(settleB).toHaveBeenCalledWith(CYRINX_TRANSMIT_SETTLE_MS));
+    inboxA.socket.send(frame(MessageType.QUALIFICATION_CASE, 1, 1n, { action: 'playback_complete', caseId: 'cyrinx-cold-a-to-b', direction: 'A → B' }));
+    await vi.waitFor(() => expect(settleA).toHaveBeenCalledWith(CYRINX_TRANSMIT_SETTLE_MS));
+    expect(inboxA.texts).toEqual([]);
+    expect(inboxB.texts).toEqual([]);
+
+    releaseA();
+    releaseB();
+    expect(await inboxB.text()).toMatchObject({ kind: 'cyrinx-result', caseId: 'cyrinx-cold-a-to-b', accepted: true });
+    expect(await inboxA.text()).toMatchObject({ instruction: { action: 'listen', caseId: 'cyrinx-cold-b-to-a', direction: 'B → A' } });
+    expect(await inboxB.text()).toMatchObject({ instruction: { action: 'transmit', caseId: 'cyrinx-cold-b-to-a', direction: 'B → A' } });
+    inboxA.socket.close();
+    inboxB.socket.close();
   });
 
   it('expires without another browser frame, broadcasts immutable timeout fallback, and RESET cannot retry Cyrinx', async () => {
@@ -315,7 +380,9 @@ describe('production runner', () => {
     await inbox.text();
     expect(await inbox.text()).toMatchObject({ stage: 'cold-a-to-b' });
 
-    now += CYRINX_DEADLINE_MS;
+    // The monotonic timer remains authoritative even if the wall clock moves
+    // backward while the process is running.
+    now = 1;
     const timeoutSnapshot = inbox.text();
     expire();
     expect(await timeoutSnapshot).toMatchObject({
@@ -486,11 +553,261 @@ describe('production runner', () => {
     inbox.socket.close();
   });
 
+  it('preempts serialized native/settle work for current-epoch WS RESET and ERROR', async () => {
+    const resetWorker = fakeCyrinxWorker();
+    let releaseCapture: ((value: undefined) => void) | undefined;
+    resetWorker.receiveCapture.mockImplementationOnce(() => new Promise((resolve) => { releaseCapture = resolve; }));
+    resetWorker.reset.mockImplementation(() => { releaseCapture?.(undefined); });
+    const resetRunner = await startProductionRunner({
+      machineId: 'preempt-reset', role: 'B', port: 0, report: await reportPath('preempt-reset'), tunEvidence: 'none', uiDir: await fixtureUi(),
+      cyrinxBuildForTests: async () => undefined, cyrinxDigitalForTests: async () => undefined, cyrinxWorkerForTests: resetWorker,
+    });
+    runners.push(resetRunner);
+    const resetInbox = await openInbox(resetRunner);
+    await resetRunner.startCyrinx();
+    await resetInbox.text(); await resetInbox.text(); await resetInbox.text();
+    resetInbox.socket.send(frame(MessageType.QUALIFICATION_CASE, 1, 0n, { action: 'accept_cyrinx_instruction', caseId: 'cyrinx-cold-a-to-b', direction: 'A → B' }));
+    await vi.waitFor(() => expect(resetWorker.begin).toHaveBeenCalledOnce());
+    resetInbox.socket.send(pcm(1, 1n));
+    await vi.waitFor(() => expect(resetWorker.receiveCapture).toHaveBeenCalledOnce());
+    resetInbox.socket.send(resetFrame(1, 2n));
+    expect(decodeFrame(await resetInbox.binary())).toMatchObject({ type: MessageType.RESET, epoch: 2 });
+    expect(await resetInbox.text()).toMatchObject({ epoch: 2, codec: 'quiet', fallback: { reasonCode: 'cyrinx_cold_a_to_b_failed' } });
+
+    let settleStarted!: () => void;
+    const settling = new Promise<void>((resolve) => { settleStarted = resolve; });
+    const errorWorker = fakeCyrinxWorker();
+    const errorRunner = await startProductionRunner({
+      machineId: 'preempt-error', role: 'A', port: 0, report: await reportPath('preempt-error'), tunEvidence: 'none', uiDir: await fixtureUi(),
+      cyrinxBuildForTests: async () => undefined, cyrinxDigitalForTests: async () => undefined, cyrinxWorkerForTests: errorWorker,
+      cyrinxSettleForTests: () => { settleStarted(); return new Promise<void>(() => undefined); },
+    });
+    runners.push(errorRunner);
+    const errorInbox = await openInbox(errorRunner);
+    await errorRunner.startCyrinx();
+    await errorInbox.text(); await errorInbox.text(); await errorInbox.text();
+    errorInbox.socket.send(frame(MessageType.QUALIFICATION_CASE, 1, 0n, { action: 'accept_cyrinx_instruction', caseId: 'cyrinx-cold-a-to-b', direction: 'A → B' }));
+    await errorInbox.binary();
+    errorInbox.socket.send(frame(MessageType.QUALIFICATION_CASE, 1, 1n, { action: 'playback_complete', caseId: 'cyrinx-cold-a-to-b', direction: 'A → B' }));
+    await settling;
+    errorInbox.socket.send(frame(MessageType.ERROR, 1, 2n));
+    expect(await errorInbox.text()).toMatchObject({
+      codec: 'quiet',
+      fallback: { state: 'activated', reasonCode: 'cyrinx_cold_a_to_b_failed' },
+    });
+    const errorReport = JSON.parse(await readFile(errorRunner.config.reportTarget, 'utf8')) as MachineReport;
+    expect(errorReport.qualification?.fallback.state).toBe('activated');
+    resetInbox.socket.close();
+    errorInbox.socket.close();
+  });
+
+  it.each([
+    ['stale RESET', () => resetFrame(2, 2n)],
+    ['stale ERROR', () => frame(MessageType.ERROR, 2, 2n)],
+    ['RESET with a payload', () => frame(MessageType.RESET, 1, 2n)],
+    ['malformed ERROR', () => encodeFrame({ type: MessageType.ERROR, epoch: 1, sequence: 2n, payload: Buffer.from('{') })],
+    ['sequence-replayed RESET', () => resetFrame(1, 1n)],
+    ['sequence-replayed ERROR', () => frame(MessageType.ERROR, 1, 1n)],
+  ])('does not preempt native work for an unsafe urgent %s frame', async (_label, urgentFrame) => {
+    const worker = fakeCyrinxWorker();
+    let releaseCapture: ((value: undefined) => void) | undefined;
+    worker.receiveCapture.mockImplementationOnce(() => new Promise((resolve) => { releaseCapture = resolve; }));
+    const runner = await startProductionRunner({
+      machineId: `unsafe-urgent-${String(_label).replaceAll(' ', '-').toLowerCase()}`,
+      role: 'B',
+      port: 0,
+      report: await reportPath('unsafe-urgent'),
+      tunEvidence: 'none',
+      uiDir: await fixtureUi(),
+      cyrinxBuildForTests: async () => undefined,
+      cyrinxDigitalForTests: async () => undefined,
+      cyrinxWorkerForTests: worker,
+      cyrinxSettleForTests: async () => undefined,
+    });
+    runners.push(runner);
+    const inbox = await openInbox(runner);
+    await runner.startCyrinx();
+    await inbox.text(); await inbox.text(); await inbox.text();
+    inbox.socket.send(frame(MessageType.QUALIFICATION_CASE, 1, 0n, { action: 'accept_cyrinx_instruction', caseId: 'cyrinx-cold-a-to-b', direction: 'A → B' }));
+    await vi.waitFor(() => expect(worker.begin).toHaveBeenCalledOnce());
+    inbox.socket.send(pcm(1, 1n));
+    await vi.waitFor(() => expect(worker.receiveCapture).toHaveBeenCalledOnce());
+
+    inbox.socket.send(urgentFrame());
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(worker.reset).not.toHaveBeenCalled();
+
+    const closed = new Promise((resolve) => inbox.socket.once('close', resolve));
+    releaseCapture?.(undefined);
+    await closed;
+  });
+
+  it.each([
+    ['stale RESET', () => resetFrame(2, 2n)],
+    ['malformed ERROR', () => encodeFrame({ type: MessageType.ERROR, epoch: 1, sequence: 2n, payload: Buffer.from('{') })],
+    ['sequence-replayed ERROR', () => frame(MessageType.ERROR, 1, 1n)],
+  ])('does not preempt settle work for an unsafe urgent %s frame', async (_label, urgentFrame) => {
+    const worker = fakeCyrinxWorker();
+    let releaseSettle: (() => void) | undefined;
+    const runner = await startProductionRunner({
+      machineId: `unsafe-settle-${String(_label).replaceAll(' ', '-').toLowerCase()}`,
+      role: 'A',
+      port: 0,
+      report: await reportPath('unsafe-settle'),
+      tunEvidence: 'none',
+      uiDir: await fixtureUi(),
+      cyrinxBuildForTests: async () => undefined,
+      cyrinxDigitalForTests: async () => undefined,
+      cyrinxWorkerForTests: worker,
+      cyrinxSettleForTests: () => new Promise<void>((resolve) => { releaseSettle = resolve; }),
+    });
+    runners.push(runner);
+    const inbox = await openInbox(runner);
+    await runner.startCyrinx();
+    await inbox.text(); await inbox.text(); await inbox.text();
+    inbox.socket.send(frame(MessageType.QUALIFICATION_CASE, 1, 0n, { action: 'accept_cyrinx_instruction', caseId: 'cyrinx-cold-a-to-b', direction: 'A → B' }));
+    await inbox.binary();
+    inbox.socket.send(frame(MessageType.QUALIFICATION_CASE, 1, 1n, { action: 'playback_complete', caseId: 'cyrinx-cold-a-to-b', direction: 'A → B' }));
+    await vi.waitFor(() => expect(releaseSettle).toBeTypeOf('function'));
+
+    inbox.socket.send(urgentFrame());
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(worker.reset).not.toHaveBeenCalled();
+
+    const closed = new Promise((resolve) => inbox.socket.once('close', resolve));
+    releaseSettle?.();
+    await closed;
+  });
+
+  it('turns an unexpected active owner disconnect into stable fallback and requires RESET on replacement', async () => {
+    const target = await reportPath('cyrinx-owner-disconnect');
+    const worker = fakeCyrinxWorker();
+    const runner = await startProductionRunner({
+      machineId: 'laptop-b',
+      role: 'B',
+      port: 0,
+      report: target,
+      tunEvidence: 'none',
+      uiDir: await fixtureUi(),
+      cyrinxBuildForTests: async () => undefined,
+      cyrinxDigitalForTests: async () => undefined,
+      cyrinxWorkerForTests: worker,
+    });
+    runners.push(runner);
+    const ownerInbox = await openInbox(runner);
+    await runner.startCyrinx();
+    await ownerInbox.text(); await ownerInbox.text(); await ownerInbox.text();
+    ownerInbox.socket.close();
+    await new Promise((resolve) => ownerInbox.socket.once('close', resolve));
+
+    await vi.waitFor(async () => {
+      const report = JSON.parse(await readFile(target, 'utf8')) as MachineReport;
+      expect(report).toMatchObject({
+        epoch: 1,
+        codec: { id: 'quiet' },
+        qualification: {
+          fallback: { state: 'activated', reasonCode: 'cyrinx_cold_a_to_b_failed' },
+        },
+      });
+    });
+    expect(worker.reset).toHaveBeenCalledOnce();
+
+    const invalidReplacement = await openInbox(runner, { codec: 'quiet', stage: 'quiet', terminal: true });
+    invalidReplacement.socket.send(audioSettings(1, 0n));
+    await new Promise((resolve) => invalidReplacement.socket.once('close', resolve));
+
+    const resetReplacement = await openInbox(runner, { codec: 'quiet', stage: 'quiet', terminal: true });
+    resetReplacement.socket.send(resetFrame(1, 0n));
+    expect(decodeFrame(await resetReplacement.binary())).toMatchObject({ type: MessageType.RESET, epoch: 2 });
+    expect(await resetReplacement.text()).toMatchObject({
+      kind: 'cyrinx-session',
+      epoch: 2,
+      codec: 'quiet',
+      fallback: { reasonCode: 'cyrinx_cold_a_to_b_failed' },
+    });
+    resetReplacement.socket.close();
+  });
+
+  it('allows a pre-existing Quiet fallback owner to reload only through current-epoch RESET', async () => {
+    const runner = await startProductionRunner({
+      machineId: 'quiet-reload',
+      role: 'A',
+      port: 0,
+      report: await reportPath('quiet-reload'),
+      tunEvidence: 'none',
+      uiDir: await fixtureUi(),
+      cyrinxBuildForTests: async () => { throw new Error('expected build failure'); },
+    });
+    runners.push(runner);
+    const ownerInbox = await openInbox(runner);
+    await expect(runner.startCyrinx()).resolves.toMatchObject({ codec: 'quiet', reasonCode: 'cyrinx_build_failed' });
+    await ownerInbox.text();
+    await ownerInbox.text();
+    ownerInbox.socket.close();
+    await new Promise((resolve) => ownerInbox.socket.once('close', resolve));
+
+    const invalidReplacement = await openInbox(runner, { codec: 'quiet', stage: 'quiet', terminal: true });
+    invalidReplacement.socket.send(audioSettings(1, 0n));
+    await new Promise((resolve) => invalidReplacement.socket.once('close', resolve));
+
+    const resetReplacement = await openInbox(runner, { codec: 'quiet', stage: 'quiet', terminal: true });
+    resetReplacement.socket.send(resetFrame(1, 0n));
+    expect(decodeFrame(await resetReplacement.binary())).toMatchObject({ type: MessageType.RESET, epoch: 2 });
+    expect(await resetReplacement.text()).toMatchObject({ epoch: 2, codec: 'quiet', fallback: { reasonCode: 'cyrinx_build_failed' } });
+    resetReplacement.socket.close();
+  });
+
+  it('does not reinterpret a late owner close after RESET as another Cyrinx failure', async () => {
+    const target = await reportPath('cyrinx-late-owner-close');
+    const worker = fakeCyrinxWorker();
+    const runner = await startProductionRunner({
+      machineId: 'laptop-a',
+      role: 'A',
+      port: 0,
+      report: target,
+      tunEvidence: 'none',
+      uiDir: await fixtureUi(),
+      cyrinxBuildForTests: async () => undefined,
+      cyrinxDigitalForTests: async () => undefined,
+      cyrinxWorkerForTests: worker,
+    });
+    runners.push(runner);
+    const ownerInbox = await openInbox(runner);
+    await runner.startCyrinx();
+    await ownerInbox.text(); await ownerInbox.text(); await ownerInbox.text();
+    expect(await runner.reset()).toBe(2);
+    const resetsAfterOperatorReset = worker.reset.mock.calls.length;
+    const beforeClose = JSON.parse(await readFile(target, 'utf8')) as MachineReport;
+    ownerInbox.socket.close();
+    await new Promise((resolve) => ownerInbox.socket.once('close', resolve));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(worker.reset).toHaveBeenCalledTimes(resetsAfterOperatorReset);
+    expect(JSON.parse(await readFile(target, 'utf8'))).toEqual(beforeClose);
+    const replacement = await openInbox(runner, { epoch: 2, codec: 'quiet', stage: 'quiet', terminal: true });
+    const accepted = replacement.text();
+    replacement.socket.send(audioSettings(2, 0n));
+    expect(await accepted).toMatchObject({ physicalQualification: false });
+    replacement.socket.close();
+  });
+
   it('does not count routine control-frame aging as an acoustic discontinuity', async () => {
     let now = 0; const runner = await startProductionRunner({ machineId: 'laptop-b', role: 'B', port: 0, report: await reportPath('aging'), tunEvidence: 'none', uiDir: await fixtureUi(), nowForTests: () => now }); runners.push(runner);
     const socket = await openSocket(runner); socket.send(frame(MessageType.QUALIFICATION_CASE, 1, 0n, { caseId: 'one' })); await new Promise((resolve) => setTimeout(resolve, 10));
     now = 6_000; socket.send(frame(MessageType.QUALIFICATION_CASE, 1, 1n, { caseId: 'two' })); await new Promise((resolve) => setTimeout(resolve, 10));
     expect(runner.state()).toMatchObject({ discontinuities: 0, queueCounts: { QUALIFICATION_CASE: 1 } }); socket.close();
+  });
+
+  it('never lets the initial browser choose an epoch that can overflow RESET', async () => {
+    const runner = await startProductionRunner({
+      machineId: 'epoch-boundary', role: 'A', port: 0, report: await reportPath('epoch-boundary'), tunEvidence: 'none', uiDir: await fixtureUi(),
+    });
+    runners.push(runner);
+    const socket = await openSocket(runner);
+    socket.send(audioSettings(0xffff_ffff, 0n));
+    await new Promise((resolve) => socket.once('close', resolve));
+    expect(runner.state().epoch).toBe(1);
+    await expect(runner.reset()).resolves.toBe(2);
   });
 
   it('fails physical mode closed for dirty/default build identities and any non-passed exact-host field', async () => {

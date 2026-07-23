@@ -269,11 +269,15 @@ export class CyrinxQualificationSession {
   }
 
   transmitSettleRemaining(nowMs: number): number {
+    return this.caseSettleRemaining('transmit', nowMs);
+  }
+
+  caseSettleRemaining(mode: CyrinxInstructionAction, nowMs: number): number {
     const accepted = this.#accepted;
     if (!accepted || accepted.caseIndex !== this.#caseIndex) {
       reject('qualification_instruction_not_accepted');
     }
-    if (accepted.mode !== 'transmit') reject('qualification_instruction_mode_mismatch');
+    if (accepted.mode !== mode) reject('qualification_instruction_mode_mismatch');
     const elapsed = Math.max(0, checkedNow(nowMs) - accepted.acceptedAtMs);
     return Math.max(0, CYRINX_TRANSMIT_SETTLE_MS - elapsed);
   }
@@ -321,6 +325,15 @@ export class CyrinxQualificationSession {
     this.#elapsed(now);
     if (now < this.#deadlineAtMs && this.#lastElapsedMs! < CYRINX_DEADLINE_MS) return false;
     return this.#activate('cyrinx_deadline_expired', now);
+  }
+
+  forceDeadlineExpiry(nowMs: number): boolean {
+    if (
+      this.#startedAtMs === null
+      || this.terminal
+      || this.#codec !== 'cyrinx'
+    ) return false;
+    return this.#activate('cyrinx_deadline_expired', checkedNow(nowMs));
   }
 
   activateFallback(reason: CyrinxFallbackReason, nowMs: number): boolean {

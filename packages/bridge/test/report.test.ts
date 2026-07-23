@@ -32,6 +32,7 @@ function report(hostName: string, role: 'A' | 'B', options: {
   p95Boundary?: boolean;
   fallback?: NonNullable<MachineReport['qualification']>['fallback'];
   deadline?: NonNullable<MachineReport['qualification']>['deadline'];
+  cyrinx?: NonNullable<MachineReport['qualification']>['cyrinx'];
 } = {}): MachineReport {
   const evidenceClass = options.evidenceClass ?? 'Open air';
   const direction = role === 'A' ? 'B → A' : 'A → B';
@@ -76,6 +77,7 @@ function report(hostName: string, role: 'A' | 'B', options: {
       deadline: options.deadline ?? { startedAtMs: 1_000, deadlineAtMs: 1_000 + CYRINX_DEADLINE_MS, elapsedMs: 100 },
       physicalGate: evidenceClass === 'Open air' ? (complete ? 'passed' : 'failed') : 'not_physical',
       fallback: options.fallback ?? { codecId: 'quiet', state: 'activated', reasonCode: 'cyrinx_cold_a_to_b_failed' },
+      cyrinx: options.cyrinx ?? (options.codec?.id === 'cyrinx' ? { stage: 'complete', coldReceivePassed: true } : { stage: 'quiet', coldReceivePassed: false }),
     },
     runner: { machineId: hostName, role, reportTarget: `${hostName}.json`, evidenceClass, tunEvidence: exactTun() },
   };
@@ -204,6 +206,32 @@ describe('canonical qualification reports', () => {
     expect(mergeSelection(['host-a', 'host-b'], availableQuiet, report('host-b', 'B'))).toMatchObject({
       decision: 'unqualified',
       reasonCodes: expect.arrayContaining(['quiet_fallback_not_activated']),
+    });
+    const forgedQuietStage = report('host-a', 'A', { cyrinx: { stage: 'complete', coldReceivePassed: true } });
+    expect(mergeSelection(['host-a', 'host-b'], forgedQuietStage, report('host-b', 'B'))).toMatchObject({
+      decision: 'unqualified',
+      reasonCodes: expect.arrayContaining(['quiet_stage_authority_required']),
+    });
+
+    const missingColdAuthority = report('host-a', 'A', { codec: { ...CYRINX_CODEC }, fallback: available, cyrinx: { stage: 'complete', coldReceivePassed: false } });
+    expect(mergeSelection(['host-a', 'host-b'], missingColdAuthority, cyrinxB)).toMatchObject({
+      decision: 'unqualified',
+      reasonCodes: expect.arrayContaining(['cyrinx_cold_authority_required']),
+    });
+    const incompleteStage = report('host-a', 'A', { codec: { ...CYRINX_CODEC }, fallback: available, cyrinx: { stage: 'corpus', coldReceivePassed: true } });
+    expect(mergeSelection(['host-a', 'host-b'], incompleteStage, cyrinxB)).toMatchObject({
+      decision: 'unqualified',
+      reasonCodes: expect.arrayContaining(['cyrinx_stage_authority_required']),
+    });
+  });
+
+  it('binds Quiet cold acquisition to the canonical first receive case', () => {
+    const first = report('host-a', 'A');
+    first.results[0]!.coldAcquired = false;
+    first.results[1]!.coldAcquired = true;
+    expect(mergeSelection(['host-a', 'host-b'], first, report('host-b', 'B'))).toMatchObject({
+      decision: 'unqualified',
+      reasonCodes: expect.arrayContaining(['cold_acquisition_failed']),
     });
   });
 

@@ -94,6 +94,7 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
     deadline: options.qualificationTrace?.deadline ?? { startedAtMs: null, deadlineAtMs: null, elapsedMs: null },
     physicalGate: evidenceMode === 'Open air' ? 'pending' : 'not_physical',
     fallback: options.qualificationTrace?.fallback ?? { codecId: 'quiet', state: 'available', reasonCode: null },
+    cyrinx: { stage: 'idle', coldReceivePassed: false },
   };
   const config = Object.freeze({ machineId: options.machineId, role: options.role, reportTarget: options.report, tunEvidence: options.tunEvidence, tunEvidenceSource: tunEvidence.source, evidenceMode, evidenceClass: evidenceMode, buildCommit: build.commit, codec: { ...QUIET_CODEC }, qualification } satisfies RunnerQualificationConfig);
   const codecAssetDir = options.codecAssetDir ?? path.join(PROJECT_ROOT, '.artifacts', 'codecs');

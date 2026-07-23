@@ -111,6 +111,8 @@ describe('runner-owned Cyrinx qualification session', () => {
     expect(roleB.canReceiveCapture()).toBe(true);
     expect(roleA.transmitSettleRemaining(startAt + 3)).toBe(CYRINX_TRANSMIT_SETTLE_MS);
     expect(roleA.transmitSettleRemaining(startAt + 3 + CYRINX_TRANSMIT_SETTLE_MS)).toBe(0);
+    expect(roleB.caseSettleRemaining('listen', startAt + 3)).toBe(CYRINX_TRANSMIT_SETTLE_MS);
+    expect(roleB.caseSettleRemaining('listen', startAt + 3 + CYRINX_TRANSMIT_SETTLE_MS)).toBe(0);
     expect(() => roleB.transmitSettleRemaining(startAt + 3)).toThrow(
       'qualification_instruction_mode_mismatch',
     );
@@ -138,6 +140,23 @@ describe('runner-owned Cyrinx qualification session', () => {
         state: 'activated',
         reasonCode: 'cyrinx_deadline_expired',
       },
+      terminal: true,
+    });
+  });
+
+  it('treats the monotonic deadline callback as authoritative across wall-clock rollback', () => {
+    const session = new CyrinxQualificationSession('A');
+    session.start(startAt);
+    expect(session.forceDeadlineExpiry(1)).toBe(true);
+    expect(session.snapshot(1, 2)).toMatchObject({
+      codec: 'quiet',
+      stage: 'quiet',
+      deadline: {
+        startedAtMs: startAt,
+        deadlineAtMs: startAt + CYRINX_DEADLINE_MS,
+        elapsedMs: CYRINX_DEADLINE_MS,
+      },
+      fallback: { reasonCode: 'cyrinx_deadline_expired' },
       terminal: true,
     });
   });

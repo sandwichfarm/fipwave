@@ -26,7 +26,7 @@ function audioSettingsFrame(payload = Buffer.from([0x01, 0x00])): Buffer {
   frame.writeUInt8(1, 4);
   frame.writeUInt8(AUDIO_SETTINGS_MESSAGE_TYPE, 5);
   frame.writeUInt32LE(payload.length, 8);
-  frame.writeUInt32LE(7, 12);
+  frame.writeUInt32LE(1, 12);
   frame.writeBigUInt64LE(11n, 16);
   payload.copy(frame, 32);
   return frame;
