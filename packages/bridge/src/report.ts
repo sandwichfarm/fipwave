@@ -274,7 +274,7 @@ export function mergeSelection(expectedHosts: readonly [string, string], machine
   if (!selected) add(reasons, 'unsupported_codec');
   if (selected === 'quiet') {
     if (reports.some((report) => report.qualification?.fallback.state === 'failed')) add(reasons, 'quiet_fallback_failed');
-    if (reports.some((report) => report.qualification?.fallback.state !== 'activated' || !report.qualification.fallback.reasonCode)) add(reasons, 'quiet_fallback_not_activated');
+    if (reports.some((report) => report.qualification?.fallback.state === 'available' || !report.qualification?.fallback.reasonCode)) add(reasons, 'quiet_fallback_not_activated');
   }
   if (selected === 'cyrinx' && reports.some((report) => report.qualification?.fallback.state !== 'available' || report.qualification.fallback.reasonCode !== null)) add(reasons, 'unexpected_fallback_activation');
   if (reports.some((report) => report.qualification?.deadline.startedAtMs === null || report.qualification?.deadline.deadlineAtMs === null || report.qualification?.deadline.elapsedMs === null)) add(reasons, 'cyrinx_deadline_evidence_required');

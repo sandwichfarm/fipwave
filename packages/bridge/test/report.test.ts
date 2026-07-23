@@ -200,6 +200,11 @@ describe('canonical qualification reports', () => {
       decision: 'unqualified',
       reasonCodes: expect.arrayContaining(['quiet_fallback_failed']),
     });
+    const availableQuiet = report('host-a', 'A', { fallback: available });
+    expect(mergeSelection(['host-a', 'host-b'], availableQuiet, report('host-b', 'B'))).toMatchObject({
+      decision: 'unqualified',
+      reasonCodes: expect.arrayContaining(['quiet_fallback_not_activated']),
+    });
   });
 
   it('reserves human-needed for absent/manual or explicitly nonphysical evidence', () => {
