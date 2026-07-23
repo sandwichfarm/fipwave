@@ -81,10 +81,10 @@ describe('applied audio preflight', () => {
       state: 'suspended', sampleRate: 48_000, destination: {},
       resume: vi.fn(async () => { context.state = 'running'; }),
       close: vi.fn(async () => { context.state = 'closed'; }),
-      createBuffer: vi.fn(), createBufferSource: vi.fn(), currentTime: 0,
+      createBuffer: vi.fn(), createBufferSource: vi.fn(), createMediaStreamSource: () => ({ connect: vi.fn() }), currentTime: 0,
     };
     const track = { getSettings: () => settings(), label: 'Built-in microphone', stop: vi.fn() };
-    const stream = { getAudioTracks: () => [track] } as unknown as MediaStream;
+    const stream = { getAudioTracks: () => [track], getTracks: () => [track] } as unknown as MediaStream;
     configureAudioEnvironmentForTests({
       createAudioContext: () => context as never,
       getUserMedia: () => new Promise<MediaStream>((resolve) => { resolveMedia = resolve; }),
@@ -92,6 +92,7 @@ describe('applied audio preflight', () => {
     });
 
     const pending = armAudio(1);
+    await Promise.resolve();
     await resetAudio();
     resolveMedia(stream);
     await expect(pending).rejects.toThrow('stale');
