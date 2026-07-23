@@ -131,6 +131,20 @@ ARQ. A digital or Loopback result is never proof of speakers, microphones, or
 the final FIPS ping; preserve failed evidence and complete the exact-laptop
 manual checkpoint before making any physical claim.
 
+The browser is not the Cyrinx scheduler. It requests only `start_cyrinx` and
+then follows runner snapshots. The runner assigns each cold/corpus case as
+either `transmit` or `listen` based on role and literal direction: a sender
+plays one frame and sends no microphone evidence; only the opposite laptop
+captures and reports the result. During a listen instruction the browser sends
+at most one 2.731-second capture window: 64 contiguous 2,048-sample mono
+batches, with a per-case sample offset beginning at zero. FWAV header sequence
+remains globally monotonic for anti-replay and is not a sample offset.
+
+RESET stops local capture and audio before the runner changes epoch. It clears
+the active native case but does not restart Cyrinx or alter its original
+deadline/reason. After a runner-authorized fallback, re-arm may restore audio
+for Quiet only; it cannot create a second Cyrinx attempt.
+
 The first command emits one `TunEvidence` JSON object with `source: "static"`.
 The second uses a fake `ip` binary and `/dev/null`, never Docker or a real TUN
 device. Both are diagnostic evidence only.
