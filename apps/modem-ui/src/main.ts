@@ -13,6 +13,10 @@ let evidence: AppliedAudioEvidence | undefined;
 let uiState: UiState = 'idle';
 let failure = '';
 let bridge: WebSocket | undefined;
+type GateState = 'not-started' | 'cyrinx-running';
+type CorpusRow = { direction: string; caseId: string; evidenceClass: 'Fixture' | 'Open air'; result: string; airtime: string };
+let gateState: GateState = 'not-started';
+let corpusRows: CorpusRow[] = [];
 
 const labels: Record<UiState, string> = {
   idle: 'Idle', requesting: 'Requesting', ready: 'Ready', failed: 'Failed', disconnected: 'Disconnected',
@@ -104,7 +108,7 @@ function render(): void {
   if (uiState === 'idle') operator.append(control('Arm modem', arm));
   if (uiState === 'requesting') operator.append(control('Arm modem', arm, true));
   if (uiState === 'ready') {
-    operator.append(control('Start Cyrinx qualification', () => undefined));
+    operator.append(control('Start Cyrinx qualification', startQualification));
     operator.append(control('Reset / re-arm', reset, false, 'secondary'));
   }
   if (uiState === 'failed' || uiState === 'disconnected') operator.append(control('Reset / re-arm', reset, false, 'secondary'));
@@ -132,13 +136,44 @@ function render(): void {
   grid.append(evidenceCard);
   appRoot.append(grid);
 
-  const gate = element('section');
-  gate.className = 'card';
+  const gate = element('section'); gate.className = 'card qualification-gate';
   gate.append(element('h2', 'Cyrinx qualification gate'));
   const checklist = element('ol');
   ['Cyrinx build and golden vectors', '256 B and 1536 B fixture round trips', 'Browser PCM bridge loopback', 'Cold acquisition: A → B', 'Cold acquisition: B → A', 'Gate decision'].forEach((step) => checklist.append(element('li', step)));
-  gate.append(checklist, element('p', 'Cyrinx qualification has not started. Fixture results do not qualify the physical sound path.'));
+  gate.append(checklist);
+  if (gateState === 'not-started') gate.append(element('p', 'Cyrinx qualification has not started. Fixture results do not qualify the physical sound path.'));
+  else {
+    gate.append(element('p', 'Cyrinx qualification is in progress.'));
+    const countdown = element('p', 'Cyrinx gate closes in 1:30:00'); countdown.className = 'countdown'; countdown.setAttribute('aria-live', 'assertive'); gate.append(countdown);
+    gate.append(element('p', 'This deadline is immutable. Any hard failure or expiry immediately routes to the audible Quiet fallback.'));
+  }
   appRoot.append(gate);
+
+  const corpus = element('section'); corpus.className = 'card corpus-card'; corpus.append(element('h2', 'Corpus evidence'));
+  corpus.append(element('p', 'Unique 256 B and 1536 B cases are keyed by epoch, literal direction, and case ID.'));
+  const filter = element('input') as HTMLInputElement; filter.type = 'search'; filter.placeholder = 'Filter corpus cases'; filter.setAttribute('aria-label', 'Filter corpus cases'); corpus.append(filter);
+  corpus.append(control('Sort newest first', () => { corpusRows = [...corpusRows].reverse(); render(); }, false, 'secondary'));
+  if (!corpusRows.length) corpus.append(element('p', 'No corpus results have been recorded for this epoch.'));
+  else {
+    const table = element('table'); table.setAttribute('aria-label', 'Qualification corpus evidence');
+    const caption = element('caption', 'Qualification corpus evidence'); table.append(caption);
+    const head = element('thead'); const headRow = element('tr'); ['Direction', 'Case', 'Evidence', 'Result', 'Airtime'].forEach((label) => { const cell = element('th', label); cell.scope = 'col'; headRow.append(cell); }); head.append(headRow); table.append(head);
+    const body = element('tbody');
+    corpusRows.filter((row) => row.caseId.toLowerCase().includes(filter.value.toLowerCase())).forEach((row) => { const tr = element('tr'); [row.direction, row.caseId, row.evidenceClass, row.result, row.airtime].forEach((value) => tr.append(element('td', value))); body.append(tr); });
+    table.append(body); corpus.append(table, element('p', 'Fixture evidence is diagnostic only and cannot select a codec.'));
+  }
+  appRoot.append(corpus);
+
+  const docker = element('section'); docker.className = 'card'; docker.append(element('h2', 'Docker and TUN projection'));
+  const dockerList = element('dl');
+  [['Bridge binding', '127.0.0.1 only'], ['Device', '/dev/net/tun pending host preflight'], ['Capabilities', 'NET_ADMIN only; no privileged mode; no SYS_ADMIN'], ['Evidence', 'Missing — run deterministic Compose preflight on each laptop']].forEach(([label, value]) => { dockerList.append(element('dt', label), element('dd', value)); });
+  docker.append(dockerList); appRoot.append(docker);
+
+  const decision = element('section'); decision.className = 'card'; decision.append(element('h2', 'Decision and report'));
+  decision.append(element('p', corpusRows.some((row) => row.evidenceClass === 'Fixture') ? 'Human needed — non-physical fixture evidence is recorded.' : 'Missing — two named exact-laptop Open air reports are required.'));
+  decision.append(element('p', 'Canonical paths: .artifacts/qualification/{machine-id}.json and .artifacts/qualification/selection.json'));
+  decision.append(element('p', 'A selected profile must be audible, fixed, advertise at least 1357 bytes, and have exact-pair Open air evidence.'));
+  appRoot.append(decision);
 }
 
 function control(label: string, action: () => void | Promise<void>, disabled = false, className = ''): HTMLButtonElement {
@@ -163,10 +198,17 @@ async function arm(): Promise<void> {
   render();
 }
 
+function startQualification(): void {
+  if (uiState !== 'ready' || gateState === 'cyrinx-running') return;
+  gateState = 'cyrinx-running';
+  corpusRows = [{ direction: 'A → B', caseId: `fixture-epoch-${epoch}`, evidenceClass: 'Fixture', result: 'Byte-perfect loopback (non-physical)', airtime: '0 ms' }];
+  render();
+}
+
 async function reset(): Promise<void> {
   bridge?.close(); bridge = undefined;
   epoch = await resetAudio();
-  evidence = undefined; uiState = 'requesting'; failure = ''; render();
+  evidence = undefined; uiState = 'requesting'; failure = ''; gateState = 'not-started'; corpusRows = []; render();
   await arm();
 }
 

@@ -31,7 +31,7 @@ test('shows an irreversible 90-minute Cyrinx countdown with a non-physical fixtu
 
   await expect(page.getByText('Cyrinx qualification is in progress.')).toBeVisible();
   await expect(page.getByText('Cyrinx gate closes in 1:30:00')).toBeVisible();
-  await expect(page.getByRole('cell', { name: 'Fixture' })).toBeVisible();
+  await expect(page.getByRole('cell', { name: 'Fixture', exact: true })).toBeVisible();
   await expect(page.getByText('Fixture evidence is diagnostic only and cannot select a codec.')).toBeVisible();
   await expect(page.getByRole('table', { name: 'Qualification corpus evidence' })).toBeVisible();
 });
