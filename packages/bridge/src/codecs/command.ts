@@ -66,19 +66,22 @@ export class NativeCommandCodecAdapter implements CodecAdapter {
       const body = Buffer.from(response.stdout); const expectedBytes = 289 + qualificationCase.payload.byteLength;
       if (response.exitCode !== 0 || response.timedOut || body.byteLength !== expectedBytes || body.toString('ascii', 0, 4) !== 'CYRR' || body.readUInt8(4) !== 1 || body.readUInt32LE(5) !== qualificationCase.payload.byteLength || body.readUInt32LE(9) !== 7 || body.readUInt32LE(13) !== 7 || !body.subarray(33, 289).equals(metadata) || !body.subarray(289).equals(Buffer.from(qualificationCase.payload))) throw new Error('native decode result is invalid');
       const digest = createHash('sha256').update(body.subarray(289)).digest('hex');
+      // Offset 17 is diagnostic native output from the digital loopback. Only
+      // CyrinxBatchWorker can measure physical acquisition and audio preflight.
+      const diagnosticNativeAcquisitionMs = body.readUInt32LE(17);
       return {
         adapter: this.profile.codec, profile: this.profile, evidenceClass: context.evidenceClass, epoch: context.epoch,
         direction: qualificationCase.direction, caseId: qualificationCase.id, digest,
         bytePerfect: digest === qualificationCase.digest, deliveryCount: 1,
-        acquisitionMs: body.readUInt32LE(17), airtimeMs: body.readUInt32LE(21), coldAcquired: true, complete: true,
-        audioPassed: true, queues: { captureHighWaterBytes: 0, captureHighWaterMs: 0, playbackHighWaterBytes: 0, playbackHighWaterMs: 0, discontinuities: 0 },
+        acquisitionMs: diagnosticNativeAcquisitionMs, airtimeMs: body.readUInt32LE(21), coldAcquired: false, complete: true,
+        audioPassed: false, queues: { captureHighWaterBytes: 0, captureHighWaterMs: 0, playbackHighWaterBytes: 0, playbackHighWaterMs: 0, discontinuities: 0 },
       };
     } catch {
       return {
         adapter: this.profile.codec, profile: this.profile, evidenceClass: context.evidenceClass, epoch: context.epoch,
         direction: qualificationCase.direction, caseId: qualificationCase.id, digest: qualificationCase.digest,
         bytePerfect: false, deliveryCount: 0, acquisitionMs: 0, airtimeMs: 0, coldAcquired: false, complete: false,
-        audioPassed: true, queues: { captureHighWaterBytes: 0, captureHighWaterMs: 0, playbackHighWaterBytes: 0, playbackHighWaterMs: 0, discontinuities: 0 },
+        audioPassed: false, queues: { captureHighWaterBytes: 0, captureHighWaterMs: 0, playbackHighWaterBytes: 0, playbackHighWaterMs: 0, discontinuities: 0 },
         reasonCode: 'cyrinx_command_failed',
       };
     }

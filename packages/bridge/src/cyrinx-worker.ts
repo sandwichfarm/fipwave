@@ -26,6 +26,7 @@ export interface CyrinxResult {
   direction: LiteralDirection;
   caseId: string;
   digest: string | null;
+  /** Wall time from physical listen ownership through successful native decode. */
   acquisitionMs: number;
   airtimeMs: number;
   complete: boolean;
@@ -249,12 +250,13 @@ export class CyrinxBatchWorker {
 
     const digest = createHash('sha256').update(body.subarray(289)).digest('hex');
     const now = (this.options.now ?? Date.now)();
+    const physicalAcquisitionMs = Math.max(0, now - active.startedAt);
     const result: CyrinxResult = {
       epoch: active.epoch,
       direction: active.value.direction,
       caseId: active.value.id,
       digest,
-      acquisitionMs: Math.max(0, now - active.startedAt),
+      acquisitionMs: physicalAcquisitionMs,
       airtimeMs: body.readUInt32LE(21),
       complete: digest === active.value.digest,
       corrupt: digest !== active.value.digest,

@@ -11,7 +11,7 @@ import {
   CyrinxBatchWorker,
   type CyrinxCase,
 } from '../packages/bridge/src/cyrinx-worker.js';
-import { runPinnedCommand, type PinnedCommandRunner } from '../packages/bridge/src/codecs/command.js';
+import { NativeCommandCodecAdapter, runPinnedCommand, type PinnedCommandRunner } from '../packages/bridge/src/codecs/command.js';
 import {
   CYRINX_PCM_PLAYBACK_FLAG,
   decodeFrame,
@@ -135,8 +135,10 @@ describe('bounded Cyrinx worker', () => {
     expect(transmitterRun).toHaveBeenCalledTimes(1);
 
     const receiverRun = listenRunner();
-    const receiver = new CyrinxBatchWorker({ executable: '/pinned/cyrinx', run: receiverRun, now: () => 1_000 });
+    let physicalNow = 1_000;
+    const receiver = new CyrinxBatchWorker({ executable: '/pinned/cyrinx', run: receiverRun, now: () => physicalNow });
     expect(await receiver.begin(qualificationCase, EPOCH, 'listen')).toBeUndefined();
+    physicalNow = 3_875;
     const result = await feedWindow(receiver);
     expect(result).toMatchObject({
       epoch: EPOCH,
@@ -144,6 +146,8 @@ describe('bounded Cyrinx worker', () => {
       caseId: qualificationCase.id,
       complete: true,
       deliveryCount: 1,
+      acquisitionMs: 2_875,
+      coldAcquired: true,
       airtimeMs: 1_302,
       queues: {
         captureHighWaterBytes: 8_232,
@@ -154,6 +158,33 @@ describe('bounded Cyrinx worker', () => {
       },
     });
     expect(receiverRun).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps digital native acquisition diagnostic and never asserts physical cold or audio evidence', async () => {
+    const run: PinnedCommandRunner = vi.fn(async ({ command }) => {
+      if (command === 'encode') return { exitCode: 0, stdout: Buffer.alloc(CYRINX_FRAME_SAMPLES * 4), stderr: '', timedOut: false };
+      return {
+        exitCode: 0,
+        stdout: decoded(qualificationCase, EPOCH, (body) => body.writeUInt32LE(321, 17)),
+        stderr: '',
+        timedOut: false,
+      };
+    });
+    const adapter = new NativeCommandCodecAdapter({ executable: '/pinned/cyrinx', runner: run });
+
+    const result = await adapter.qualify(
+      { ...qualificationCase, size: 256 },
+      { epoch: EPOCH, evidenceClass: 'Open air', nowMs: 0 },
+    );
+
+    expect(result).toMatchObject({
+      complete: true,
+      bytePerfect: true,
+      acquisitionMs: 321,
+      coldAcquired: false,
+      audioPassed: false,
+    });
+    expect(run).toHaveBeenCalledTimes(2);
   });
 
   it('uses a continuous playback timeline including the local guard across cases', async () => {

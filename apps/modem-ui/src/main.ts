@@ -1,11 +1,12 @@
 import './style.css';
-import { armAudio, enqueuePcmPlayback, resetAudio, setPcmCaptureHandler, validatePcmPlaybackFrame, type AppliedAudioEvidence } from './audio.js';
+import { armAudio, canBufferPcmCaptureFrame, enqueuePcmPlayback, resetAudio, setPcmCaptureHandler, validatePcmPlaybackFrame, type AppliedAudioEvidence } from './audio.js';
 import { acceptBridgePlaybackFrame } from '../../../packages/bridge/src/codecs/websocket.js';
 import { CyrinxQualificationSession, type CyrinxSessionSnapshot } from './qualification-session.js';
 import {
   QUIET_PROFILE,
   QuietClient,
   decodeResetFrame,
+  directionForRole,
   encodeControlFrame,
   fetchRunnerConfig,
   peerRole,
@@ -32,6 +33,9 @@ let bridge: WebSocket | undefined;
 let bridgeSequence = 0n;
 let bridgeDelivery = 'Not connected';
 let quietRuntime = 'Not armed';
+type QuietCorpusSendState = 'unavailable' | 'ready' | 'sending' | 'sent';
+let quietCorpusSendState: QuietCorpusSendState = 'unavailable';
+let quietFailureReportedEpoch: number | undefined;
 let runnerConfig: Readonly<RunnerConfig> | undefined;
 let configFailure = '';
 const quiet = new QuietClient((received) => { void appendQuietEvidence(received); });
@@ -91,6 +95,24 @@ function frameForSettings(value: AppliedAudioEvidence): ArrayBuffer {
 
 function asError(reason: unknown, fallback: string): Error { return reason instanceof Error ? reason : new Error(fallback); }
 function resultKey(caseId: string, resultEpoch: number): string { return `${resultEpoch}\u0000${caseId}`; }
+function reportQuietRuntimeFailure(failureEpoch: number): void {
+  const socket = bridge;
+  if (
+    failureEpoch !== epoch
+    || quietFailureReportedEpoch === failureEpoch
+    || cyrinxSession.snapshot.codec !== 'quiet'
+    || !socket
+    || socket.readyState !== WebSocket.OPEN
+  ) return;
+  try {
+    const frame = encodeControlFrame({ type: 7, epoch: failureEpoch, sequence: bridgeSequence });
+    socket.send(frame);
+    bridgeSequence += 1n;
+    quietFailureReportedEpoch = failureEpoch;
+  } catch {
+    // Reporting is best-effort and must never replace the original Quiet error.
+  }
+}
 
 function clearCyrinxCapture(): void { captureGeneration += 1; captureCase = undefined; setPcmCaptureHandler(undefined); }
 function clearCyrinxCase(): void { clearCyrinxCapture(); transmitCase = undefined; }
@@ -105,8 +127,16 @@ function armCyrinxCapture(caseId: string, direction: 'A → B' | 'B → A'): voi
     if (captureCase !== active || value.type !== 'PCM_CAPTURE' || value.epoch !== active.epoch || value.sampleRate !== 48_000 || value.channelCount !== 1 || value.encoding !== 'Float32LE' || !(value.samples instanceof Float32Array) || value.samples.length !== 2048 || value.discontinuity === true) { clearCyrinxCapture(); return; }
     if (active.baseSampleIndex === undefined) active.baseSampleIndex = typeof value.firstSampleIndex === 'number' ? value.firstSampleIndex : Number.NaN;
     const offset = typeof value.firstSampleIndex === 'number' ? value.firstSampleIndex - active.baseSampleIndex : Number.NaN;
-    if (!Number.isInteger(offset) || offset !== active.nextSampleIndex || !bridge || bridge.readyState !== WebSocket.OPEN || bridge.bufferedAmount > 256 * 1024) { clearCyrinxCapture(); return; }
-    try { bridge.send(pcmCaptureFrame({ epoch: active.epoch, sequence: bridgeSequence++, firstSampleIndex: BigInt(offset), samples: value.samples })); active.nextSampleIndex += value.samples.length; if (active.nextSampleIndex === 131_072) clearCyrinxCapture(); }
+    const socket = bridge;
+    if (!Number.isInteger(offset) || offset !== active.nextSampleIndex || !socket || socket.readyState !== WebSocket.OPEN) { clearCyrinxCapture(); return; }
+    try {
+      const frame = pcmCaptureFrame({ epoch: active.epoch, sequence: bridgeSequence, firstSampleIndex: BigInt(offset), samples: value.samples });
+      if (!canBufferPcmCaptureFrame(socket.bufferedAmount, frame.byteLength)) { clearCyrinxCapture(); return; }
+      bridgeSequence += 1n;
+      socket.send(frame);
+      active.nextSampleIndex += value.samples.length;
+      if (active.nextSampleIndex === 131_072) clearCyrinxCapture();
+    }
     catch { clearCyrinxCapture(); }
   });
 }
@@ -173,6 +203,7 @@ function handleBridgeMessage(socket: WebSocket, event: MessageEvent): void {
       pending.resolve();
       return;
     }
+    if (message.kind === 'cyrinx-session' && message.epoch !== epoch) throw new Error('Local bridge sent a stale Cyrinx session snapshot');
     if (message.kind === 'cyrinx-session' && (message.codec === 'idle' || message.codec === 'cyrinx' || message.codec === 'quiet' || message.codec === 'unqualified') && message.deadline && typeof message.deadline === 'object') {
       const deadline = message.deadline as Record<string, unknown>; const fallback = message.fallback as Record<string, unknown> | null;
       const snapshot: CyrinxSessionSnapshot = message.codec === 'idle' ? { codec: 'idle', stage: 'idle' } : { codec: message.codec, stage: message.stage, startedAtMs: deadline.startedAtMs, deadlineAtMs: deadline.deadlineAtMs, elapsedMs: deadline.elapsedMs, ...(typeof fallback?.reasonCode === 'string' ? { reasonCode: fallback.reasonCode } : {}) } as CyrinxSessionSnapshot;
@@ -354,6 +385,9 @@ function render(): void {
   if (uiState === 'requesting') operator.append(control('Arm modem', arm, true));
   if (uiState === 'ready') {
     if (cyrinxSession.canRequestStart) operator.append(control('Start Cyrinx qualification', startQualification));
+    if (quietCorpusSendState === 'ready' && runnerConfig && cyrinxSession.snapshot.codec === 'quiet') {
+      operator.append(control(`Send Quiet ${directionForRole(runnerConfig.role)} corpus`, sendQuietCorpus));
+    }
     operator.append(control('Reset / re-arm', reset, false, 'secondary'));
   }
   if (uiState === 'failed' || uiState === 'disconnected') operator.append(control('Reset / re-arm', reset, false, 'secondary'));
@@ -461,9 +495,39 @@ function startQualification(): void {
   catch (error) { failBridge(bridge, asError(error, 'Cyrinx start request failed')); }
 }
 
+async function sendQuietCorpus(): Promise<void> {
+  const config = runnerConfig;
+  if (!config || quietCorpusSendState !== 'ready' || cyrinxSession.snapshot.codec !== 'quiet') return;
+  const sendEpoch = epoch;
+  const direction = directionForRole(config.role);
+  quietCorpusSendState = 'sending';
+  quietRuntime = `Quiet sending ${direction} corpus · epoch ${sendEpoch}`;
+  render();
+  try {
+    await quiet.sendCorpus(config.role, sendEpoch, (entry, index, total) => {
+      corpusRows = [...corpusRows, { direction: entry.direction, caseId: entry.id, evidenceClass: config.evidenceClass, result: `Sent locally ${index}/${total}; receiver evidence is independent`, airtime: 'pending' }];
+      render();
+    });
+    if (epoch !== sendEpoch) return;
+    quietCorpusSendState = 'sent';
+    quietRuntime = `Quiet ${direction} corpus sent · receiver remains armed · epoch ${sendEpoch}`;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Quiet qualification failed';
+    if (message === 'Quiet transmission cancelled by reset' || epoch !== sendEpoch) return;
+    quietCorpusSendState = 'unavailable';
+    uiState = message.includes('bridge') ? 'disconnected' : 'failed';
+    failure = message;
+    quietRuntime = `Quiet failed · epoch ${sendEpoch}`;
+    reportQuietRuntimeFailure(sendEpoch);
+    try { cyrinxSession.markQuietFailed(); } catch { /* terminal state is already authoritative */ }
+  }
+  render();
+}
+
 async function startQuietFallback(): Promise<void> {
   if (!runnerConfig) return;
   let quietEpoch = epoch;
+  quietCorpusSendState = 'unavailable';
   try {
     // Stop browser capture/playback before RESET so a late same-epoch callback
     // cannot be accepted by the runner after it changes ownership.
@@ -476,18 +540,17 @@ async function startQuietFallback(): Promise<void> {
     await quiet.arm(epoch, runnerConfig.role);
     await reportQuietSettings();
     bridgeDelivery = `Quiet audio settings accepted for epoch ${epoch}`;
-    quietRuntime = `Quiet armed · ${QUIET_PROFILE} · epoch ${epoch}`;
+    quietCorpusSendState = 'ready';
+    quietRuntime = `Quiet armed and listening · ${QUIET_PROFILE} · send ${directionForRole(runnerConfig.role)} when the operator is ready · epoch ${epoch}`;
     render();
-    await quiet.sendCorpus(runnerConfig.role, epoch, (entry, index, total) => {
-      corpusRows = [...corpusRows, { direction: entry.direction, caseId: entry.id, evidenceClass: runnerConfig!.evidenceClass, result: `Sent locally ${index}/${total}; receiver evidence is independent`, airtime: 'pending' }];
-      render();
-    });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Quiet qualification failed';
     if (message === 'Quiet transmission cancelled by reset' || epoch !== quietEpoch) return;
+    quietCorpusSendState = 'unavailable';
     uiState = message.includes('bridge') || message.includes('RESET') ? 'disconnected' : 'failed';
     failure = message;
     quietRuntime = `Quiet failed · epoch ${quietEpoch}`;
+    reportQuietRuntimeFailure(quietEpoch);
     try { cyrinxSession.markQuietFailed(); } catch { /* terminal state is already authoritative */ }
   }
   render();
@@ -498,6 +561,8 @@ async function appendQuietEvidence(received: ReceiveCaseEvidence): Promise<void>
   if (!config || received.epoch !== epoch || received.sender !== peerRole(config.role) || received.direction !== receiveDirectionForRole(config.role)) {
     uiState = 'failed';
     failure = 'Rejected stale or impossible Quiet receiver evidence';
+    reportQuietRuntimeFailure(epoch);
+    try { cyrinxSession.markQuietFailed(); } catch { /* terminal state is already authoritative */ }
     render();
     return;
   }
@@ -515,6 +580,8 @@ async function appendQuietEvidence(received: ReceiveCaseEvidence): Promise<void>
     uiState = 'disconnected';
     failure = asError(error, 'Local bridge result delivery failed').message;
     bridgeDelivery = `Failed — ${failure}`;
+    reportQuietRuntimeFailure(epoch);
+    try { cyrinxSession.markQuietFailed(); } catch { /* terminal state is already authoritative */ }
   }
   render();
 }
@@ -534,6 +601,7 @@ async function reset(): Promise<void> {
     // runner started it; re-arm therefore cannot restart the primary path.
     corpusRows = [];
     quietRuntime = 'Not armed';
+    quietCorpusSendState = 'unavailable';
     uiState = 'idle';
     render();
     await arm();

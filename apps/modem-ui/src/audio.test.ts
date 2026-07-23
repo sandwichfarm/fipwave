@@ -2,10 +2,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   armAudio,
+  canBufferPcmCaptureFrame,
   configureAudioEnvironmentForTests,
   createPlaybackQueue,
   enqueuePcmPlayback,
   evaluateAppliedSettings,
+  MAX_BRIDGE_CAPTURE_BUFFER_BYTES,
   resetAudio,
   setPcmCaptureHandler,
   validatePcmPlaybackFrame,
@@ -312,6 +314,18 @@ describe('PCM playback boundary', () => {
     await armAudio(5);
     second.capture({ epoch: 5 });
     expect(captured).toBe(1);
+  });
+});
+
+describe('PCM capture backpressure boundary', () => {
+  it('admits only a complete encoded capture frame within the 256 KiB browser queue cap', () => {
+    const encodedCaptureBytes = 32 + 8 + 2_048 * Float32Array.BYTES_PER_ELEMENT;
+    const exactRemainingCapacity = MAX_BRIDGE_CAPTURE_BUFFER_BYTES - encodedCaptureBytes;
+
+    expect(canBufferPcmCaptureFrame(exactRemainingCapacity, encodedCaptureBytes)).toBe(true);
+    expect(canBufferPcmCaptureFrame(exactRemainingCapacity + 1, encodedCaptureBytes)).toBe(false);
+    expect(canBufferPcmCaptureFrame(-1, encodedCaptureBytes)).toBe(false);
+    expect(canBufferPcmCaptureFrame(0, MAX_BRIDGE_CAPTURE_BUFFER_BYTES + 1)).toBe(false);
   });
 });
 

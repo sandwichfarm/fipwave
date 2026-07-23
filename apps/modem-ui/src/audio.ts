@@ -6,6 +6,7 @@ export const FWAV_HEADER_BYTES = 32;
 export const CYRINX_PCM_PLAYBACK_FLAG = 1;
 export const CYRINX_FRAME_SAMPLES = 62_464;
 export const CYRINX_GUARD_SAMPLES = 14_400;
+export const MAX_BRIDGE_CAPTURE_BUFFER_BYTES = 256 * 1024;
 const MAX_SCHEDULED_HORIZON_MS = 2_000;
 
 export type PermissionState = 'granted' | 'denied' | 'unknown';
@@ -139,6 +140,16 @@ function observed(value: unknown): string {
 
 function fail(message: string): never {
   throw new Error(message);
+}
+
+/** Admits a capture frame only when the complete encoded FWAV frame fits. */
+export function canBufferPcmCaptureFrame(bufferedAmount: number, frameByteLength: number): boolean {
+  return Number.isSafeInteger(bufferedAmount)
+    && bufferedAmount >= 0
+    && Number.isSafeInteger(frameByteLength)
+    && frameByteLength > 0
+    && frameByteLength <= MAX_BRIDGE_CAPTURE_BUFFER_BYTES
+    && bufferedAmount <= MAX_BRIDGE_CAPTURE_BUFFER_BYTES - frameByteLength;
 }
 
 function assertCurrent(epoch: number): void {
