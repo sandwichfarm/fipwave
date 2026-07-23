@@ -1,5 +1,8 @@
 # Qualification Runbook
 
+For a concise operator sequence, use the
+[laptop-to-laptop acoustic test guide](laptop-to-laptop-test.md).
+
 This runbook records deterministic preflight evidence for each demo laptop. It
 does **not** prove the two-laptop acoustic hop or FIPS ping. Only two reports
 with runner-stamped `Open air` identity and passed `exact_host` TUN records can
@@ -50,7 +53,9 @@ receive direction. Unheard rows remain explicit Missing placeholders with
 `expectedSha256`, and the observed `receivedSha256` to the committed manifest.
 At least 19/20 distinct byte-perfect 256-byte rows and 5/5 1,536-byte rows must
 pass in each direction. The optional missing 256-byte row is not itself a
-failure once that threshold is met.
+failure once that threshold is met, except that Quiet's first canonical
+256-byte row must pass because it owns the direction's cold-acquisition
+evidence.
 
 Copy the two completed canonical reports to one operator machine and reconcile
 them only after both local runs have ended:
