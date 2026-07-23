@@ -17,6 +17,8 @@
     "build:server": "tsc -p tsconfig.server.json",
     "build": "npm run build:server && vite build",
     "start:runner": "node dist/server/packages/bridge/src/runner.js",
+    "fetch:codecs": "node scripts/fetch-codec-assets.mjs",
+    "fetch:codecs:check": "node scripts/fetch-codec-assets.mjs --check",
     "generate:corpus": "node scripts/generate-corpus.mjs",
     "qualify:fixture": "node scripts/qualify.mjs fixture",
     "qualify:verify": "node scripts/qualify.mjs verify",
