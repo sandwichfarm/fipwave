@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Modem qualification</title>
+  </head>
+  <body>
+    <main>
+      <h1>Modem qualification</h1>
+      <p id="status" aria-live="polite">Modem is not armed</p>
+      <button id="arm-modem" type="button">Arm modem</button>
+      <p>Loopback evidence is not physical qualification.</p>
+    </main>
+    <script type="module">
+      const status = document.querySelector('#status');
+      const armButton = document.querySelector('#arm-modem');
+      const audioSettingsType = 2;
+
+      function createAudioSettingsFrame() {
+        const payload = new Uint8Array([1, 0]);
+        const frame = new ArrayBuffer(32 + payload.byteLength);
+        const view = new DataView(frame);
+        view.setUint8(0, 0x46);
+        view.setUint8(1, 0x57);
+        view.setUint8(2, 0x41);
+        view.setUint8(3, 0x56);
+        view.setUint8(4, 1);
+        view.setUint8(5, audioSettingsType);
+        view.setUint32(8, payload.byteLength, true);
+        view.setUint32(12, 1, true);
+        new Uint8Array(frame, 32).set(payload);
+        return frame;
+      }
+
+      armButton.addEventListener('click', () => {
+        const bridge = new WebSocket(`ws://${window.location.host}/bridge`);
+        bridge.binaryType = 'arraybuffer';
+        status.textContent = 'Arming local loopback modem…';
+        bridge.addEventListener('open', () => bridge.send(createAudioSettingsFrame()));
+        bridge.addEventListener('message', () => {
+          status.textContent = 'Loopback evidence recorded; this is not physical qualification.';
+          bridge.close();
+        });
+        bridge.addEventListener('error', () => {
+          status.textContent = 'Local bridge disconnected. Qualification is paused; no result is being inferred.';
+        });
+      });
+    </script>
+  </body>
+</html>
