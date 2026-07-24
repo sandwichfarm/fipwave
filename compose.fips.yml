@@ -6,7 +6,12 @@ services:
     environment:
       ROLE: ${ROLE:-A}
       MACHINE_ID: ${MACHINE_ID:-fipwave-a}
-    command: ["node", "dist/server/packages/bridge/src/runner.js", "--machine-id", "${MACHINE_ID:-fipwave-a}", "--role", "${ROLE:-A}", "--port", "4310", "--report", "/tmp/loopback-report.json", "--tun-evidence", "none", "--evidence-mode", "Loopback"]
+    command:
+      - sh
+      - -ec
+      - >-
+        node dist/server/packages/bridge/src/runner.js --machine-id ${MACHINE_ID:-fipwave-a} --role ${ROLE:-A} --port 4311 --report /tmp/loopback-report.json --tun-evidence none --evidence-mode Loopback &
+        exec socat TCP-LISTEN:4310,fork,reuseaddr TCP:127.0.0.1:4311
     ports:
       - "127.0.0.1:${BROWSER_PORT:-4310}:4310"
     security_opt:
