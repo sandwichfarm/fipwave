@@ -4,15 +4,15 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 3
 current_phase_name: Negotiate and Deliver Reliable Acoustic Packets
-status: planning
+status: executing
 stopped_at: Phase 2 complete, ready to plan Phase 3
-last_updated: "2026-07-24T05:00:31.506Z"
+last_updated: "2026-07-24T05:39:31.122Z"
 last_activity: 2026-07-24
 last_activity_desc: Phase 2 complete, transitioned to Phase 3
 progress:
-  total_phases: 5
+  total_phases: 3
   completed_phases: 1
-  total_plans: 17
+  total_plans: 24
   completed_plans: 16
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-07-24)
 
 Phase: 3 — Negotiate and Deliver Reliable Acoustic Packets
 Plan: Not started
-Status: Ready to plan
+Status: Ready to execute
 Last activity: 2026-07-24 — Phase 2 complete, transitioned to Phase 3
 
 Progress: [█████████░] 94%
@@ -82,11 +82,14 @@ Recent decisions affecting current work:
 
 - Phase 2: FIPS uses a first-class codec-neutral SoundTransport with a strict
   1357-byte minimum link MTU and complete opaque-packet boundary.
+
 - Phase 2: One validated A/B resolver owns disposable identities, peer mapping,
   ports, audio/profile defaults, retry, and heartbeat values; public state
   never includes nsecs.
+
 - Phase 2: Browser/FIPS traffic stays on a loopback-only binary WebSocket
   bridge; epoch and socket-generation gates reject stale recovery work.
+
 - Phase 1: Cyrinx gets a strict 90-minute exact-laptop bidirectional qualification and must yield immediately to a browser-ready audible fallback on failure.
 - Phase 1: The newer throughput reassessment governs: keep the bridge codec-neutral, require at least a 1357-byte sound MTU, do not make `ggwave` primary, and do not make Hush default.
 - Phase 4: The acceptance proof is a real container-kernel `ping -6`; the isolated receiver has no alternate FIPS transport.
