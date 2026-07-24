@@ -103,9 +103,10 @@ describe('FAS1 binary protocol', () => {
   it('rejects packet and fragment geometry at zero, one-over, and unsafe boundaries', () => {
     expect(() => fragmentPacket({ packet: new Uint8Array(), sessionId: SESSION, sequenceStart: 0, packetId: 1 })).toThrow();
     expect(() => fragmentPacket({ packet: new Uint8Array(FAS1_MAX_PACKET_BYTES + 1), sessionId: SESSION, sequenceStart: 0, packetId: 1 })).toThrow();
-    expect(() => fragmentPacket({ packet: Uint8Array.of(1), sessionId: SESSION, sequenceStart: 0xffff_ffff, packetId: 1 })).toThrow();
+    expect(() => fragmentPacket({ packet: Uint8Array.of(1), sessionId: SESSION, sequenceStart: 0x1_0000_0000, packetId: 1 })).toThrow();
     expect(() => encodeFas1({ ...validUnit(Fas1UnitType.Data), fragmentCount: 17 })).toThrow();
     expect(() => encodeFas1({ ...validUnit(Fas1UnitType.Data), fragmentIndex: 1, fragmentCount: 1 })).toThrow();
-    expect(() => reassemblePacket([validUnit(Fas1UnitType.Data) as never])).toThrow();
+    const fragments = fragmentPacket({ packet: new Uint8Array(218), sessionId: SESSION, sequenceStart: 0, packetId: 1 });
+    expect(() => reassemblePacket([fragments[0]!, fragments[0]!])).toThrow();
   });
 });
