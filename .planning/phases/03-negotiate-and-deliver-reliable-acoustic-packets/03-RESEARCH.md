@@ -401,17 +401,27 @@ retryOnlyMissing(ack.receivedBitmap);
 | A4 | FIPS traffic class can be supplied through a narrow explicit local metadata seam without parsing opaque FIPS bytes. | Pitfall 5 | High — current APIs expose only bytes; plan Wave 0 must identify the producer seam before implementation. |
 | A5 | CRC-32C plus SHA-256 settings digest is adequate corruption/commit detection below the later FIPS authentication layer. | Wire / Commit | Medium — neither is an acoustic peer-authentication protocol. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **How will FIPS handshake/heartbeat traffic get a trustworthy priority class?**
-   - What we know: the current transport send interface accepts only opaque bytes and current FWAV has no class field. [VERIFIED: vendor/fips/src/transport/mod.rs] [VERIFIED: vendor/fips/src/transport/sound/mod.rs]
-   - What's unclear: the narrowest FIPS call path that can attach a class without inspecting payload bytes. [ASSUMED]
-   - Recommendation: make this the first Wave 0 source trace and test; do not mark LINK-08 complete on an ACK-only priority queue. [ASSUMED]
+1. **Trustworthy FIPS handshake/heartbeat traffic class — decided handling**
+   - Plan 03-01 resolves the metadata seam with a source-authored typed
+     `TrafficClass` tracer from the narrow FIPS handshake, rekey, heartbeat,
+     and ordinary-data callers through `TransportHandle`, Sound/FWAV, the
+     local bridge, and the browser scheduler boundary. The complete FIPS
+     payload remains opaque and is never inspected to infer priority.
+   - This is a planned source-level contract with focused Rust/TypeScript
+     tests; it is not pre-execution evidence that LINK-08 already passes.
 
-2. **What are exact two-laptop p95 unit and round-trip timings?**
-   - What we know: a local Chromium Quiet smoke emitted 1536 bytes in about 5.49 seconds and the existing implementation has a 750 ms guard, but neither is an Open-air throughput claim. [VERIFIED: .planning/phases/01-qualify-the-demo-substrate/01-RUNTIME-GAP-RESEARCH.md] [VERIFIED: apps/modem-ui/src/quiet-client.ts]
-   - What's unclear: the selected candidate timing, clipping and loss on the exact A/B pair. [ASSUMED]
-   - Recommendation: derive operational timeout from calibration; classify its evidence accurately and retain bootstrap fallback. [ASSUMED]
+2. **Exact target-laptop p95 unit and round-trip timings — decided handling**
+   - Runtime literal A→B then B→A calibration measures unit airtime and
+     round-trip timing for the actual selected directional candidates. The
+     scheduler derives its acknowledgement timeout from those p95 measurements
+     plus the configured guard, clamps the timeout to the planned 4–15 second
+     range, and keeps guard values within the selected candidate's validated
+     configuration bounds.
+   - Exact target-laptop loss, clipping, and timing remain unmeasured until the
+     physical run. Exact two-laptop `Open air` evidence therefore remains a
+     manual target-hardware gate and is not claimed before execution.
 
 ## Environment Availability
 
