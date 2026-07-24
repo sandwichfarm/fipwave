@@ -69,7 +69,7 @@ Requirements for the Sovereign Engineering demo-day proof of concept.
       bidirectional service with turn control and guard intervals so peer
       transmissions do not intentionally overlap.
 
-- [ ] **LINK-08**: Acoustic acknowledgements and FIPS handshake or heartbeat
+- [x] **LINK-08**: Acoustic acknowledgements and FIPS handshake or heartbeat
       traffic take priority over ordinary queued data.
 
 - [ ] **LINK-09**: Slow or failed acoustic delivery produces bounded
@@ -295,7 +295,7 @@ Roadmap phase mapping is populated during roadmap creation.
 | LINK-05 | Phase 3 | Pending |
 | LINK-06 | Phase 3 | Pending |
 | LINK-07 | Phase 3 | Pending |
-| LINK-08 | Phase 3 | Pending |
+| LINK-08 | Phase 3 | Complete |
 | LINK-09 | Phase 3 | Pending |
 | WEB-01 | Phase 1 | Complete |
 | WEB-02 | Phase 1 | Complete |
