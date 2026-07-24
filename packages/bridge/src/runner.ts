@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { lstat, readFile, realpath, writeFile } from 'node:fs/promises';
+import { lstat, readFile, realpath, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -108,11 +108,23 @@ export function renderFipsConfig(config: DemoConfig): string {
   ].join('\n');
 }
 
+/** Publish the secret-bearing config only after the bridge is accepting FIPS connections. */
+export async function publishFipsConfig(output: string, content: string): Promise<void> {
+  const temporary = `${output}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, content, { encoding: 'utf8', mode: 0o600 });
+    await rename(temporary, output);
+  } catch (error) {
+    await unlink(temporary).catch(() => undefined);
+    throw error;
+  }
+}
+
 export async function startProductionRunner(options: ProductionRunnerOptions): Promise<ProductionRunner> {
   assertText(options.machineId, 'machine ID'); assertText(options.report, 'report target');
   const demoConfig = options.demoConfig ?? (options.role === 'A' ? resolveDemoConfig('a') : options.role === 'B' ? resolveDemoConfig('b') : fail('role must be literal A or B'));
   if (options.role && options.role !== demoConfig.role) fail('role does not match resolved config');
-  if (options.fipsConfigOutput) await writeFile(options.fipsConfigOutput, renderFipsConfig(demoConfig), { encoding: 'utf8', mode: 0o644 });
+  const fipsConfig = options.fipsConfigOutput ? renderFipsConfig(demoConfig) : undefined;
   const runtimePort = options.demoConfig ? demoConfig.bridge.browserPort : options.port;
   if (typeof runtimePort !== 'number' || !Number.isInteger(runtimePort) || runtimePort < 0 || runtimePort > 65_535) fail('port is invalid');
   let evidenceMode: RunnerQualificationConfig['evidenceMode'] = options.evidenceMode ?? 'Loopback'; let tunEvidence = unavailableTunEvidence();
@@ -174,6 +186,7 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
   try {
     const bridge = await (options.createBridgeServerForTests ?? createBridgeServer)(bridgeOptions);
     owner.register('bridge', bridge.close);
+    if (options.fipsConfigOutput && fipsConfig) await publishFipsConfig(options.fipsConfigOutput, fipsConfig);
     await options.afterBridgeStartedForTests?.();
     const publicConfig = Object.freeze({ ...toPublicDemoConfig(demoConfig), reportTarget: config.reportTarget });
     return { ...bridge, close: () => owner.close(), config: publicConfig };

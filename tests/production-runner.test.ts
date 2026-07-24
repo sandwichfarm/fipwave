@@ -193,6 +193,26 @@ describe('production runner', () => {
     expect(bridgeClose).toHaveBeenCalledOnce();
   });
 
+  it('publishes the FIPS config atomically only after the bridge listener is ready', async () => {
+    const configPath = path.join(await mkdtemp(path.join(tmpdir(), 'fipwave-runtime-')), 'fips.yaml');
+    const bridgeClose = vi.fn(async () => {});
+    let listenerReady = false;
+    const runner = await startProductionRunner({
+      machineId: 'laptop-a', role: 'A', port: 0, report: await reportPath('config-order'), tunEvidence: 'none', uiDir: await fixtureUi(), fipsConfigOutput: configPath,
+      createBridgeServerForTests: async () => {
+        listenerReady = true;
+        await expect(readFile(configPath, 'utf8')).rejects.toThrow();
+        return { port: 4_310, sendPcmPlayback: () => {}, startCyrinx: async () => ({ codec: 'quiet', reasonCode: null, deadlineAtMs: 1 }), reset: async () => 2, close: bridgeClose, state: () => ({ epoch: 1, rejectedFrames: 0, overflowedQueues: [], discontinuities: 0, queueCounts: {}, stampedResults: [], packetCounters: { browserToFips: 0, fipsToBrowser: 0 }, evidenceClass: 'Loopback', acousticReady: false, peerConnected: false, pingReady: false }) };
+      },
+      afterBridgeStartedForTests: async () => {
+        expect(listenerReady).toBe(true);
+        expect(await readFile(configPath, 'utf8')).toContain('bridge_url:');
+      },
+    });
+    await runner.close();
+    expect(bridgeClose).toHaveBeenCalledOnce();
+  });
+
   it('cleans the owned bridge after partial startup failure without exposing internal configuration', async () => {
     const bridgeClose = vi.fn(async () => {});
     await expect(startProductionRunner({
