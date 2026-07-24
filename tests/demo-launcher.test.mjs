@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import test from 'node:test';
 
-import { composeInvocation, createDemoPlan, parseDemoArgs, waitForStop } from '../scripts/demo.mjs';
+import { composeInvocation, createDemoPlan, parseDemoArgs, parseMacAudioHardware, waitForStop } from '../scripts/demo.mjs';
 
 test('demo accepts only one literal role or check mode', () => {
   assert.deepEqual(parseDemoArgs(['a']), { mode: 'run', role: 'a' });
@@ -25,6 +25,7 @@ test('demo plans derive every runtime input from the role', () => {
     ROLE: 'A',
     MACHINE_ID: 'fipwave-a',
     BROWSER_PORT: '4310',
+    FAST_GUARD_MS: '250',
     DEMO_ARTIFACT_DIR: a.artifactDirectory,
   });
   assert.match(a.artifactDirectory, /\/\.artifacts\/demo\/20260724T100000000Z-a$/);
@@ -55,4 +56,21 @@ test('demo keeps termination signals absorbed until owned cleanup can finish', a
   assert.equal(await stopped, 'SIGINT');
   assert.equal(signals.listenerCount('SIGTERM'), 1);
   assert.doesNotThrow(() => signals.emit('SIGTERM'));
+});
+
+test('demo preflight resolves compatible default macOS microphone and speaker facts', () => {
+  const profile = [
+    '        MacBook Pro Microphone:',
+    '          Default Input Device: Yes',
+    '          Current SampleRate: 48000',
+    '        External Headphones:',
+    '          Default Output Device: Yes',
+    '          Current SampleRate: 44100',
+  ].join('\n');
+  assert.deepEqual(parseMacAudioHardware(profile), {
+    input: { name: 'MacBook Pro Microphone', sampleRate: 48_000 },
+    output: { name: 'External Headphones', sampleRate: 44_100 },
+  });
+  assert.throws(() => parseMacAudioHardware(profile.replace('Current SampleRate: 48000', 'Current SampleRate: 96000')), /unsupported 96000 Hz/);
+  assert.throws(() => parseMacAudioHardware(profile.replace('Default Output Device: Yes', 'Default Output Device: No')), /no default speaker/);
 });

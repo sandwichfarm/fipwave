@@ -7,13 +7,14 @@ services:
       ROLE: ${ROLE:-A}
       MACHINE_ID: ${MACHINE_ID:-fipwave-a}
       BUILD_COMMIT: ${BUILD_COMMIT:-unresolved}
+      FAST_GUARD_MS: ${FAST_GUARD_MS:-250}
     command:
       - sh
       - -ec
       - >-
-        exec node dist/server/packages/bridge/src/runner.js --machine-id ${MACHINE_ID:-fipwave-a} --role ${ROLE:-A} --bind-host 0.0.0.0 --port 4310 --report /artifacts/qualification.json --tun-evidence none --evidence-mode Loopback --fips-config /runtime/fips.yaml
+        exec node dist/server/packages/bridge/src/runner.js --machine-id ${MACHINE_ID:-fipwave-a} --role ${ROLE:-A} --bind-host 0.0.0.0 --port ${BROWSER_PORT:-4310} --report /artifacts/qualification.json --tun-evidence none --evidence-mode Loopback --fips-config /runtime/fips.yaml --fast-guard-ms ${FAST_GUARD_MS:-250}
     ports:
-      - "127.0.0.1:${BROWSER_PORT:-4310}:4310"
+      - "127.0.0.1:${BROWSER_PORT:-4310}:${BROWSER_PORT:-4310}"
     security_opt:
       - no-new-privileges:true
     privileged: false

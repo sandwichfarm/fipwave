@@ -70,6 +70,7 @@ let resetFailure = '';
 let proofState: ProofState = reduceProofState(undefined, { type: 'snapshot', value: { state: 'loading', pingReady: false, reason: 'proof_unavailable', result: null } });
 let proofRequest: Promise<void> | undefined;
 let acousticCapability: Readonly<{ epoch: number; bytes: Uint8Array }> | undefined;
+let fipsDetailsRevealed = false;
 type MeasuredProbe = Readonly<{ received: true; bytePerfect: true; corrupt: false; missing: false; duplicate: false; discontinuity: boolean; latencyMs: undefined; signalDb: undefined; clipping: undefined; confidence: 1 }>;
 const receivedProbes = new Map<string, MeasuredProbe>();
 function probeReceiptKey(sessionId: bigint, direction: number, candidateIndex: number, probeIndex: number): string {
@@ -93,6 +94,29 @@ let acousticSession: AcousticSession | undefined;
 let acousticAdapter: AcousticSessionAdapter | undefined;
 let acousticTx = 0;
 let acousticRx = 0;
+let acousticFramesTx = 0;
+let acousticFramesRx = 0;
+type DemoStageTiming = Readonly<{ label: string; durationMs: number }>;
+let activeDemoStage: { label: string; startedAtMs: number } | undefined;
+let completedDemoStages: DemoStageTiming[] = [];
+function resetDemoStageTimings(): void {
+  activeDemoStage = undefined;
+  completedDemoStages = [];
+}
+function syncDemoStageTiming(label: string, nowMs = performance.now()): Readonly<{ elapsedMs: number; completed: readonly DemoStageTiming[] }> {
+  if (!activeDemoStage) activeDemoStage = { label, startedAtMs: nowMs };
+  else if (activeDemoStage.label !== label) {
+    completedDemoStages = [...completedDemoStages, Object.freeze({ label: activeDemoStage.label, durationMs: Math.max(0, nowMs - activeDemoStage.startedAtMs) })].slice(-8);
+    activeDemoStage = { label, startedAtMs: nowMs };
+  }
+  return Object.freeze({ elapsedMs: Math.max(0, nowMs - activeDemoStage.startedAtMs), completed: completedDemoStages });
+}
+function formatDemoDuration(durationMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(durationMs / 1_000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes ? `${minutes}:${String(seconds).padStart(2, '0')}` : `${seconds}s`;
+}
 type GateState = 'not-started' | 'cyrinx-running';
 type CorpusRow = { direction: string; caseId: string; evidenceClass: 'Fixture' | 'Loopback' | 'Open air'; result: string; airtime: string };
 let gateState: GateState = 'not-started';
@@ -191,6 +215,7 @@ function configureAcousticSession(config: Readonly<RunnerConfig>): void {
   const modem = {
     send(unit: Uint8Array): Promise<void> {
       const queuedEpoch = epoch;
+      acousticFramesTx += 1;
       // Quiet's Promise is local playback completion plus guard only. The
       // session's remote ACK and heartbeat remain the delivery/readiness proof.
       transmit = transmit.then(() => quiet.sendUnit(unit, queuedEpoch)).then(() => undefined, () => {
@@ -200,6 +225,7 @@ function configureAcousticSession(config: Readonly<RunnerConfig>): void {
     },
     onUnit(handler: (unit: Uint8Array) => void): () => void {
       return quiet.onUnit((unit) => {
+        acousticFramesRx += 1;
         // Quiet has already delivered a modem frame.  A FAS1 parse gives us an
         // actual current-generation integrity observation; it does not invent
         // unmeasurable RSSI, clipping, or one-way latency values.
@@ -800,10 +826,12 @@ function demoStage(): DemoStage {
     CalibratingBToA: { label: 'Calibrating B → A', explanation: 'Testing the return acoustic direction.', tone: 'working' },
     Committing: { label: 'Committing settings', explanation: 'Both computers are agreeing on one modem configuration.', tone: 'working' },
     AwaitingHeartbeat: { label: 'Connecting FIPS', explanation: 'Waiting for the first authenticated acoustic heartbeat.', tone: 'working' },
-    Ready: { label: 'Connected', explanation: 'FIPS packets are now crossing the air gap as sound.', tone: 'ready' },
+    Ready: proofState.mode === 'ready' && !proofState.needsRefresh
+      ? { label: 'Connected', explanation: 'The authenticated FIPS sound link is ready for packets.', tone: 'ready' }
+      : { label: 'Sound link established', explanation: 'Acoustic heartbeats are active. Verifying the authenticated FIPS peer before claiming packet transit.', tone: 'working' },
     Degraded: { label: 'Degraded', explanation: 'The acoustic link needs recovery or recalibration.', tone: 'warning' },
     Recovering: { label: 'Recalibrating', explanation: 'Recovering the sound link with bounded retries.', tone: 'warning' },
-    Error: { label: 'Error', explanation: 'The acoustic session stopped safely. Reset to try again.', tone: 'error' },
+    Error: { label: 'Error', explanation: `Acoustic negotiation stopped: ${acousticSession?.snapshot.reason ?? (failure || 'unknown reason')}.`, tone: 'error' },
   };
   return stages[state ?? 'Idle'] ?? { label: 'Starting', explanation: 'Preparing the local acoustic modem.', tone: 'working' };
 }
@@ -815,6 +843,7 @@ function demoStatus(value: string, active = false): HTMLParagraphElement {
 }
 
 async function startDemo(): Promise<void> {
+  if (uiState === 'idle') resetDemoStageTimings();
   if (uiState === 'idle') await arm();
   // The production runner's acoustic projection is the fixed demo authority:
   // enter the already-qualified audible Quiet path immediately instead of
@@ -831,11 +860,23 @@ function renderDemo(): void {
   const node = role ? `Node ${role}` : 'Preparing node';
   const peerRoleLabel = role ? `Node ${peerRole(role)}` : 'Peer node';
   const stage = demoStage();
+  const stageTiming = syncDemoStageTiming(stage.label);
   const acoustic = acousticSession ? projectAcousticStatus(acousticSession.snapshot, runnerConfig?.evidenceClass ?? 'Fixture', acousticTx, acousticRx) : undefined;
-  const localFipsAdapterReady = Boolean(acoustic?.ready && browserPacketReady && bridgeState?.soundTransport === 'started');
   const proofReady = proofState.mode === 'ready' && !proofState.needsRefresh;
   const profile = acousticSession?.snapshot.settings?.aToB.profileId ?? runnerConfig?.acoustic?.profiles[0] ?? 'Bootstrap profile pending';
   const identity = runnerConfig?.machineId ?? 'Loading local identity…';
+  const acousticSnapshot = acousticSession?.snapshot;
+  const calibrationDirection = acousticSnapshot?.state === 'CalibratingAToB' ? 'AtoB' : acousticSnapshot?.state === 'CalibratingBToA' ? 'BtoA' : undefined;
+  const calibrationLabel = calibrationDirection === 'AtoB' ? 'A → B' : calibrationDirection === 'BtoA' ? 'B → A' : undefined;
+  const probesPerDirection = runnerConfig?.acoustic?.calibration.probesPerDirection ?? 1;
+  const candidates = runnerConfig?.acoustic?.candidates ?? [];
+  const calibrationTotal = candidates.length * probesPerDirection;
+  const calibrationEntries = calibrationDirection ? acousticSnapshot?.ledger.filter((entry) => entry.direction === calibrationDirection) ?? [] : [];
+  const calibrationProgress = Math.min(calibrationEntries.length, calibrationTotal);
+  const candidateIndex = Math.min(Math.floor(calibrationProgress / probesPerDirection), Math.max(0, candidates.length - 1));
+  const activeCandidate = candidates[candidateIndex];
+  const lastProbe = calibrationEntries.at(-1);
+  const localIsTransmitting = Boolean(calibrationDirection && acousticSnapshot?.turnOwner === role);
 
   const shell = element('main'); shell.className = 'demo-shell'; shell.dataset.testid = 'demo-dashboard';
   const top = element('header'); top.className = 'demo-topbar';
@@ -855,50 +896,104 @@ function renderDemo(): void {
   top.append(topActions); shell.append(top);
 
   const primary = element('section'); primary.className = `demo-primary tone-${stage.tone}`; primary.setAttribute('aria-labelledby', 'demo-stage');
-  const stageTitle = element('p', 'Current stage'); stageTitle.className = 'eyebrow'; primary.append(stageTitle);
+  const stageHeader = element('div'); stageHeader.className = 'demo-stage-header';
+  const stageTitle = element('p', 'Current stage'); stageTitle.className = 'eyebrow';
+  const stageTimer = element('p', `Elapsed ${formatDemoDuration(stageTiming.elapsedMs)}`); stageTimer.className = 'demo-stage-timer'; stageTimer.dataset.testid = 'stage-timer';
+  stageHeader.append(stageTitle, stageTimer); primary.append(stageHeader);
   const stageName = element('h2', stage.label); stageName.id = 'demo-stage'; primary.append(stageName, element('p', stage.explanation));
+  if (acoustic?.ready) {
+    const packetHero = element('div'); packetHero.className = 'demo-packet-hero'; packetHero.dataset.testid = 'fips-packet-hero';
+    const packetLabel = element('p', 'FIPS packets'); packetLabel.className = 'demo-packet-label';
+    const packetValues = element('div'); packetValues.className = 'demo-packet-values';
+    const tx = element('div'); tx.append(element('span', 'TX'), element('strong', String(acoustic.txPackets)));
+    const rx = element('div'); rx.append(element('span', 'RX'), element('strong', String(acoustic.rxPackets)));
+    packetValues.append(tx, rx); packetHero.append(packetLabel, packetValues); primary.append(packetHero);
+  }
   const stageState = demoStatus(`Status: ${stage.label}`, stage.tone === 'working'); stageState.setAttribute('role', stage.tone === 'error' ? 'alert' : 'status'); stageState.setAttribute('aria-live', stage.tone === 'error' ? 'assertive' : 'polite'); primary.append(stageState);
   shell.append(primary);
 
   const grid = element('div'); grid.className = 'demo-grid';
   const peer = element('section'); peer.className = 'demo-card'; peer.append(element('h2', 'Peer link'));
   peer.append(demoStatus(`${peerRoleLabel} · ${role ? (role === 'A' ? 'acoustically isolated peer' : 'Wi-Fi gateway peer') : 'waiting for role'}`));
+  if (runnerConfig?.fipsNetwork) {
+    const reveal = control(fipsDetailsRevealed ? 'Hide FIPS details' : 'Reveal FIPS details', () => { fipsDetailsRevealed = !fipsDetailsRevealed; render(); }, false, 'secondary');
+    reveal.setAttribute('aria-expanded', String(fipsDetailsRevealed));
+    const network = element('div'); network.className = `demo-network-details${fipsDetailsRevealed ? '' : ' is-concealed'}`;
+    network.setAttribute('aria-hidden', String(!fipsDetailsRevealed));
+    network.append(demoStatus(`Peer npub: ${runnerConfig.fipsNetwork.peerPublicKey}`), demoStatus(`Peer IPv6: ${runnerConfig.fipsNetwork.peerIpv6}`));
+    peer.append(reveal, network);
+  }
   peer.append(demoStatus(`Acoustic: ${acoustic?.ready ? 'Connected — committed and heartbeating' : acoustic ? `${acoustic.phase} — not yet ready` : 'Not started'}`, Boolean(acoustic && !acoustic.ready && stage.tone === 'working')));
-  peer.append(demoStatus(`FIPS: ${proofReady ? 'Authenticated Sound peer verified' : localFipsAdapterReady ? 'Local sound adapter admitted — peer proof pending' : 'Waiting for acoustic readiness'}`));
+  peer.append(demoStatus(`FIPS: ${proofReady ? 'Authenticated Sound peer verified' : acoustic?.ready && browserPacketReady && bridgeState?.soundTransport === 'started' ? 'Readiness sent to local adapter — peer proof pending' : 'Waiting for acoustic readiness'}`));
   grid.append(peer);
 
-  const activity = element('section'); activity.className = 'demo-card demo-activity'; activity.append(element('h2', 'Live link'));
-  activity.append(demoStatus(`Profile: ${profile}`));
-  activity.append(demoStatus(`Heartbeat: ${acoustic?.currentHeartbeat ? 'Current' : 'Waiting'}`, Boolean(acoustic?.currentHeartbeat)));
-  activity.append(demoStatus(`Packets TX / RX: ${acoustic?.txPackets ?? 0} / ${acoustic?.rxPackets ?? 0}`));
-  activity.append(demoStatus(`Retries / loss: ${acoustic?.retries ?? 0} / ${acoustic?.dropped ?? 0}`));
-  activity.append(demoStatus(`FIPS proof: ${proofState.mode === 'ready' ? 'Ready' : proofState.message}`));
+  const activity = element('section'); activity.className = 'demo-card demo-activity';
+  if (calibrationDirection && calibrationLabel) {
+    activity.append(element('h2', 'Live calibration'));
+    const signal = element('div'); signal.className = `demo-signal ${localIsTransmitting ? 'is-transmitting' : 'is-listening'}`;
+    for (let index = 0; index < 7; index += 1) signal.append(element('span'));
+    signal.setAttribute('aria-hidden', 'true'); activity.append(signal);
+    activity.append(demoStatus(localIsTransmitting ? `Broadcasting ${calibrationLabel} test tone` : `Listening for ${calibrationLabel} test tone`, true));
+    const progress = document.createElement('progress'); progress.max = Math.max(1, calibrationTotal); progress.value = calibrationProgress; progress.setAttribute('aria-label', `${calibrationLabel} calibration progress`); activity.append(progress);
+    activity.append(demoStatus(`Probe ${Math.min(calibrationProgress + 1, Math.max(1, calibrationTotal))} / ${Math.max(1, calibrationTotal)} · candidate ${Math.min(candidateIndex + 1, Math.max(1, candidates.length))} / ${Math.max(1, candidates.length)}`));
+    if (activeCandidate) activity.append(demoStatus(`${activeCandidate.id} · ${activeCandidate.payloadBytes} B · gain ${activeCandidate.playbackGain}× · guard ${activeCandidate.guardMs} ms`));
+    activity.append(demoStatus(lastProbe ? `Last observation: ${lastProbe.observation.bytePerfect && lastProbe.observation.received ? 'byte-perfect ✓' : 'rejected'} · confidence ${Math.round(lastProbe.observation.confidence * 100)}%` : 'Last observation: waiting for first decoded probe'));
+  } else if (!acoustic?.ready) {
+    activity.append(element('h2', 'Protocol activity'));
+    const signal = element('div'); signal.className = 'demo-signal is-listening';
+    for (let index = 0; index < 7; index += 1) signal.append(element('span'));
+    signal.setAttribute('aria-hidden', 'true'); activity.append(signal);
+    activity.append(demoStatus(`Handshake state: ${acousticSnapshot?.state ?? 'Starting'}`, stage.tone === 'working'));
+    activity.append(demoStatus(`Profile offer: ${profile}`));
+    activity.append(demoStatus(acousticSnapshot?.reason ? `Reason: ${acousticSnapshot.reason}` : 'Waiting for the next authenticated acoustic message'));
+  } else {
+    activity.append(element('h2', 'Live link'));
+    activity.append(demoStatus(`Profile: ${profile}`));
+    const directionSettings = role === 'A' ? acousticSnapshot?.settings?.aToB : acousticSnapshot?.settings?.bToA;
+    if (directionSettings) activity.append(demoStatus(`Modem: ${directionSettings.payloadBytes} B · gain ${directionSettings.playbackGain}× · guard ${directionSettings.guardMs} ms`));
+    const turn = acousticSnapshot?.turnOwner === role ? 'Broadcasting from this node' : `Listening to Node ${acousticSnapshot?.turnOwner ?? peerRole(role!)}`;
+    activity.append(demoStatus(`Turn: ${turn}`, true));
+    activity.append(demoStatus(`Heartbeat: ${acoustic.currentHeartbeat ? `Current · ${new Date(acousticSnapshot?.lastHeartbeatAtMs ?? 0).toLocaleTimeString()}` : 'Waiting'}`, Boolean(acoustic.currentHeartbeat)));
+    activity.append(demoStatus(`Acoustic frames TX / RX: ${acousticFramesTx} / ${acousticFramesRx}`));
+    activity.append(demoStatus(`FIPS packets TX / RX: ${acoustic.txPackets} / ${acoustic.rxPackets}`));
+    activity.append(demoStatus(`Retries / loss: ${acoustic.retries} / ${acoustic.dropped}`));
+    activity.append(demoStatus(`FIPS proof: ${proofState.mode === 'ready' ? 'Ready' : proofState.message}`));
+  }
+  const stageLog = element('div'); stageLog.className = 'demo-stage-log'; stageLog.append(element('h3', 'Stage log'));
+  if (stageTiming.completed.length === 0) stageLog.append(demoStatus('Waiting for the first completed stage'));
+  else for (const entry of stageTiming.completed.slice(-4)) stageLog.append(demoStatus(`${entry.label} · ${formatDemoDuration(entry.durationMs)}`));
+  activity.append(stageLog);
   grid.append(activity);
 
-  const next = element('section'); next.className = 'demo-card demo-next'; next.append(element('h2', 'Next action'));
+  const next = element('section'); next.className = 'demo-card demo-next';
+  const nextCopyBlock = element('div'); nextCopyBlock.className = 'demo-next-copy'; nextCopyBlock.append(element('h2', 'Next action'));
   const nextCopy = resetFailure ? `Reset needed: ${resetFailure}` : stage.explanation;
-  next.append(element('p', nextCopy));
+  nextCopyBlock.append(element('p', nextCopy));
+  const nextActions = element('div'); nextActions.className = 'demo-next-actions';
   const resetInFlight = bridgeState?.status === 'resetting';
   const unavailable = Boolean(configFailure) && !developmentDiagnostic;
-  if (uiState === 'idle' && !unavailable) next.append(control('Start / Connect', startDemo, !runnerConfig && !developmentDiagnostic));
-  if (acoustic && !acoustic.ready && uiState === 'ready' && !resetInFlight) next.append(control('Recalibrate', reset, false, 'secondary'));
+  if (uiState === 'idle' && !unavailable) nextActions.append(control('Start / Connect', startDemo, !runnerConfig && !developmentDiagnostic));
+  if (acoustic && !acoustic.ready && uiState === 'ready' && !resetInFlight) nextActions.append(control('Recalibrate', reset, false, 'secondary'));
   const proofRefresh = control('Refresh proof status', refreshProofStatus, Boolean(proofRequest), 'secondary');
-  next.append(proofRefresh);
+  nextActions.append(proofRefresh);
   if (role === 'A') {
     const ping = control('Run sound-only ping', runSoundProofPing, proofState.mode !== 'ready' || proofState.needsRefresh || Boolean(proofRequest));
     if (proofState.mode === 'running') ping.setAttribute('aria-busy', 'true');
-    next.append(ping);
-  } else if (role === 'B') next.append(element('p', 'Role B is the acoustically isolated node. The proof ping is issued from Role A.'));
-  if (uiState !== 'requesting') next.append(control('Reset', reset, resetInFlight, 'secondary'));
+    nextActions.append(ping);
+  } else if (role === 'B') nextCopyBlock.append(element('p', 'Role B is isolated; the proof ping is issued from Role A.'));
+  if (uiState !== 'requesting') nextActions.append(control('Reset', reset, resetInFlight, 'secondary'));
+  next.append(nextCopyBlock, nextActions);
   grid.append(next); shell.append(grid);
 
   const footer = element('footer'); footer.className = 'demo-footer';
   footer.append(element('span', `Evidence: ${runnerConfig?.evidenceClass ?? 'Unknown'} — local status never proves an over-air peer by itself.`));
-  footer.append(element('span', `Last activity: ${bridgeState?.lastEventAt ?? 'No local bridge event yet'}`));
+  const lastActivity = bridgeState?.lastEventAt && Date.parse(bridgeState.lastEventAt) > 0 ? bridgeState.lastEventAt : 'No FIPS bridge packet yet';
+  footer.append(element('span', `Last activity: ${lastActivity}`));
   shell.append(footer); appRoot.append(shell);
 }
 
 function render(): void {
+  appRoot.classList.toggle('demo-app', !debugMode);
   if (!debugMode) { renderDemo(); return; }
   appRoot.replaceChildren();
   const header = element('header');
@@ -1255,6 +1350,7 @@ async function appendQuietEvidence(received: ReceiveCaseEvidence): Promise<void>
 
 async function reset(): Promise<void> {
   if (uiState === 'requesting') return;
+  resetDemoStageTimings();
   bridgeState = reduceBridgeState(bridgeState, { type: 'reset-start' });
   uiState = 'requesting'; failure = ''; resetFailure = ''; render();
   try {
@@ -1300,5 +1396,19 @@ void fetchRunnerConfig().then((config) => {
 // Session state and heartbeats are owned by the acoustic controller. Keep the
 // audience projection fresh even between controller callbacks without exposing
 // any additional transport authority to the UI.
-window.setInterval(() => { if (!debugMode) render(); }, 750);
+let observedDemoState = '';
+window.setInterval(() => {
+  if (debugMode) return;
+  const acoustic = acousticSession?.snapshot;
+  const current = [
+    uiState, failure, resetFailure, bridgeState?.status, bridgeState?.epoch,
+    acoustic?.state, acoustic?.reason, acoustic?.ready, acoustic?.lastHeartbeatAtMs,
+    acoustic?.ledger.length, acoustic?.turnOwner, acoustic?.counters.retries, acoustic?.counters.dropped,
+    acousticTx, acousticRx, acousticFramesTx, acousticFramesRx, proofState.mode, proofState.needsRefresh,
+    Math.floor(performance.now() / 1_000),
+  ].join('|');
+  if (current === observedDemoState) return;
+  observedDemoState = current;
+  render();
+}, 250);
 window.setInterval(() => { if (!developmentDiagnostic && !debugMode && !proofRequest) void refreshProofStatus(); }, 5_000);

@@ -9,7 +9,15 @@ import { fileURLToPath } from 'node:url';
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const REQUIRED_NODE = '22.23.1';
-const BROWSER_PORT = 4310;
+const configuredPort = Number(process.env.FIPWAVE_DEMO_PORT ?? '4310');
+if (!Number.isSafeInteger(configuredPort) || configuredPort < 1024 || configuredPort > 65_535) {
+  throw new Error('FIPWAVE_DEMO_PORT must be an integer from 1024 through 65535');
+}
+const configuredFastGuardMs = Number(process.env.FIPWAVE_GUARD_MS ?? '250');
+if (!Number.isSafeInteger(configuredFastGuardMs) || configuredFastGuardMs < 50 || configuredFastGuardMs > 1_500) {
+  throw new Error('FIPWAVE_GUARD_MS must be an integer from 50 through 1500');
+}
+const BROWSER_PORT = configuredPort;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 
 export function parseDemoArgs(argv) {
@@ -41,6 +49,7 @@ export function createDemoPlan(role, now = new Date()) {
       ROLE: role.toUpperCase(),
       MACHINE_ID: `fipwave-${role}`,
       BROWSER_PORT: String(BROWSER_PORT),
+      FAST_GUARD_MS: String(configuredFastGuardMs),
       DEMO_ARTIFACT_DIR: artifactDirectory,
     }),
   });
@@ -98,6 +107,55 @@ async function chromeAvailable() {
   throw new Error('headed Chrome or Chromium is required');
 }
 
+export function parseMacAudioHardware(profile) {
+  const devices = [];
+  let current;
+  for (const line of profile.split(/\r?\n/)) {
+    const header = line.match(/^ {8}([^ ].*):$/);
+    if (header) {
+      current = { name: header[1], properties: {} };
+      devices.push(current);
+      continue;
+    }
+    const property = current && line.match(/^ {10}([^:]+): (.*)$/);
+    if (property) current.properties[property[1]] = property[2];
+  }
+  const input = devices.find((device) => device.properties['Default Input Device'] === 'Yes');
+  const output = devices.find((device) => device.properties['Default Output Device'] === 'Yes');
+  if (!input) throw new Error('no default microphone is available; select an input device in System Settings → Sound');
+  if (!output) throw new Error('no default speaker is available; select an output device in System Settings → Sound');
+  const rate = (device, kind) => {
+    const value = Number(device.properties['Current SampleRate']);
+    if (value !== 44_100 && value !== 48_000) throw new Error(`${kind} ${device.name} uses unsupported ${String(device.properties['Current SampleRate'] ?? 'unknown')} Hz audio; select a 44.1 or 48 kHz device`);
+    return value;
+  };
+  return Object.freeze({
+    input: Object.freeze({ name: input.name, sampleRate: rate(input, 'microphone') }),
+    output: Object.freeze({ name: output.name, sampleRate: rate(output, 'speaker') }),
+  });
+}
+
+async function audioHardware() {
+  if (process.platform === 'darwin') {
+    const { stdout } = await execFileAsync('/usr/sbin/system_profiler', ['SPAudioDataType'], { maxBuffer: 2 * 1024 * 1024, timeout: 15_000 });
+    return parseMacAudioHardware(stdout);
+  }
+  if (process.platform === 'linux') {
+    const [source, sink] = await Promise.all([
+      commandVersion('pactl', ['get-default-source']),
+      commandVersion('pactl', ['get-default-sink']),
+    ]).catch(() => {
+      throw new Error('PipeWire/PulseAudio defaults are unavailable; install pactl and select a default microphone and speaker');
+    });
+    if (!source || !sink) throw new Error('default Linux microphone or speaker is unavailable; select both before starting the demo');
+    return Object.freeze({
+      input: Object.freeze({ name: source, sampleRate: 'verified by browser at arm time' }),
+      output: Object.freeze({ name: sink, sampleRate: 'verified by browser at arm time' }),
+    });
+  }
+  throw new Error(`audio preflight is not implemented for ${process.platform}; use macOS or Linux`);
+}
+
 export async function runPreflight({ requireFreePort = true } = {}) {
   if (process.versions.node !== REQUIRED_NODE) {
     throw new Error(`Node ${REQUIRED_NODE} is required; active version is ${process.versions.node}`);
@@ -107,10 +165,11 @@ export async function runPreflight({ requireFreePort = true } = {}) {
     access(path.join(ROOT, 'package-lock.json')),
     access(path.join(ROOT, 'codec-assets.lock.json')),
   ]);
-  const [docker, composeVersion, chrome] = await Promise.all([
+  const [docker, composeVersion, chrome, audio] = await Promise.all([
     commandVersion('docker', ['version', '--format', '{{.Server.Version}}']),
     commandVersion('docker', ['compose', 'version', '--short']),
     chromeAvailable(),
+    audioHardware(),
     commandVersion('docker', ['info', '--format', '{{.OSType}}']),
   ]);
   if (requireFreePort) await checkPortAvailable(BROWSER_PORT);
@@ -121,6 +180,7 @@ export async function runPreflight({ requireFreePort = true } = {}) {
     docker,
     compose: composeVersion,
     chrome,
+    audio,
     browserPort: BROWSER_PORT,
     platform: `${os.platform()}-${os.arch()}`,
   });
@@ -192,7 +252,10 @@ async function launchOwnedBrowser(plan, recorder) {
       args: ['--disable-infobars', '--no-first-run', '--disable-sync'],
     });
   }
-  const context = await browser.newContext();
+  // Use the real headed window dimensions. A fixed Playwright viewport stays
+  // 1280 px wide after the operator tiles two windows, which makes the
+  // dashboard appear clipped instead of responding to the presentation area.
+  const context = await browser.newContext({ viewport: null });
   await context.grantPermissions(['microphone'], { origin: `http://127.0.0.1:${plan.browserPort}` });
   const page = await context.newPage();
   page.on('console', (message) => {
@@ -262,9 +325,13 @@ export async function runDemo(role) {
     note: 'Physical inter-laptop acceptance must be recorded separately as Open air.',
   });
   try {
-    const preflight = await runPreflight();
-    await recorder.event('preflight-passed', preflight);
+    const preflight = await runPreflight({ requireFreePort: false });
+    // An interrupted prior run may still own this role's exact Compose
+    // project and loopback port. Reap only that known project before treating
+    // the port as an unrelated conflict.
     await compose(plan, ['down', '--volumes', '--remove-orphans']).catch(() => undefined);
+    await checkPortAvailable(plan.browserPort);
+    await recorder.event('preflight-passed', preflight);
     await compose(plan, ['up', '--detach', '--build', '--remove-orphans']);
     stackStarted = true;
     await recorder.event('compose-started', { project: plan.project });

@@ -86,7 +86,7 @@ export function checkFipsComposeSource(composeSource, bridgeDockerfile, fipsDock
   if (!bridgeDockerfile.includes('FROM node:22.23.1-bookworm-slim')) fail('bridge image must pin Node 22.23.1');
   if (!bridgeDockerfile.includes('COPY --from=build /app/codec-assets.lock.json ./') || !bridgeDockerfile.includes('COPY --from=build /app/.artifacts/codecs ./.artifacts/codecs')) fail('bridge runtime image must include verified codec inputs');
   if (!bridgeDockerfile.includes('mkdir -p .artifacts/qualification && chown -R node:node .artifacts')) fail('bridge runtime image must own its qualification output directory');
-  if (!composeSource.includes('--port 4310') || !composeSource.includes('--bind-host 0.0.0.0') || !composeSource.includes('--fips-config /runtime/fips.yaml') || composeSource.includes('socat') || composeSource.includes('TCP-LISTEN:')) fail('bridge must serve its published loopback port directly and generate the role config');
+  if (!composeSource.includes('--port ${BROWSER_PORT:-4310}') || !composeSource.includes('--bind-host 0.0.0.0') || !composeSource.includes('--fips-config /runtime/fips.yaml') || composeSource.includes('socat') || composeSource.includes('TCP-LISTEN:')) fail('bridge must serve its published loopback port directly and generate the role config');
   if (!/^\s+-\s+fips-control:\/run\/fips:ro\s*$/m.test(composeSource) || !/^\s+-\s+fips-control:\/run\/fips\s*$/m.test(composeSource)) fail('bridge and fips must share the private Unix control-socket volume only');
   if (!composeSource.includes('exec /usr/local/bin/fips --config /runtime/fips.yaml') || composeSource.includes('sleep", "infinity')) fail('fips must launch the generated sound configuration');
   if (!fipsDockerfile.includes('FROM rust:1.94.1-bookworm')) fail('fips image must pin Rust 1.94.1');
@@ -94,7 +94,7 @@ export function checkFipsComposeSource(composeSource, bridgeDockerfile, fipsDock
   if (!fipsDockerfile.includes('libdbus-1-3')) fail('fips runtime image must provide dbus runtime dependency');
   if (/\bnsec\b/i.test(composeSource)) fail('compose must not contain role secrets');
   if (!/^\s+network_mode:\s+service:bridge\s*$/m.test(composeSource)) fail('fips namespace target is missing');
-  if (!/^\s+-\s+"127\.0\.0\.1:\$\{BROWSER_PORT:-4310\}:4310"\s*$/m.test(composeSource)) fail('browser port must bind host loopback explicitly');
+  if (!/^\s+-\s+"127\.0\.0\.1:\$\{BROWSER_PORT:-4310\}:\$\{BROWSER_PORT:-4310\}"\s*$/m.test(composeSource)) fail('browser port must bind host loopback explicitly');
   return validateFipsComposeTopology({
     services: {
       bridge: {

@@ -38,10 +38,10 @@ describe('demo configuration authority', () => {
     expect(b.peer.publicKey).toBe(a.identity.publicKey);
     expect(a.calibrationCandidates).toEqual(b.calibrationCandidates);
     expect(a.calibrationCandidates.map((candidate) => candidate.profileId)).toEqual(['quiet-audible-7k-v1', 'quiet-audible-7k-v1', 'quiet-audible-7k-v1']);
-    expect(a.calibrationCandidates.map((candidate) => ({ id: candidate.id, payloadBytes: candidate.payloadBytes, playbackGain: candidate.playbackGain, ackTimeoutMs: candidate.ackTimeoutMs }))).toEqual([
-      { id: 'quiet-bootstrap-96-v1', payloadBytes: 96, playbackGain: 1, ackTimeoutMs: 4_000 },
-      { id: 'quiet-full-frame-v1', payloadBytes: 217, playbackGain: 1, ackTimeoutMs: 4_000 },
-      { id: 'quiet-bootstrap-gain-2-v1', payloadBytes: 96, playbackGain: 2, ackTimeoutMs: 4_000 },
+    expect(a.calibrationCandidates.map((candidate) => ({ id: candidate.id, payloadBytes: candidate.payloadBytes, playbackGain: candidate.playbackGain, guardMs: candidate.guardMs, ackTimeoutMs: candidate.ackTimeoutMs }))).toEqual([
+      { id: 'quiet-bootstrap-robust-v1', payloadBytes: 96, playbackGain: 1, guardMs: 750, ackTimeoutMs: 4_000 },
+      { id: 'quiet-full-frame-fast-v1', payloadBytes: 217, playbackGain: 1, guardMs: 100, ackTimeoutMs: 4_000 },
+      { id: 'quiet-bootstrap-loud-v1', payloadBytes: 96, playbackGain: 2, guardMs: 500, ackTimeoutMs: 4_000 },
     ]);
     expect(a.identity.publicKey).toBe('npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m');
     expect(b.identity.publicKey).toBe('npub1f49ke5fkzqev4x7j46uajq92f4zan6kcpty5yvm5c3g6wf2dqanqn7qsy2');
@@ -52,8 +52,8 @@ describe('demo configuration authority', () => {
       calibrationCandidates: expect.any(Array),
       acoustic: {
         protocol: { maximumBodyBytes: 217, maximumPacketBytes: 1357, maxFragments: 16 },
-        arq: { windowSize: 4, maxAttempts: 3, maxQueuedPackets: 4, deliveredIdHistory: 32 },
-        calibration: { maxCandidates: 3, probesPerDirection: 4, deadlineMs: 120_000, maximumPlaybackGain: 2 },
+        arq: { windowSize: 4, maxAttempts: 3, maxQueuedPackets: 16, deliveredIdHistory: 32 },
+        calibration: { maxCandidates: 3, probesPerDirection: 1, deadlineMs: 120_000, maximumPlaybackGain: 2 },
       },
       retries: { maxAttempts: expect.any(Number), minDelayMs: expect.any(Number), maxDelayMs: expect.any(Number) },
       heartbeat: { intervalMs: expect.any(Number), deadLinkTimeoutMs: expect.any(Number) },
@@ -80,9 +80,10 @@ describe('demo configuration authority', () => {
       bridge: { browserPort: 4_410, fipsPort: 4_410 },
       retries: { maxAttempts: 3, minDelayMs: 600, maxDelayMs: 1_200 },
       heartbeat: { intervalMs: 2_000, deadLinkTimeoutMs: 8_000 },
+      acoustic: { fastGuardMs: 150 },
     });
 
-    expect(overridden).toMatchObject({ bridge: { browserPort: 4_410 }, retries: { maxAttempts: 3 }, heartbeat: { deadLinkTimeoutMs: 8_000 } });
+    expect(overridden).toMatchObject({ bridge: { browserPort: 4_410 }, retries: { maxAttempts: 3 }, heartbeat: { deadLinkTimeoutMs: 8_000 }, calibrationCandidates: [{ guardMs: 750 }, { guardMs: 150 }, { guardMs: 500 }] });
     expect(JSON.stringify(canonical)).toBe(before);
     expect(Object.isFrozen(overridden)).toBe(true);
     expect(Object.isFrozen(overridden.bridge)).toBe(true);

@@ -40,8 +40,15 @@ test('one demo Start / Connect enters Quiet acoustic startup without requesting 
   await expect(start).toBeEnabled();
   await start.click();
 
-  await expect(page.getByText('Profile: quiet-audible-7k-v1')).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText('Profile offer: quiet-audible-7k-v1')).toBeVisible({ timeout: 30_000 });
   await expect(page.getByRole('heading', { name: 'Handshake' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Protocol activity' })).toBeVisible();
+  const activityBars = page.locator('.demo-signal span');
+  await expect(activityBars).toHaveCount(7);
+  await expect(activityBars.first()).toHaveCSS('animation-name', 'demo-signal');
+  await expect(page.getByText(/^Heartbeat:/)).toHaveCount(0);
+  await expect(page.getByText(/^Packets TX \/ RX:/)).toHaveCount(0);
+  await expect(page.getByText(/^FIPS proof:/)).toHaveCount(0);
   await expect(page.getByText(/^Acoustic: (Listening|HelloSent) — not yet ready$/)).toBeVisible();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __fipwaveSentTypes: number[] }).__fipwaveSentTypes)).not.toContain(5);
 });

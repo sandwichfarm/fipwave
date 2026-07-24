@@ -9,6 +9,12 @@ async function loadDemo(page: import('@playwright/test').Page, role: 'A' | 'B') 
       tunEvidence: 'none',
       evidenceMode: 'Loopback',
       evidenceClass: 'Loopback',
+      fipsNetwork: {
+        localPublicKey: role === 'A' ? 'npub1localaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' : 'npub1localbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        peerPublicKey: role === 'A' ? 'npub1peerbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' : 'npub1peeraaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        localIpv6: role === 'A' ? 'fd69:e08d:65cc:3a6b:9c2c:2ac4:bd40:5e4b' : 'fd46:f688:3bb:f389:e1df:f3e:3af3:9c30',
+        peerIpv6: role === 'A' ? 'fd46:f688:3bb:f389:e1df:f3e:3af3:9c30' : 'fd69:e08d:65cc:3a6b:9c2c:2ac4:bd40:5e4b',
+      },
     },
   }));
   await page.goto('http://127.0.0.1:5173/?demo=1');
@@ -25,6 +31,12 @@ test('default audience dashboard fits a 1366×768 laptop viewport without scroll
   await expect(page.getByRole('heading', { name: 'Idle' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Start / Connect' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Debug' })).toBeVisible();
+  const network = page.locator('.demo-network-details');
+  await expect(network).toHaveCSS('filter', 'blur(6px)');
+  await page.getByRole('button', { name: 'Reveal FIPS details' }).click();
+  await expect(page.getByText(/^Peer npub: npub1peerb/)).toBeVisible();
+  await expect(page.getByText('Peer IPv6: fd46:f688:3bb:f389:e1df:f3e:3af3:9c30')).toBeVisible();
+  await expect(network).toHaveCSS('filter', 'none');
   expect(await page.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight)).toBe(true);
 });
 

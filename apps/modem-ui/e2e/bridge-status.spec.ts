@@ -43,7 +43,7 @@ test('uses stable runner identity readiness while preserving the displayed role 
   await page.route('**/qualification-config', (route) => route.fulfill({ json: { machineId: 'fipwave-a', role: 'A', reportTarget: '/tmp/report.json', tunEvidence: 'none', evidenceMode: 'Loopback', evidenceClass: 'Loopback' } }));
   await page.goto('http://127.0.0.1:5173/');
 
-  const liveStatus = page.getByRole('status');
+  const liveStatus = page.locator('header').getByRole('status');
   await expect(liveStatus).toHaveAttribute('aria-live', 'polite');
   await expect(liveStatus).toContainText('Idle · Local bridge: not connected');
   const runnerIdentity = page.locator(runnerIdentitySelector('fipwave-a', 'A'));
