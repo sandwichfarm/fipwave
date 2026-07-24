@@ -14,6 +14,7 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/codec-assets.lock.json ./
 COPY --from=build /app/.artifacts/codecs ./.artifacts/codecs
 COPY --from=build /app/.artifacts/build/cyrinx ./.artifacts/build/cyrinx
+RUN mkdir -p .artifacts/qualification && chown -R node:node .artifacts
 USER node
 EXPOSE 4310
 CMD ["node", "dist/server/packages/bridge/src/runner.js"]
