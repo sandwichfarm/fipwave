@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { lstat, readFile, realpath } from 'node:fs/promises';
+import { lstat, readFile, realpath, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -37,6 +37,7 @@ export interface ProductionRunnerOptions {
   cyrinxWorkerForTests?: BridgeServerOptions['cyrinxWorker'];
   cyrinxTimerForTests?: BridgeServerOptions['cyrinxTimer'];
   cyrinxSettleForTests?: BridgeServerOptions['cyrinxSettle'];
+  fipsConfigOutput?: string;
   createBridgeServerForTests?: typeof createBridgeServer;
   afterBridgeStartedForTests?: () => Promise<void>;
 }
@@ -82,10 +83,36 @@ async function resolveBuildIdentity(injected?: BuildIdentity): Promise<BuildIden
   }
 }
 
+/** Render the role-owned FIPS configuration used only inside the shared Compose namespace. */
+export function renderFipsConfig(config: DemoConfig): string {
+  return [
+    'node:',
+    '  identity:',
+    `    nsec: "${config.identity.nsec}"`,
+    '  log_level: info',
+    'tun:',
+    '  enabled: true',
+    '  name: fips0',
+    '  mtu: 1280',
+    'dns:',
+    '  enabled: false',
+    'transports:',
+    '  sound:',
+    `    bridge_url: "${config.bridge.fipsUrl}"`,
+    `    peer_addr: "sound-${config.inputRole === 'a' ? 'b' : 'a'}"`,
+    `    mtu: ${config.fips.linkMtu}`,
+    '    queue_items: 32',
+    `    queue_bytes: ${config.fips.linkMtu * 32}`,
+    'peers: []',
+    '',
+  ].join('\n');
+}
+
 export async function startProductionRunner(options: ProductionRunnerOptions): Promise<ProductionRunner> {
   assertText(options.machineId, 'machine ID'); assertText(options.report, 'report target');
   const demoConfig = options.demoConfig ?? (options.role === 'A' ? resolveDemoConfig('a') : options.role === 'B' ? resolveDemoConfig('b') : fail('role must be literal A or B'));
   if (options.role && options.role !== demoConfig.role) fail('role does not match resolved config');
+  if (options.fipsConfigOutput) await writeFile(options.fipsConfigOutput, renderFipsConfig(demoConfig), { encoding: 'utf8', mode: 0o644 });
   const runtimePort = options.demoConfig ? demoConfig.bridge.browserPort : options.port;
   if (typeof runtimePort !== 'number' || !Number.isInteger(runtimePort) || runtimePort < 0 || runtimePort > 65_535) fail('port is invalid');
   let evidenceMode: RunnerQualificationConfig['evidenceMode'] = options.evidenceMode ?? 'Loopback'; let tunEvidence = unavailableTunEvidence();
@@ -160,12 +187,14 @@ function parseCli(argv: string[]): ProductionRunnerOptions {
   const values = new Map<string, string>(); let physicalOpenAir = false;
   for (let index = 0; index < argv.length; index += 1) {
     const key = argv[index]!; if (key === '--physical-open-air') { physicalOpenAir = true; continue; }
-    const value = argv[index + 1]; if (!['--machine-id', '--role', '--port', '--report', '--tun-evidence', '--evidence-mode'].includes(key) || !value) fail('usage: --machine-id ID --role A|B --port PORT --report PATH --tun-evidence PATH [--evidence-mode Fixture|Loopback] [--physical-open-air]');
+    const value = argv[index + 1]; if (!['--machine-id', '--role', '--port', '--report', '--tun-evidence', '--evidence-mode', '--fips-config'].includes(key) || !value) fail('usage: --machine-id ID --role A|B --port PORT --report PATH --tun-evidence PATH [--evidence-mode Fixture|Loopback] [--fips-config PATH] [--physical-open-air]');
     values.set(key, value); index += 1;
   }
   const evidenceMode = values.get('--evidence-mode') as 'Fixture' | 'Loopback' | undefined; if (evidenceMode && evidenceMode !== 'Fixture' && evidenceMode !== 'Loopback') fail('deterministic evidence mode must be Fixture or Loopback');
   const parsed: ProductionRunnerOptions = { machineId: values.get('--machine-id') ?? '', role: values.get('--role') as 'A' | 'B', port: Number(values.get('--port')), report: values.get('--report') ?? '', tunEvidence: values.get('--tun-evidence') ?? '', physicalOpenAir };
   if (evidenceMode !== undefined) parsed.evidenceMode = evidenceMode;
+  const fipsConfigOutput = values.get('--fips-config');
+  if (fipsConfigOutput !== undefined) parsed.fipsConfigOutput = fipsConfigOutput;
   return parsed;
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

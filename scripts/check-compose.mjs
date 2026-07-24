@@ -85,7 +85,8 @@ export function checkFipsComposeSource(composeSource, bridgeDockerfile, fipsDock
   if (!bridgeDockerfile.includes('FROM node:22.23.1-bookworm-slim')) fail('bridge image must pin Node 22.23.1');
   if (!bridgeDockerfile.includes('COPY --from=build /app/codec-assets.lock.json ./') || !bridgeDockerfile.includes('COPY --from=build /app/.artifacts/codecs ./.artifacts/codecs')) fail('bridge runtime image must include verified codec inputs');
   if (!bridgeDockerfile.includes('mkdir -p .artifacts/qualification && chown -R node:node .artifacts')) fail('bridge runtime image must own its qualification output directory');
-  if (!composeSource.includes('--port 4310') || composeSource.includes('socat') || composeSource.includes('TCP-LISTEN:')) fail('bridge must serve its published loopback port directly');
+  if (!composeSource.includes('--port 4310') || !composeSource.includes('--fips-config /runtime/fips.yaml') || composeSource.includes('socat') || composeSource.includes('TCP-LISTEN:')) fail('bridge must serve its published loopback port directly and generate the role config');
+  if (!composeSource.includes('exec /usr/local/bin/fips --config /runtime/fips.yaml') || composeSource.includes('sleep", "infinity')) fail('fips must launch the generated sound configuration');
   if (!fipsDockerfile.includes('FROM rust:1.94.1-bookworm')) fail('fips image must pin Rust 1.94.1');
   if (!fipsDockerfile.includes('pkg-config') || !fipsDockerfile.includes('libdbus-1-dev') || !fipsDockerfile.includes('libclang-dev')) fail('fips build image must provide native FIPS build dependencies');
   if (!fipsDockerfile.includes('libdbus-1-3')) fail('fips runtime image must provide dbus runtime dependency');

@@ -45,6 +45,8 @@ The unpatched target passed `cargo metadata --locked --format-version 1` and
 | --- | --- | --- |
 | `Cargo.toml` | Add `tokio-tungstenite = "=0.30.0"` | Audited local WebSocket client for the later sound transport. |
 | `Cargo.lock` | Locked resolution for the approved direct dependency and its transitive packages. | Reproducible dependency graph. |
+| `src/config/transport.rs` | Validate the local Sound WebSocket endpoint structurally rather than by prefix. | Keep opaque packets inside the shared loopback namespace. |
+| `src/transport/sound/mod.rs` | Add the current-epoch browser arm/disarm control, strict Origin-bearing client request, truthful readiness, and bounded outbound bytes. | Make the local FIPS transport usable and fail closed under the browser-owned audio boundary. |
 | `UPSTREAM.md` | Add this provenance and patch inventory record. | Make the vendor base independently auditable. |
 
 No source transport behavior is patched in this import plan.

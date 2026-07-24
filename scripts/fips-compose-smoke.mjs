@@ -24,6 +24,8 @@ export function assertFipsRuntimeInspect(inspected) {
   const bridge = inspected.find((item) => item.Name?.includes('bridge'));
   const fips = inspected.find((item) => item.Name?.includes('fips'));
   if (!bridge || !fips) throw new Error('inspect must name bridge and fips');
+  if (fips.State?.Running !== true) throw new Error('fips daemon container must be running');
+  if (!String(fips.Path ?? '').includes('fips')) throw new Error('fips service must execute the FIPS daemon');
   // Docker Desktop may expose a published port in HostConfig while omitting it
   // from NetworkSettings when another service shares this namespace.
   const bindings = bridge.NetworkSettings?.Ports?.['4310/tcp'] ?? bridge.HostConfig?.PortBindings?.['4310/tcp'];
@@ -35,7 +37,7 @@ export function assertFipsRuntimeInspect(inspected) {
   const device = fips.HostConfig?.Devices?.map((entry) => `${entry.PathOnHost}:${entry.PathInContainer}`) ?? [];
   exact(device, ['/dev/net/tun:/dev/net/tun'], 'fips device');
   exact(fips.HostConfig?.SecurityOpt, ['no-new-privileges:true'], 'fips security options');
-  return { evidenceClass: 'Loopback', physicalQualification: false, browserReady: false, soundWorker: 'not-started' };
+  return { evidenceClass: 'Loopback', physicalQualification: false, browserReady: false, soundWorker: 'starting' };
 }
 
 async function compose(project, args, environment) {
@@ -57,18 +59,22 @@ async function main() {
     const evidence = assertFipsRuntimeInspect(inspected);
     const deadline = Date.now() + timeoutMs;
     let bridgeReady = false;
+    let soundWorker = false;
     while (Date.now() < deadline) {
       try {
         const response = await fetch(`http://127.0.0.1:${environment.BROWSER_PORT}/`);
         if (response.ok) {
           bridgeReady = true;
-          break;
+          const status = await fetch(`http://127.0.0.1:${environment.BROWSER_PORT}/bridge-status`).then((value) => value.json());
+          soundWorker = status?.soundTransport === 'started';
+          if (soundWorker) break;
         }
       } catch {}
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
     if (!bridgeReady) throw new Error(`bridge did not become ready on loopback port ${environment.BROWSER_PORT}`);
-    console.log(JSON.stringify({ schemaVersion: 1, project, role, ...evidence, note: 'Local container topology only; no Open air, acoustic peer, or ping claim.' }));
+    if (!soundWorker) throw new Error('FIPS sound worker did not connect to the bridge');
+    console.log(JSON.stringify({ schemaVersion: 1, project, role, ...evidence, soundWorker: 'connected', note: 'Local container topology only; no Open air, acoustic peer, or ping claim.' }));
   } finally {
     try { await compose(project, ['down', '--volumes', '--remove-orphans'], environment); } catch (error) { cleanupError = error; }
     await rm(tempDirectory, { recursive: true, force: true });

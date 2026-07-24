@@ -54,7 +54,7 @@ test('owned runtime smoke accepts one role and rejects unsafe inspected topology
   assert.throws(() => parseFipsComposeSmokeArgs(['--role', 'c']), /role/);
   const inspected = [
     { Name: '/owned_bridge', HostConfig: { Privileged: false, NetworkMode: 'owned_default', CapAdd: null }, NetworkSettings: { Ports: { '4310/tcp': [{ HostIp: '127.0.0.1', HostPort: '4310' }] } } },
-    { Name: '/owned_fips', HostConfig: { Privileged: false, NetworkMode: 'container:owned_bridge', CapAdd: ['NET_ADMIN'], Devices: [{ PathOnHost: '/dev/net/tun', PathInContainer: '/dev/net/tun' }], SecurityOpt: ['no-new-privileges:true'] }, NetworkSettings: { Ports: {} } },
+    { Name: '/owned_fips', Path: '/usr/local/bin/fips', State: { Running: true }, HostConfig: { Privileged: false, NetworkMode: 'container:owned_bridge', CapAdd: ['NET_ADMIN'], Devices: [{ PathOnHost: '/dev/net/tun', PathInContainer: '/dev/net/tun' }], SecurityOpt: ['no-new-privileges:true'] }, NetworkSettings: { Ports: {} } },
   ];
   assert.doesNotThrow(() => assertFipsRuntimeInspect(inspected));
   inspected[1].HostConfig.CapAdd = ['NET_ADMIN', 'SYS_ADMIN'];

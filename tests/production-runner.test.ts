@@ -7,7 +7,7 @@ import WebSocket from 'ws';
 import { decodeFrame, encodeFrame, encodePcmPayload, MessageType, PcmEncoding } from '../packages/bridge/src/protocol.js';
 import { resolveDemoConfig } from '../packages/bridge/src/demo-config.js';
 import { CYRINX_DEADLINE_MS, writeMachineReport, type MachineReport, type TunEvidence } from '../packages/bridge/src/report.js';
-import { startProductionRunner, type ProductionRunner } from '../packages/bridge/src/runner.js';
+import { renderFipsConfig, startProductionRunner, type ProductionRunner } from '../packages/bridge/src/runner.js';
 import { CYRINX_TRANSMIT_SETTLE_MS } from '../packages/bridge/src/qualification-session.js';
 import type { CyrinxWorkerRuntime } from '../packages/bridge/src/server.js';
 import manifest from '../fixtures/corpus/manifest.json' with { type: 'json' };
@@ -162,6 +162,15 @@ function exactTun(): TunEvidence {
 }
 
 describe('production runner', () => {
+  it('renders the role-owned sound worker configuration without browser authority', () => {
+    const rendered = renderFipsConfig(resolveDemoConfig('a'));
+    expect(rendered).toContain('bridge_url: "ws://127.0.0.1:4310/bridge/fips"');
+    expect(rendered).toContain('peer_addr: "sound-b"');
+    expect(rendered).toContain('mtu: 1357');
+    expect(rendered).toContain('nsec: "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"');
+    expect(rendered).not.toContain('codec:');
+  });
+
   it('consumes a resolved config and closes only the bridge it successfully created', async () => {
     const bridgeClose = vi.fn(async () => {});
     const createBridge = vi.fn(async () => ({
