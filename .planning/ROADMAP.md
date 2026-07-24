@@ -71,7 +71,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. The browser and its local container exchange complete packets or timestamped PCM chunks in binary WebSocket messages, never base64 or JSON bulk payloads; the bridge rejects invalid type or size, bounds its queues, and visibly reports ready, disconnected, overflow, and last-error states.
   5. One recovery action resets and reconnects browser, modem state, bridge queues, session, and acoustic epoch, while the FIPS-facing contract remains independent of Cyrinx, Quiet, Hush, or any other codec.
 
-**Plans**: 4/7 plans executed
+**Plans**: 5/7 plans executed
 
 Plans:
 **Wave 1**
@@ -83,7 +83,7 @@ Plans:
 
 - [x] 02-03-PLAN.md — Complete the A/B configuration authority and owned production runner lifecycle.
 - [x] 02-04-PLAN.md — Bound both packet directions and make RESET preempt stale bridge work.
-- [ ] 02-07-PLAN.md — Implement the complete first-class SoundTransport and all 13 FIPS dispatch seams.
+- [x] 02-07-PLAN.md — Implement the complete first-class SoundTransport and all 13 FIPS dispatch seams.
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -149,7 +149,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Qualify the Demo Substrate | 9/10 | In Progress|  |
-| 2. Configure and Establish the Codec-Neutral FIPS Bridge | 4/7 | In Progress|  |
+| 2. Configure and Establish the Codec-Neutral FIPS Bridge | 5/7 | In Progress|  |
 | 3. Negotiate and Deliver Reliable Acoustic Packets | 0/TBD | Not started | - |
 | 4. Prove the Sound-Only FIPS Ping | 0/TBD | Not started | - |
 | 5. Present, Freeze, and Rehearse the Demo | 0/TBD | Not started | - |
