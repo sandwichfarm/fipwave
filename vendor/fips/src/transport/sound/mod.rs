@@ -3,10 +3,7 @@
 //! FIPS sees only bounded opaque packets. Audio, modulation, retries and
 //! browser implementation details deliberately stay outside this module.
 
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc, Mutex,
-};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
@@ -53,6 +50,7 @@ struct Runtime {
     next_sequence: u64,
     highest_received_sequence: Option<u64>,
     sender: Option<mpsc::Sender<OutboundFrame>>,
+    outbound_bytes: usize,
     last_error: Option<&'static str>,
     counters: SoundCounters,
 }
@@ -71,6 +69,7 @@ impl Default for Runtime {
             next_sequence: 0,
             highest_received_sequence: None,
             sender: None,
+            outbound_bytes: 0,
             last_error: None,
             counters: SoundCounters::default(),
         }
@@ -84,7 +83,6 @@ pub struct SoundTransport {
     config: SoundConfig,
     packet_tx: PacketTx,
     runtime: Arc<Mutex<Runtime>>,
-    outbound_bytes: Arc<AtomicUsize>,
     stop: Option<oneshot::Sender<()>>,
     worker: Option<JoinHandle<()>>,
 }
@@ -103,7 +101,6 @@ impl SoundTransport {
             config,
             packet_tx,
             runtime: Arc::new(Mutex::new(Runtime::default())),
-            outbound_bytes: Arc::new(AtomicUsize::new(0)),
             stop: None,
             worker: None,
         })
@@ -144,7 +141,6 @@ impl SoundTransport {
             .map_err(|code| self.start_failed(code))?;
         let (stop_tx, mut stop_rx) = oneshot::channel();
         let runtime = Arc::clone(&self.runtime);
-        let outbound_bytes = Arc::clone(&self.outbound_bytes);
         let packet_tx = self.packet_tx.clone();
         let transport_id = self.transport_id;
         let peer = self.configured_peer();
@@ -174,10 +170,20 @@ impl SoundTransport {
                         _ = &mut stop_rx => break false,
                         outbound = outbound_rx.recv() => match outbound {
                             Some(frame) => {
-                                outbound_bytes.fetch_sub(frame.bytes.len(), Ordering::AcqRel);
-                                if outbound_expired(frame.enqueued_at, queue_max_age) {
-                                    reject(&runtime, "sound_queue_item_expired");
-                                } else if writer.send(Message::Binary(frame.bytes.into())).await.is_err() {
+                                let expired = {
+                                    let mut current = runtime.lock().expect("sound runtime");
+                                    current.outbound_bytes = current
+                                        .outbound_bytes
+                                        .checked_sub(frame.bytes.len())
+                                        .expect("sound queue byte accounting");
+                                    let expired = outbound_expired(frame.enqueued_at, queue_max_age);
+                                    if expired {
+                                        current.counters.rejected += 1;
+                                        current.last_error = Some("sound_queue_item_expired");
+                                    }
+                                    expired
+                                };
+                                if !expired && writer.send(Message::Binary(frame.bytes.into())).await.is_err() {
                                     break true;
                                 }
                             }
@@ -188,9 +194,8 @@ impl SoundTransport {
                                 let prior_epoch = runtime.lock().expect("sound runtime").epoch;
                                 let accepted = inject_inbound(&runtime, &packet_tx, transport_id, &peer, mtu, &bytes).await;
                                 if accepted.is_ok() && runtime.lock().expect("sound runtime").epoch != prior_epoch {
-                                    while let Ok(expired) = outbound_rx.try_recv() {
-                                        outbound_bytes.fetch_sub(expired.bytes.len(), Ordering::AcqRel);
-                                    }
+                                    while outbound_rx.try_recv().is_ok() {}
+                                    runtime.lock().expect("sound runtime").outbound_bytes = 0;
                                 }
                             }
                             Some(Ok(_)) => reject(&runtime, "sound_binary_frame_required"),
@@ -206,11 +211,11 @@ impl SoundTransport {
                     current.browser_ready = false;
                     current.state = TransportState::Starting;
                     current.last_error = Some("sound_bridge_disconnected");
+                    current.outbound_bytes = 0;
                 }
                 // Dropping this receiver releases every unsent frame. Every
                 // reconnect starts with zero reserved bytes and a fresh queue.
                 drop(outbound_rx);
-                outbound_bytes.store(0, Ordering::Release);
 
                 let mut delay = RECONNECT_INITIAL_DELAY;
                 loop {
@@ -236,7 +241,7 @@ impl SoundTransport {
             if current.state == TransportState::Up {
                 current.state = TransportState::Down;
             }
-            outbound_bytes.store(0, Ordering::Release);
+            current.outbound_bytes = 0;
         }));
         self.stop = Some(stop_tx);
         Ok(())
@@ -253,7 +258,7 @@ impl SoundTransport {
         runtime.sender = None;
         runtime.browser_ready = false;
         runtime.state = TransportState::Down;
-        self.outbound_bytes.store(0, Ordering::Release);
+        runtime.outbound_bytes = 0;
         Ok(())
     }
 
@@ -273,46 +278,51 @@ impl SoundTransport {
                 mtu: self.config.mtu(),
             });
         }
-        let (sender, frame) = {
-            let mut runtime = self.runtime.lock().expect("sound runtime");
-            if runtime.state != TransportState::Up {
-                return Err(TransportError::NotStarted);
-            }
-            if !runtime.browser_ready {
-                runtime.counters.rejected += 1;
-                runtime.last_error = Some("sound_browser_not_armed");
-                return Err(TransportError::SendFailed(
-                    "sound browser is not armed".into(),
-                ));
-            }
-            let Some(sender) = runtime.sender.clone() else {
-                runtime.counters.rejected += 1;
-                runtime.last_error = Some("sound_bridge_disconnected");
-                return Err(TransportError::SendFailed(
-                    "sound bridge is disconnected".into(),
-                ));
-            };
-            runtime.next_sequence = runtime.next_sequence.wrapping_add(1);
-            (
-                sender,
-                encode_packet(runtime.epoch, runtime.next_sequence, data),
-            )
+        // This entire nonblocking enqueue transaction is one runtime-lock
+        // critical section. A worker disconnect cannot clear or replace its
+        // queue accounting between reservation and rollback.
+        let mut runtime = self.runtime.lock().expect("sound runtime");
+        if runtime.state != TransportState::Up {
+            return Err(TransportError::NotStarted);
+        }
+        if !runtime.browser_ready {
+            runtime.counters.rejected += 1;
+            runtime.last_error = Some("sound_browser_not_armed");
+            return Err(TransportError::SendFailed(
+                "sound browser is not armed".into(),
+            ));
+        }
+        let Some(sender) = runtime.sender.clone() else {
+            runtime.counters.rejected += 1;
+            runtime.last_error = Some("sound_bridge_disconnected");
+            return Err(TransportError::SendFailed(
+                "sound bridge is disconnected".into(),
+            ));
         };
+        let sequence = runtime.next_sequence.wrapping_add(1);
+        let frame = encode_packet(runtime.epoch, sequence, data);
         let frame_bytes = frame.len();
-        if !reserve_bytes(&self.outbound_bytes, self.config.queue_bytes(), frame_bytes) {
-            let mut runtime = self.runtime.lock().expect("sound runtime");
+        let Some(next_bytes) = runtime.outbound_bytes.checked_add(frame_bytes) else {
+            runtime.counters.overflowed += 1;
+            runtime.last_error = Some("sound_queue_byte_budget_exceeded");
+            return Err(TransportError::SendFailed("sound queue byte budget is full".into()));
+        };
+        if next_bytes > self.config.queue_bytes() {
             runtime.counters.overflowed += 1;
             runtime.last_error = Some("sound_queue_byte_budget_exceeded");
             return Err(TransportError::SendFailed("sound queue byte budget is full".into()));
         }
-        sender.try_send(OutboundFrame { bytes: frame, enqueued_at: Instant::now() }).map_err(|_| {
-            self.outbound_bytes.fetch_sub(frame_bytes, Ordering::AcqRel);
-            let mut runtime = self.runtime.lock().expect("sound runtime");
+        runtime.outbound_bytes = next_bytes;
+        if sender.try_send(OutboundFrame { bytes: frame, enqueued_at: Instant::now() }).is_err() {
+            runtime.outbound_bytes = runtime
+                .outbound_bytes
+                .checked_sub(frame_bytes)
+                .expect("sound queue reservation rollback");
             runtime.counters.overflowed += 1;
             runtime.last_error = Some("sound_queue_full");
-            TransportError::SendFailed("sound queue is full".into())
-        })?;
-        let mut runtime = self.runtime.lock().expect("sound runtime");
+            return Err(TransportError::SendFailed("sound queue is full".into()));
+        }
+        runtime.next_sequence = sequence;
         runtime.counters.tx_packets += 1;
         runtime.counters.tx_bytes += data.len() as u64;
         Ok(data.len())
@@ -359,22 +369,6 @@ async fn connect_bridge(
         .await
         .map(|(stream, _)| stream)
         .map_err(|_| "sound_bridge_connect_failed")
-}
-
-fn reserve_bytes(counter: &AtomicUsize, limit: usize, amount: usize) -> bool {
-    loop {
-        let current = counter.load(Ordering::Acquire);
-        let Some(next) = current.checked_add(amount) else { return false };
-        if next > limit {
-            return false;
-        }
-        if counter
-            .compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            return true;
-        }
-    }
 }
 
 fn outbound_expired(enqueued_at: Instant, max_age: Duration) -> bool {
@@ -773,7 +767,34 @@ mod tests {
         assert_eq!(sound.send_async(&sound.configured_peer(), &payload).await.unwrap(), 1_357);
         assert!(sound.send_async(&sound.configured_peer(), &payload).await.is_err());
         assert_eq!(sound.transport_stats()["overflowed"], 1);
-        assert_eq!(sound.outbound_bytes.load(Ordering::Acquire), 1_389);
+        assert_eq!(sound.runtime.lock().unwrap().outbound_bytes, 1_389);
+    }
+
+    #[tokio::test]
+    async fn sound_failed_enqueue_releases_its_reservation_for_a_replacement_queue() {
+        let (packet_tx, _packet_rx) = packet_channel(2);
+        let sound = SoundTransport::new(TransportId::new(8), None, config(), packet_tx).unwrap();
+        let (stale_sender, stale_receiver) = mpsc::channel(1);
+        drop(stale_receiver);
+        {
+            let mut runtime = sound.runtime.lock().unwrap();
+            runtime.state = TransportState::Up;
+            runtime.browser_ready = true;
+            runtime.sender = Some(stale_sender);
+        }
+        let payload = vec![0x7f; 1_357];
+        assert!(sound.send_async(&sound.configured_peer(), &payload).await.is_err());
+        assert_eq!(sound.runtime.lock().unwrap().outbound_bytes, 0);
+
+        let (replacement, mut receiver) = mpsc::channel(1);
+        {
+            let mut runtime = sound.runtime.lock().unwrap();
+            runtime.sender = Some(replacement);
+            runtime.last_error = None;
+        }
+        assert_eq!(sound.send_async(&sound.configured_peer(), &payload).await.unwrap(), 1_357);
+        assert_eq!(receiver.recv().await.unwrap().bytes.len(), FWAV_HEADER_BYTES + 1_357);
+        assert_eq!(sound.runtime.lock().unwrap().outbound_bytes, 1_389);
     }
 
     #[test]
@@ -903,7 +924,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(sound.transport_stats()["disconnects"], 1);
-        assert_eq!(sound.outbound_bytes.load(Ordering::Acquire), 0);
+        assert_eq!(sound.runtime.lock().unwrap().outbound_bytes, 0);
         sound.arm_browser(1).unwrap();
         assert_eq!(sound.send_async(&sound.configured_peer(), &second_payload).await.unwrap(), 1357);
         tokio::time::timeout(Duration::from_secs(2), fixture)
