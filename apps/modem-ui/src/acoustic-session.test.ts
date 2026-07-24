@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { AcousticSession, type AcousticModem, type AcousticSessionOptions } from './acoustic-session.js';
+import { decodeFas1, encodeFas1, Fas1UnitType } from './acoustic-protocol.js';
 
 class FakeModem implements AcousticModem {
   #handler: ((unit: Uint8Array) => void) | undefined;
@@ -9,7 +10,7 @@ class FakeModem implements AcousticModem {
 
   send(unit: Uint8Array): void {
     this.sent.push(unit.slice());
-    this.peer?.#handler?.(unit.slice());
+    if (this.peer && this.peer.#handler) this.peer.#handler(unit.slice());
   }
 
   onUnit(handler: (unit: Uint8Array) => void): () => void {
@@ -35,7 +36,7 @@ function options(role: 'A' | 'B', modem: FakeModem): AcousticSessionOptions {
     expectedPeer: role === 'A' ? 'npub-b' : 'npub-a',
     modem,
     clock: { now: () => 0 },
-    timers: { setTimeout: () => 0, clearTimeout: () => undefined },
+    timers: { setTimeout: () => 0 as unknown as ReturnType<typeof setTimeout>, clearTimeout: () => undefined },
     nonce: () => new Uint8Array(role === 'A' ? Array(16).fill(1) : Array(16).fill(2)),
     profiles: ['quiet-audible-7k-v1'],
     ranges: { minPayloadBytes: 96, maxPayloadBytes: 217 },
@@ -72,8 +73,52 @@ describe('AcousticSession bootstrap handshake', () => {
     const late = aModem.sent[0]!.slice();
 
     a.reset(2);
-    expect(a.snapshot).toMatchObject({ state: 'Idle', epoch: 2, ready: false, sessionId: undefined });
-    (a as unknown as { receive(unit: Uint8Array): void }).receive(late);
+    expect(a.snapshot).toMatchObject({ state: 'Idle', epoch: 2, ready: false });
+    expect(a.snapshot.sessionId).toBeUndefined();
+    a.receive(late);
     expect(a.snapshot.state).toBe('Idle');
+  });
+
+  it('rejects every required HELLO binding before B can leave Listening', () => {
+    const makeHello = (patch: (body: Uint8Array) => void): Uint8Array => {
+      const source = new FakeModem();
+      const a = new AcousticSession(options('A', source));
+      a.start();
+      const unit = decodeFas1(source.sent[0]!);
+      const body = unit.body.slice(); patch(body);
+      return encodeFas1({ ...unit, body });
+    };
+    const identityOffset = 2;
+    const expectedOffset = (body: Uint8Array) => identityOffset + 1 + body[identityOffset]!;
+    const nonceOffset = (body: Uint8Array) => expectedOffset(body) + 1 + body[expectedOffset(body)]!;
+    const profileOffset = (body: Uint8Array) => nonceOffset(body) + 16;
+    const rangeOffset = (body: Uint8Array) => {
+      let offset = profileOffset(body) + 1;
+      for (let index = 0; index < body[profileOffset(body)]!; index += 1) offset += 1 + body[offset]!;
+      return offset;
+    };
+    const mutations: Array<(body: Uint8Array) => void> = [
+      (body) => { body[identityOffset + 1] = (body[identityOffset + 1] ?? 0) ^ 1; },
+      (body) => { const offset = expectedOffset(body) + 1; body[offset] = (body[offset] ?? 0) ^ 1; },
+      (body) => { body[1] = 2; },
+      (body) => { body.fill(0, nonceOffset(body), nonceOffset(body) + 16); },
+      (body) => { body[profileOffset(body)] = 0; },
+      (body) => { new DataView(body.buffer).setUint16(rangeOffset(body), 218, true); },
+    ];
+    for (const mutate of mutations) {
+      const modem = new FakeModem();
+      const b = new AcousticSession(options('B', modem));
+      b.receive(makeHello(mutate));
+      expect(b.snapshot.state).toBe('Listening');
+    }
+  });
+
+  it('does not allow duplicate or out-of-order controls to skip the legal sequence', () => {
+    const modem = new FakeModem();
+    const b = new AcousticSession(options('B', modem));
+    const rawCaps = encodeFas1({ type: Fas1UnitType.Caps, flags: 0, sessionId: 1n, sequence: 1, packetId: 0, fragmentIndex: 0, fragmentCount: 0, packetLength: 0, body: new Uint8Array(32) });
+    b.receive(rawCaps);
+    b.receive(rawCaps);
+    expect(b.snapshot.state).toBe('Listening');
   });
 });
