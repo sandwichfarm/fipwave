@@ -26,14 +26,17 @@ class FakeModem implements AcousticModem {
 }
 
 class FakeTimers {
-  #callbacks = new Map<number, () => void>();
+  #callbacks = new Map<number, { callback: () => void; dueAtMs: number }>();
   #next = 1;
-  setTimeout(callback: () => void): ReturnType<typeof setTimeout> { const id = this.#next++; this.#callbacks.set(id, callback); return id as unknown as ReturnType<typeof setTimeout>; }
+  #nowMs = 0;
+  setTimeout(callback: () => void, delayMs = 0): ReturnType<typeof setTimeout> { const id = this.#next++; this.#callbacks.set(id, { callback, dueAtMs: this.#nowMs + delayMs }); return id as unknown as ReturnType<typeof setTimeout>; }
   clearTimeout(handle: ReturnType<typeof setTimeout>): void { this.#callbacks.delete(handle as unknown as number); }
   runAll(): void {
-    const callbacks = [...this.#callbacks.values()];
-    this.#callbacks.clear();
-    for (const callback of callbacks) callback();
+    const nextDueAtMs = Math.min(...[...this.#callbacks.values()].map((entry) => entry.dueAtMs));
+    this.#nowMs = nextDueAtMs;
+    const callbacks = [...this.#callbacks.entries()].filter(([, entry]) => entry.dueAtMs === nextDueAtMs);
+    for (const [id] of callbacks) this.#callbacks.delete(id);
+    for (const [, entry] of callbacks) entry.callback();
   }
 }
 
@@ -193,19 +196,24 @@ describe('AcousticSession calibration, selection, and commitment', () => {
     expect(probes.slice(4).map((probe) => probe.body[0])).toEqual([2, 2, 2, 2]);
   });
 
-  it('selects directionally, preferring byte correctness, timing, then lower gain', async () => {
+  it('sweeps a failed warm candidate through later fallbacks and commits different literal directional winners', async () => {
     const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
     const candidates = [
-      { ...candidate, id: 'fast-gain-2', payloadBytes: 217, playbackGain: 2 },
-      { ...candidate, id: 'reliable-gain-1', payloadBytes: 96, playbackGain: 1 },
+      { ...candidate, id: 'warm-bootstrap', payloadBytes: 96, playbackGain: 1 },
+      { ...candidate, id: 'full-frame-fallback', payloadBytes: 217, playbackGain: 1 },
+      { ...candidate, id: 'gain-fallback', payloadBytes: 96, playbackGain: 2 },
     ];
     const aOptions = options('A', aModem); const bOptions = options('B', bModem);
-    const a = new AcousticSession({ ...aOptions, candidates, measureProbe: (probe) => ({ received: true, bytePerfect: probe.candidateIndex === 1, corrupt: probe.candidateIndex === 0, missing: false, duplicate: false, discontinuity: false, latencyMs: 10, signalDb: -20, clipping: probe.candidateIndex === 0, confidence: 1 }) });
-    const b = new AcousticSession({ ...bOptions, candidates, measureProbe: (probe) => ({ received: true, bytePerfect: true, corrupt: false, missing: false, duplicate: false, discontinuity: false, latencyMs: probe.candidateIndex === 0 ? 50 : 50, signalDb: -20, clipping: false, confidence: 1 }) });
+    // A receives B→A observations and selects the warm candidate; B receives
+    // A→B observations where that warm candidate clips and must continue.
+    const a = new AcousticSession({ ...aOptions, candidates, measureProbe: (probe) => ({ received: true, bytePerfect: true, corrupt: false, missing: false, duplicate: false, discontinuity: false, latencyMs: 10 + probe.candidateIndex, signalDb: -20, clipping: false, confidence: 1 }) });
+    const b = new AcousticSession({ ...bOptions, candidates, measureProbe: (probe) => ({ received: true, bytePerfect: probe.candidateIndex !== 0, corrupt: probe.candidateIndex === 0, missing: false, duplicate: false, discontinuity: false, latencyMs: probe.candidateIndex === 1 ? 30 : 10, signalDb: -20, clipping: probe.candidateIndex === 0, confidence: 1 }) });
     a.start();
     await settlePair(a, b);
-    expect(a.snapshot.settings?.aToB.payloadBytes).toBe(96);
-    expect(a.snapshot.settings?.bToA.playbackGain).toBe(1);
+    expect(aModem.appliedCandidates).toContain('full-frame-fallback');
+    expect(bModem.appliedCandidates).toContain('gain-fallback');
+    expect(a.snapshot.settings?.aToB.playbackGain).toBe(2);
+    expect(a.snapshot.settings?.bToA).toMatchObject({ payloadBytes: 96, playbackGain: 1 });
     expect(b.snapshot.settingsDigest).toEqual(a.snapshot.settingsDigest);
   });
 
@@ -302,7 +310,7 @@ describe('AcousticSession packet, fragment, reassembly, retry, duplicate, and tu
     a.start(); await settlePair(a, b);
 
     expect(a.enqueuePacket(Uint8Array.of(1), 'ordinary').accepted).toBe(true);
-    for (let round = 0; round < 4; round += 1) timers.runAll();
+    for (let round = 0; round < 8; round += 1) timers.runAll();
     expect(heldAck).toBeDefined();
     hold = false;
     for (let round = 0; round < 16; round += 1) timers.runAll();
@@ -317,8 +325,8 @@ describe('AcousticSession packet, fragment, reassembly, retry, duplicate, and tu
     holdCurrent = true;
     expect(a.enqueuePacket(Uint8Array.of(3), 'ordinary').accepted).toBe(true);
     a.receive(heldAck!); // old packet ID/session ACK is deliberately reordered.
+    for (let round = 0; round < 12; round += 1) timers.runAll();
     expect(heldCurrentAck).toBeDefined();
-    for (let round = 0; round < 4; round += 1) timers.runAll();
     expect(a.snapshot.counters.retries).toBeGreaterThan(0);
     expect(aModem.sent.map(decodeFas1).filter((unit) => unit.type === Fas1UnitType.Data && unit.packetId === 2)).toHaveLength(2);
     holdCurrent = false;
@@ -333,6 +341,31 @@ describe('AcousticSession packet, fragment, reassembly, retry, duplicate, and tu
 });
 
 describe('AcousticSession priority, backpressure, heartbeat, degraded recovery, and concurrency', () => {
+  it('queues simultaneous heartbeat and data work behind the current turn and serializes it with a guarded token handoff', async () => {
+    const timers = new FakeTimers(); const clock = new ManualClock();
+    const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
+    const a = new AcousticSession({ ...options('A', aModem), clock, timers }); const b = new AcousticSession({ ...options('B', bModem), clock, timers });
+    a.start(); await settlePair(a, b);
+    expect(a.snapshot.turnOwner).toBe('A');
+
+    // B's timer fires while A owns the acoustic turn: it queues work but
+    // cannot touch the modem.  A's simultaneous timer owns the first frame.
+    const bBefore = bModem.sent.length;
+    expect(b.heartbeat()).toBe(true);
+    expect(bModem.sent).toHaveLength(bBefore);
+    expect(b.enqueuePacket(Uint8Array.of(0x42), 'ordinary').accepted).toBe(true);
+    expect(a.heartbeat()).toBe(true);
+    expect(decodeFas1(aModem.sent.at(-2)!).type).toBe(Fas1UnitType.Heartbeat);
+    expect(decodeFas1(aModem.sent.at(-1)!).type).toBe(Fas1UnitType.TurnEnd);
+
+    for (let round = 0; round < 24; round += 1) timers.runAll();
+    const bUnits = bModem.sent.slice(bBefore).map(decodeFas1);
+    const heartbeatIndex = bUnits.findIndex((unit) => unit.type === Fas1UnitType.Heartbeat);
+    const dataIndex = bUnits.findIndex((unit) => unit.type === Fas1UnitType.Data);
+    expect(heartbeatIndex).toBeGreaterThanOrEqual(0);
+    expect(dataIndex).toBeGreaterThan(heartbeatIndex);
+  });
+
   it('uses stable control, heartbeat, ordinary priority with FIFO within each class and rejects a fifth complete packet before retaining bytes', async () => {
     const timers = new FakeTimers(); const clock = new ManualClock();
     const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
@@ -360,7 +393,7 @@ describe('AcousticSession priority, backpressure, heartbeat, degraded recovery, 
     expect(a.snapshot).toMatchObject({ state: 'Degraded', ready: false, reason: 'acoustic_heartbeat_missed' });
     timers.runAll();
     expect(a.snapshot).toMatchObject({ state: 'Recovering', ready: false });
-    b.heartbeat();
+    bModem.send(encodeFas1({ type: Fas1UnitType.Heartbeat, flags: 0, sessionId: a.snapshot.sessionId!, sequence: 99, packetId: 0, fragmentIndex: 0, fragmentCount: 0, packetLength: 0, body: new Uint8Array() }));
     expect(a.snapshot).toMatchObject({ state: 'Ready', ready: true });
 
     a.markHeartbeatMissed(); timers.runAll(); a.markHeartbeatMissed(); timers.runAll(); a.markHeartbeatMissed(); timers.runAll();

@@ -184,6 +184,8 @@ export class AcousticSession {
   #heartbeatTimer: ReturnType<typeof setTimeout> | undefined;
   #heartbeatDeadline: ReturnType<typeof setTimeout> | undefined;
   #heartbeatTimerGeneration = 0;
+  /** A one-bit highest-priority control queue; only the current turn owner drains it. */
+  #heartbeatDue = false;
   #generation = 0;
   #awaitingAck = false;
   #recoveryAttempts = 0;
@@ -243,12 +245,21 @@ export class AcousticSession {
     if (this.#timer !== undefined) this.options.timers.clearTimeout(this.#timer);
     if (this.#deliveryTimer !== undefined) this.options.timers.clearTimeout(this.#deliveryTimer);
     this.clearHeartbeatTimers(); this.#generation += 1;
-    this.#timer = undefined; this.#deliveryTimer = undefined; this.#epoch = epoch; this.#sessionId = undefined; this.#localNonce = undefined; this.#peerNonce = undefined; this.#sequence = 1; this.#reason = undefined; this.#ledger = []; this.#sentProbes = { AtoB: 0, BtoA: 0 }; this.#receivedReports = { AtoB: 0, BtoA: 0 }; this.#receivedProbes = { AtoB: 0, BtoA: 0 }; this.#selected = {}; this.#settings = undefined; this.#settingsDigest = undefined; this.#lastHeartbeatAtMs = undefined; this.#turnOwner = undefined; this.#queues = { control: [], heartbeat: [], ordinary: [] }; this.#active = undefined; this.#inbound = undefined; this.#lastAck = undefined; this.#delivered.clear(); this.#awaitingAck = false; this.#work = Promise.resolve(); this.#state = this.options.role === 'A' ? 'Idle' : 'Listening';
+    this.#timer = undefined; this.#deliveryTimer = undefined; this.#epoch = epoch; this.#sessionId = undefined; this.#localNonce = undefined; this.#peerNonce = undefined; this.#sequence = 1; this.#reason = undefined; this.#ledger = []; this.#sentProbes = { AtoB: 0, BtoA: 0 }; this.#receivedReports = { AtoB: 0, BtoA: 0 }; this.#receivedProbes = { AtoB: 0, BtoA: 0 }; this.#selected = {}; this.#settings = undefined; this.#settingsDigest = undefined; this.#lastHeartbeatAtMs = undefined; this.#turnOwner = undefined; this.#heartbeatDue = false; this.#queues = { control: [], heartbeat: [], ordinary: [] }; this.#active = undefined; this.#inbound = undefined; this.#lastAck = undefined; this.#delivered.clear(); this.#awaitingAck = false; this.#work = Promise.resolve(); this.#state = this.options.role === 'A' ? 'Idle' : 'Listening';
   }
 
   dispose(): void { this.reset(this.#epoch); this.#unsubscribe(); }
   async settle(): Promise<void> { let current: Promise<void>; do { current = this.#work; await current; } while (current !== this.#work); }
-  heartbeat(): boolean { if (!this.#sessionId || (this.#state !== 'AwaitingHeartbeat' && this.#state !== 'Ready')) return false; this.send(Fas1UnitType.Heartbeat, this.#sessionId, new Uint8Array()); return true; }
+  /**
+   * Periodic/manual liveness is control work, not an out-of-band transmission.
+   * The scheduler emits it only after the local peer owns a legal data turn.
+   */
+  heartbeat(): boolean {
+    if (!this.#sessionId || this.#state !== 'Ready') return false;
+    this.#heartbeatDue = true;
+    this.driveTurn();
+    return true;
+  }
   markHeartbeatMissed(): void {
     if (this.#state !== 'Ready' && this.#state !== 'Recovering') return;
     this.clearDeliveryTimer(); this.clearHeartbeatTimers(); this.#awaitingAck = false; this.#state = 'Degraded'; this.#reason = 'acoustic_heartbeat_missed';
@@ -287,7 +298,10 @@ export class AcousticSession {
     const epoch = this.#epoch; const sessionId = this.#sessionId; const generation = this.#generation;
     const current = () => epoch === this.#epoch && sessionId === this.#sessionId && generation === this.#generation && this.#state === 'Ready';
     if (this.#heartbeatTimer === undefined) this.#heartbeatTimer = this.options.timers.setTimeout(() => {
-      this.#heartbeatTimer = undefined; if (!current()) return; this.heartbeat(); this.armHeartbeatTimers();
+      this.#heartbeatTimer = undefined;
+      if (!current()) return;
+      this.heartbeat();
+      this.armHeartbeatTimers();
     }, this.ackTimeoutMs());
     if (this.#heartbeatDeadline !== undefined) this.options.timers.clearTimeout(this.#heartbeatDeadline);
     const deadlineGeneration = ++this.#heartbeatTimerGeneration;
@@ -320,9 +334,20 @@ export class AcousticSession {
   private driveTurn(): void {
     this.expireWork();
     if (this.#state !== 'Ready' || !this.#sessionId || this.#turnOwner !== this.options.role || this.#awaitingAck) return;
+    // A due heartbeat is the scheduler's highest-priority control item.  The
+    // timer only sets this bit; it never calls the modem during a peer-owned
+    // turn.  This check is after all session/generation/turn guards above.
+    if (this.#heartbeatDue) {
+      this.#heartbeatDue = false;
+      this.send(Fas1UnitType.Heartbeat, this.#sessionId, new Uint8Array());
+      this.send(Fas1UnitType.TurnEnd, this.#sessionId, new Uint8Array());
+      this.#turnOwner = complement(this.options.role);
+      return;
+    }
     this.#active ??= this.dequeue();
     if (!this.#active) {
-      this.send(Fas1UnitType.Heartbeat, this.#sessionId, new Uint8Array());
+      // A guarded empty turn keeps the deterministic token rotating.  It is
+      // a scheduler operation, never a timer-side heartbeat transmission.
       this.send(Fas1UnitType.TurnEnd, this.#sessionId, new Uint8Array());
       this.#turnOwner = complement(this.options.role);
       return;
@@ -377,7 +402,10 @@ export class AcousticSession {
     if (this.#state !== 'Ready' || sessionId !== this.#sessionId || this.#turnOwner !== complement(this.options.role)) return;
     // An ACK is meaningful only for a DATA packet.  Empty turns transfer
     // ownership without creating an unbound packet acknowledgement.
-    if (this.#lastAck) this.sendAck(this.#lastAck.packetId, this.#lastAck.bitmap);
+    if (this.#lastAck) {
+      this.sendAck(this.#lastAck.packetId, this.#lastAck.bitmap);
+      this.#lastAck = undefined;
+    }
     this.#turnOwner = this.options.role;
     this.schedule(() => this.driveTurn(), this.guardMs());
   }
@@ -538,18 +566,31 @@ export class AcousticSession {
       this.#settings = { aToB: this.toSettings(this.#selected.AtoB!), bToA: this.toSettings(this.#selected.BtoA!) };
       const digest = await digestSettings(this.#settings);
       if (!equal(received, digest)) { this.fail('acoustic_commit_digest_mismatch'); return; }
-      this.#settingsDigest = digest; this.#state = 'AwaitingHeartbeat'; this.send(Fas1UnitType.CommitAck, this.#sessionId, digest);
+      this.#settingsDigest = digest; this.#state = 'AwaitingHeartbeat'; this.#turnOwner = 'A';
+      this.send(Fas1UnitType.CommitAck, this.#sessionId, digest);
+      // The sole direct post-commit heartbeat is a deterministic bootstrap
+      // exchange.  B is already AwaitingHeartbeat after the synchronous
+      // COMMIT_ACK receive path and may make exactly one bound response.
+      this.send(Fas1UnitType.Heartbeat, this.#sessionId, new Uint8Array());
     }).catch(() => this.fail('acoustic_commit_failed'));
   }
   private onCommitAck(sessionId: bigint, body: Uint8Array): void {
     if (this.options.role !== 'B' || this.#state !== 'Committing' || sessionId !== this.#sessionId || !equal(body, this.#settingsDigest)) return;
-    this.#state = 'AwaitingHeartbeat'; this.heartbeat();
+    // A owns the post-commit bootstrap turn.  B becomes ready only after it
+    // receives this bound heartbeat and returns the one explicit bootstrap
+    // reply below; periodic heartbeats never bypass the turn scheduler.
+    this.#state = 'AwaitingHeartbeat'; this.#turnOwner = 'A';
   }
   private onHeartbeat(sessionId: bigint): void {
     if (sessionId !== this.#sessionId || (this.#state !== 'AwaitingHeartbeat' && this.#state !== 'Ready' && this.#state !== 'Recovering')) return;
     const reply = this.#state === 'AwaitingHeartbeat'; this.#state = 'Ready'; this.#lastHeartbeatAtMs = this.options.clock.now(); this.armHeartbeatTimers();
     this.#recoveryAttempts = 0;
-    if (reply) { this.#turnOwner = 'A'; this.heartbeat(); }
+    if (reply && this.options.role === 'B') {
+      // Explicit bootstrap response: B may respond only after receiving A's
+      // committed heartbeat.  Subsequent periodic work must use driveTurn.
+      this.send(Fas1UnitType.Heartbeat, sessionId, new Uint8Array());
+    }
+    if (reply) this.#turnOwner = 'A';
   }
   private toSettings(candidate: AcousticCandidate): DirectionalSettings { return { profileId: candidate.profileId, payloadBytes: candidate.payloadBytes, repetition: candidate.repetition, guardMs: candidate.guardMs, playbackGain: candidate.playbackGain, ackTimeoutMs: candidate.ackTimeoutMs }; }
   private fail(reason: string): void { if (this.#timer !== undefined) this.options.timers.clearTimeout(this.#timer); this.#timer = undefined; this.clearHeartbeatTimers(); this.#state = 'Error'; this.#reason = reason; }
