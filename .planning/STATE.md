@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: Qualify the Demo Substrate
 status: executing
-stopped_at: Completed 02-02-PLAN.md
-last_updated: "2026-07-24T01:26:17.784Z"
+stopped_at: Completed 02-03-PLAN.md
+last_updated: "2026-07-24T01:33:33.985Z"
 last_activity: 2026-07-23
 last_activity_desc: Plan 01-10 physical checkpoint reached
 progress:
   total_phases: 2
   completed_phases: 0
   total_plans: 17
-  completed_plans: 11
+  completed_plans: 12
 ---
 
 # Project State
@@ -32,7 +32,7 @@ Plan: 10 of 10
 Status: Awaiting blocking-human physical qualification
 Last activity: 2026-07-23 — Plan 01-10 physical checkpoint reached
 
-Progress: [███████░░░] 65%
+Progress: [███████░░░] 71%
 
 ## Performance Metrics
 
@@ -68,6 +68,7 @@ Progress: [███████░░░] 65%
 | Phase 01 P09 | 114min | 3 tasks | 32 files |
 | Phase 02 P01 | 5min | 1 tasks | 5 files |
 | Phase 02 P02 | 4min | 1 tasks | 674 files |
+| Phase 02 P03 | 6min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -94,6 +95,8 @@ Recent decisions affecting current work:
 - [Phase ?]: Phase 2: FIPS_PACKET is opaque binary FWAV with no codec or PCM metadata, and counters advance only after forwarding.
 - [Phase ?]: Phase 2: FIPS is vendored at immutable commit fc8ebd5 with MIT license, Rust 1.94.1, pre-patch checksums, and no mutable build fetch.
 - [Phase ?]: Phase 2: The sound transport may use only direct tokio-tungstenite =0.30.0 while reusing upstream Tokio and futures.
+- [Phase ?]: Phase 2: A/B config uses exact-schema overrides, distinct canonical endpoint ports, and a public allowlist that never includes nsecs.
+- [Phase ?]: Phase 2: ResourceOwner closes only registered return handles in reverse order and startup failures clean only resources already owned.
 
 ### Pending Todos
 
@@ -133,6 +136,6 @@ hardware checkpoint remains explicit.
 
 ## Session Continuity
 
-Last session: 2026-07-24T01:26:17.776Z
-Stopped at: Completed 02-02-PLAN.md
+Last session: 2026-07-24T01:33:33.976Z
+Stopped at: Completed 02-03-PLAN.md
 Resume file: None
