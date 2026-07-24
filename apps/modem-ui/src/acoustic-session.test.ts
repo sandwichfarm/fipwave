@@ -42,6 +42,7 @@ function options(role: 'A' | 'B', modem: FakeModem): AcousticSessionOptions {
     ranges: { minPayloadBytes: 96, maxPayloadBytes: 217 },
     candidates: [candidate],
     calibration: { probesPerDirection: 4, maxCandidates: 3, deadlineMs: 120_000 },
+    measureProbe: () => ({ received: true, bytePerfect: true, corrupt: false, missing: false, duplicate: false, discontinuity: false, latencyMs: 30, signalDb: -24, clipping: false, confidence: 1 }),
   };
 }
 
@@ -120,5 +121,39 @@ describe('AcousticSession bootstrap handshake', () => {
     b.receive(rawCaps);
     b.receive(rawCaps);
     expect(b.snapshot.state).toBe('Listening');
+  });
+});
+
+describe('AcousticSession calibration, selection, and commitment', () => {
+  it('executes four numbered A-to-B probes before four numbered B-to-A probes and waits for a heartbeat after COMMIT_ACK', async () => {
+    const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
+    const a = new AcousticSession(options('A', aModem)); const b = new AcousticSession(options('B', bModem));
+    a.start();
+    await Promise.all([a.settle(), b.settle()]);
+    expect(a.snapshot.state).toBe('AwaitingHeartbeat');
+    expect(b.snapshot.state).toBe('AwaitingHeartbeat');
+    const probes = [...aModem.sent, ...bModem.sent].map((raw) => decodeFas1(raw)).filter((unit) => unit.type === Fas1UnitType.Probe);
+    expect(probes).toHaveLength(8);
+    expect(probes.slice(0, 4).map((probe) => probe.body[0])).toEqual([1, 1, 1, 1]);
+    expect(probes.slice(4).map((probe) => probe.body[0])).toEqual([2, 2, 2, 2]);
+    b.heartbeat();
+    expect(a.snapshot.ready).toBe(true);
+    expect(b.snapshot.ready).toBe(true);
+  });
+
+  it('selects directionally, preferring byte correctness, timing, then lower gain', async () => {
+    const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
+    const candidates = [
+      { ...candidate, id: 'fast-gain-2', payloadBytes: 217, playbackGain: 2 },
+      { ...candidate, id: 'reliable-gain-1', payloadBytes: 96, playbackGain: 1 },
+    ];
+    const aOptions = options('A', aModem); const bOptions = options('B', bModem);
+    const a = new AcousticSession({ ...aOptions, candidates, measureProbe: (probe) => ({ received: true, bytePerfect: probe.candidateIndex === 1, corrupt: probe.candidateIndex === 0, missing: false, duplicate: false, discontinuity: false, latencyMs: 10, signalDb: -20, clipping: probe.candidateIndex === 0, confidence: 1 }) });
+    const b = new AcousticSession({ ...bOptions, candidates, measureProbe: (probe) => ({ received: true, bytePerfect: true, corrupt: false, missing: false, duplicate: false, discontinuity: false, latencyMs: probe.candidateIndex === 0 ? 50 : 50, signalDb: -20, clipping: false, confidence: 1 }) });
+    a.start();
+    await Promise.all([a.settle(), b.settle()]);
+    expect(a.snapshot.settings?.aToB.payloadBytes).toBe(96);
+    expect(a.snapshot.settings?.bToA.playbackGain).toBe(1);
+    expect(b.snapshot.settingsDigest).toEqual(a.snapshot.settingsDigest);
   });
 });
