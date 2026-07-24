@@ -111,8 +111,8 @@ describe('FIPS packet bridge', () => {
     const response = await fetch(`http://127.0.0.1:${bridge.port}/bridge-status`);
     expect(response.ok).toBe(true);
     expect(await response.json()).toEqual(expect.objectContaining({
-      role: 'A', configuration: 'ready', browserAudio: 'not-armed', localBridge: 'disconnected',
-      soundTransport: 'waiting', epoch: 1, soundMtu: 1357, txPackets: 0, rxPackets: 0,
+      role: 'Unknown', configuration: 'unknown', browserAudio: 'not-armed', localBridge: 'disconnected',
+      soundTransport: 'waiting', epoch: 1, soundMtu: null, txPackets: 0, rxPackets: 0,
     }));
   });
 
@@ -126,7 +126,7 @@ describe('FIPS packet bridge', () => {
 
     const response = await fetch(`http://127.0.0.1:${bridge.port}/bridge-status`);
     expect(response.ok).toBe(true);
-    expect(await response.json()).toEqual(expect.objectContaining({ configuration: 'ready' }));
+    expect(await response.json()).toEqual(expect.objectContaining({ configuration: 'unknown', soundMtu: null }));
   });
 
   it('rejects text, wrong-role, stale, and unavailable-destination input before accepted delivery counters change', async () => {

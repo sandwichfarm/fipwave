@@ -376,14 +376,17 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
           ? 'clear'
           : 'unknown';
     return {
-      role: config?.role ?? 'A', configuration: 'ready',
+      // A listener without the runner-owned configuration has no demo role or
+      // IPv6 MTU authority. Keep that absence explicit for the browser rather
+      // than projecting plausible defaults.
+      role: config?.role ?? 'Unknown', configuration: config ? 'ready' : 'unknown',
       browserAudio: browserArmed ? 'armed' : 'not-armed',
       localBridge: state.packetEndpoints.browser === 'ready' ? 'ready' : 'disconnected',
       soundTransport: state.packetEndpoints.fips === 'ready' ? 'started' : 'waiting',
       epoch: state.epoch, queueHealth,
       queueItems: queue.items + reverseQueue.items, queueBytes: queue.bytes + reverseQueue.bytes,
       txPackets: state.packetCounters.browserToFips, rxPackets: state.packetCounters.fipsToBrowser,
-      soundMtu: 1357,
+      soundMtu: config ? 1357 : null,
       lastEventAt: new Date(state.lastAcceptedAtMs ?? 0).toISOString(),
       lastError: state.lastError?.message ?? null,
     };
