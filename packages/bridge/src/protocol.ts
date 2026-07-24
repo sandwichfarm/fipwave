@@ -8,6 +8,8 @@ export const MAX_PAYLOAD_BYTES = MAX_MESSAGE_BYTES - HEADER_BYTES;
 export const PCM_SAMPLE_INDEX_BYTES = 8;
 /** Exact fixed-geometry Cyrinx playback; the browser adds the documented local guard tail. */
 export const CYRINX_PCM_PLAYBACK_FLAG = 0x0001;
+/** RESET acknowledgements are bridge-originated and must never be echoed back as requests. */
+export const RESET_ACK_FLAG = 0x0001;
 
 export enum MessageType {
   HELLO = 1,

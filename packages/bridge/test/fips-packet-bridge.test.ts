@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
 
 import { decodeFrame, encodeFrame, MAX_MESSAGE_BYTES, MessageType, PcmEncoding } from '../src/protocol.js';
-import { createBridgeServer, type BridgeServer } from '../src/server.js';
+import { createBridgeServer, type BridgeServer, type PacketBridgeState } from '../src/server.js';
 
 const servers: BridgeServer[] = [];
 
@@ -43,6 +43,10 @@ function packet(epoch: number, sequence: bigint, payload: Buffer): Buffer {
 
 function patternedPacket(): Buffer {
   return Buffer.from(Array.from({ length: 1357 }, (_value, index) => index % 251));
+}
+
+function packetBridgeState(bridge: BridgeServer): PacketBridgeState {
+  return bridge.state() as unknown as PacketBridgeState;
 }
 
 describe('FIPS packet bridge', () => {
@@ -106,7 +110,7 @@ describe('FIPS packet bridge', () => {
     browser.send(packet(1, 1n, Buffer.alloc(64)));
     await drainBridge();
 
-    expect(bridge.state()).toMatchObject({
+    expect(packetBridgeState(bridge)).toMatchObject({
       packetQueues: {
         browserToFips: { items: 0, bytes: 0, maxItems: 32, maxBytes: MAX_MESSAGE_BYTES, maxAgeMs: 5_000 },
         fipsToBrowser: { items: 0, bytes: 0, maxItems: 32, maxBytes: MAX_MESSAGE_BYTES, maxAgeMs: 5_000 },
@@ -115,7 +119,7 @@ describe('FIPS packet bridge', () => {
       packetCounters: { browserToFips: 0, fipsToBrowser: 0 },
     });
 
-    const error = bridge.state().lastError!;
+    const error = packetBridgeState(bridge).lastError!;
     expect(error.message).toMatch(/^[^\r\n]{1,240}$/);
     expect(error.message).not.toContain('64');
 
@@ -128,7 +132,7 @@ describe('FIPS packet bridge', () => {
       payload: Buffer.from(JSON.stringify({ action: 'start_cyrinx', packet: Buffer.alloc(64).toString('base64') })),
     }));
     await drainBridge();
-    expect(controlBridge.state().lastError).toMatchObject({ code: 'control_payload_contains_packet_data' });
-    expect(controlBridge.state().packetQueues.browserToFips.items).toBe(0);
+    expect(packetBridgeState(controlBridge).lastError).toMatchObject({ code: 'control_payload_contains_packet_data' });
+    expect(packetBridgeState(controlBridge).packetQueues.browserToFips.items).toBe(0);
   });
 });
