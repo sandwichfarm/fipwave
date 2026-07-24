@@ -7,16 +7,27 @@ class FakeModem implements AcousticModem {
   #handler: ((unit: Uint8Array) => void) | undefined;
   peer: FakeModem | undefined;
   readonly sent: Uint8Array[] = [];
+  shouldDeliver: ((unit: Uint8Array) => boolean) | undefined;
+  transform: ((unit: Uint8Array) => Uint8Array) | undefined;
 
   send(unit: Uint8Array): void {
     this.sent.push(unit.slice());
-    if (this.peer && this.peer.#handler) this.peer.#handler(unit.slice());
+    if (this.shouldDeliver?.(unit) === false) return;
+    if (this.peer && this.peer.#handler) this.peer.#handler(this.transform ? this.transform(unit.slice()) : unit.slice());
   }
 
   onUnit(handler: (unit: Uint8Array) => void): () => void {
     this.#handler = handler;
     return () => { if (this.#handler === handler) this.#handler = undefined; };
   }
+}
+
+class FakeTimers {
+  #callbacks = new Map<number, () => void>();
+  #next = 1;
+  setTimeout(callback: () => void): ReturnType<typeof setTimeout> { const id = this.#next++; this.#callbacks.set(id, callback); return id as unknown as ReturnType<typeof setTimeout>; }
+  clearTimeout(handle: ReturnType<typeof setTimeout>): void { this.#callbacks.delete(handle as unknown as number); }
+  runAll(): void { for (const callback of [...this.#callbacks.values()]) callback(); this.#callbacks.clear(); }
 }
 
 const candidate = {
@@ -26,7 +37,7 @@ const candidate = {
   repetition: 1,
   guardMs: 750,
   playbackGain: 1,
-  ackTimeoutMs: 1_500,
+  ackTimeoutMs: 4_000,
 } as const;
 
 function options(role: 'A' | 'B', modem: FakeModem): AcousticSessionOptions {
@@ -46,6 +57,10 @@ function options(role: 'A' | 'B', modem: FakeModem): AcousticSessionOptions {
   };
 }
 
+async function settlePair(a: AcousticSession, b: AcousticSession): Promise<void> {
+  for (let round = 0; round < 4; round += 1) await Promise.all([a.settle(), b.settle()]);
+}
+
 describe('AcousticSession bootstrap handshake', () => {
   it('allows only A to initiate and carries the pair into A-to-B calibration over encoded FAS1 units', () => {
     const aModem = new FakeModem();
@@ -57,8 +72,8 @@ describe('AcousticSession bootstrap handshake', () => {
 
     expect(b.start()).toBe(false);
     expect(a.start()).toBe(true);
-    expect(a.snapshot.state).toBe('CalibratingAToB');
-    expect(b.snapshot.state).toBe('CalibratingAToB');
+    expect(a.snapshot.state).toBe('Committing');
+    expect(b.snapshot.state).toBe('Committing');
     expect(aModem.sent.length).toBeGreaterThan(0);
     expect(bModem.sent.length).toBeGreaterThan(0);
   });
@@ -122,6 +137,20 @@ describe('AcousticSession bootstrap handshake', () => {
     b.receive(rawCaps);
     expect(b.snapshot.state).toBe('Listening');
   });
+
+  it('accepts an exact capability boundary and rejects a one-byte non-overlap before transition', () => {
+    const exactA = new FakeModem(); const exactB = new FakeModem(); exactA.peer = exactB; exactB.peer = exactA;
+    const a = new AcousticSession({ ...options('A', exactA), ranges: { minPayloadBytes: 96, maxPayloadBytes: 96 } });
+    const b = new AcousticSession({ ...options('B', exactB), ranges: { minPayloadBytes: 96, maxPayloadBytes: 96 } });
+    a.start();
+    expect(b.snapshot.state).not.toBe('Listening');
+
+    const rejectedA = new FakeModem(); const rejectedB = new FakeModem(); rejectedA.peer = rejectedB; rejectedB.peer = rejectedA;
+    const outOfRangeA = new AcousticSession({ ...options('A', rejectedA), ranges: { minPayloadBytes: 96, maxPayloadBytes: 96 } });
+    const outOfRangeB = new AcousticSession({ ...options('B', rejectedB), ranges: { minPayloadBytes: 97, maxPayloadBytes: 217 }, candidates: [{ ...candidate, payloadBytes: 97 }] });
+    outOfRangeA.start();
+    expect(outOfRangeB.snapshot.state).toBe('Listening');
+  });
 });
 
 describe('AcousticSession calibration, selection, and commitment', () => {
@@ -129,9 +158,8 @@ describe('AcousticSession calibration, selection, and commitment', () => {
     const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
     const a = new AcousticSession(options('A', aModem)); const b = new AcousticSession(options('B', bModem));
     a.start();
-    await Promise.all([a.settle(), b.settle()]);
-    expect(a.snapshot.state).toBe('AwaitingHeartbeat');
-    expect(b.snapshot.state).toBe('AwaitingHeartbeat');
+    await settlePair(a, b);
+    expect({ a: a.snapshot, b: b.snapshot }).toMatchObject({ a: { state: 'AwaitingHeartbeat' }, b: { state: 'AwaitingHeartbeat' } });
     const probes = [...aModem.sent, ...bModem.sent].map((raw) => decodeFas1(raw)).filter((unit) => unit.type === Fas1UnitType.Probe);
     expect(probes).toHaveLength(8);
     expect(probes.slice(0, 4).map((probe) => probe.body[0])).toEqual([1, 1, 1, 1]);
@@ -151,9 +179,37 @@ describe('AcousticSession calibration, selection, and commitment', () => {
     const a = new AcousticSession({ ...aOptions, candidates, measureProbe: (probe) => ({ received: true, bytePerfect: probe.candidateIndex === 1, corrupt: probe.candidateIndex === 0, missing: false, duplicate: false, discontinuity: false, latencyMs: 10, signalDb: -20, clipping: probe.candidateIndex === 0, confidence: 1 }) });
     const b = new AcousticSession({ ...bOptions, candidates, measureProbe: (probe) => ({ received: true, bytePerfect: true, corrupt: false, missing: false, duplicate: false, discontinuity: false, latencyMs: probe.candidateIndex === 0 ? 50 : 50, signalDb: -20, clipping: false, confidence: 1 }) });
     a.start();
-    await Promise.all([a.settle(), b.settle()]);
+    await settlePair(a, b);
     expect(a.snapshot.settings?.aToB.payloadBytes).toBe(96);
     expect(a.snapshot.settings?.bToA.playbackGain).toBe(1);
     expect(b.snapshot.settingsDigest).toEqual(a.snapshot.settingsDigest);
+  });
+
+  it('retains bounded corrupt, missing, duplicate, discontinuity, timing, signal, clipping, and confidence evidence', () => {
+    const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
+    const a = new AcousticSession(options('A', aModem));
+    const b = new AcousticSession({ ...options('B', bModem), measureProbe: () => ({ received: false, bytePerfect: false, corrupt: true, missing: true, duplicate: true, discontinuity: true, latencyMs: 42, signalDb: -37.5, clipping: true, confidence: 0.25 }) });
+    a.start();
+    const entry = b.snapshot.ledger[0]!;
+    expect(entry.observation).toEqual({ received: false, bytePerfect: false, corrupt: true, missing: true, duplicate: true, discontinuity: true, latencyMs: 42, signalDb: -37.5, clipping: true, confidence: 0.25 });
+  });
+
+  it('enters a bounded safe error on deadline or a mismatched COMMIT digest', async () => {
+    const timers = new FakeTimers(); const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
+    aModem.shouldDeliver = (raw) => decodeFas1(raw).type !== Fas1UnitType.Probe;
+    const a = new AcousticSession({ ...options('A', aModem), timers }); const b = new AcousticSession({ ...options('B', bModem), timers });
+    a.start(); timers.runAll();
+    expect(a.snapshot).toMatchObject({ state: 'Error', ready: false, reason: 'acoustic_calibration_deadline' });
+    expect(b.snapshot).toMatchObject({ state: 'Error', ready: false, reason: 'acoustic_calibration_deadline' });
+
+    const cModem = new FakeModem(); const dModem = new FakeModem(); cModem.peer = dModem; dModem.peer = cModem;
+    dModem.transform = (raw) => {
+      const unit = decodeFas1(raw);
+      return unit.type === Fas1UnitType.Commit ? encodeFas1({ ...unit, body: Uint8Array.from(unit.body, (byte, index) => index === 0 ? byte ^ 1 : byte) }) : raw;
+    };
+    const c = new AcousticSession(options('A', cModem)); const d = new AcousticSession(options('B', dModem));
+    c.start(); await settlePair(c, d);
+    expect(c.snapshot).toMatchObject({ state: 'Error', ready: false, reason: 'acoustic_commit_digest_mismatch' });
+    expect(d.snapshot.ready).toBe(false);
   });
 });
