@@ -100,7 +100,8 @@ function isMessageType(value: number): value is MessageType {
   return value >= MessageType.HELLO && value <= MessageType.BROWSER_DISARM;
 }
 
-function isFipsTrafficClass(value: number): value is FipsTrafficClass {
+/** Runtime guard shared by the bridge and browser packet boundary. */
+export function isFipsTrafficClass(value: number): value is FipsTrafficClass {
   return value === FipsTrafficClass.Control
     || value === FipsTrafficClass.Heartbeat
     || value === FipsTrafficClass.Ordinary;

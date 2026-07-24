@@ -1,19 +1,32 @@
+import { FipsTrafficClass, isFipsTrafficClass } from '../../../packages/bridge/src/protocol.js';
+
 export type PacketResult = { accepted: true } | { accepted: false; reason: 'not-armed' | 'stale' | 'invalid' };
+
+/** A complete opaque FIPS packet plus source-authored local scheduling metadata. */
+export interface FipsPacketEnvelope {
+  readonly bytes: Uint8Array;
+  readonly trafficClass: FipsTrafficClass;
+}
 
 export interface FipsPacketAdapter {
   arm(epoch: number, generation: number): void;
   invalidate(): void;
-  receive(packet: Uint8Array, epoch: number, generation: number): PacketResult;
-  send(packet: Uint8Array): PacketResult;
+  receive(packet: Uint8Array, trafficClass: FipsTrafficClass, epoch: number, generation: number): PacketResult;
+  send(packet: Uint8Array, trafficClass?: FipsTrafficClass): PacketResult;
 }
 
 export interface FipsPacketAdapterOptions {
-  onPacket(packet: Uint8Array): void;
-  emitPacket(packet: Uint8Array): void;
+  onPacket(envelope: FipsPacketEnvelope): void;
+  emitPacket(envelope: FipsPacketEnvelope): void;
 }
 
 function validPacket(packet: Uint8Array): boolean {
   return packet instanceof Uint8Array && packet.byteLength > 0 && packet.byteLength <= 256 * 1024 - 32;
+}
+
+function envelope(packet: Uint8Array, trafficClass: FipsTrafficClass): FipsPacketEnvelope | undefined {
+  if (!validPacket(packet) || !isFipsTrafficClass(trafficClass)) return undefined;
+  return Object.freeze({ bytes: packet.slice(), trafficClass });
 }
 
 /** Complete opaque FIPS packets only; codec, PCM, fragmentation and retries stay below this boundary. */
@@ -27,17 +40,19 @@ export function createFipsPacketAdapter(options: FipsPacketAdapterOptions): Fips
   return {
     arm(epoch, generation) { lifecycle = { epoch, generation }; },
     invalidate() { lifecycle = undefined; },
-    receive(packet, epoch, generation) {
+    receive(packet, trafficClass, epoch, generation) {
       const rejected = active(epoch, generation);
       if (rejected) return rejected;
-      if (!validPacket(packet)) return { accepted: false, reason: 'invalid' };
-      options.onPacket(packet.slice());
+      const accepted = envelope(packet, trafficClass);
+      if (!accepted) return { accepted: false, reason: 'invalid' };
+      options.onPacket(accepted);
       return { accepted: true };
     },
-    send(packet) {
+    send(packet, trafficClass = FipsTrafficClass.Ordinary) {
       if (!lifecycle) return { accepted: false, reason: 'not-armed' };
-      if (!validPacket(packet)) return { accepted: false, reason: 'invalid' };
-      options.emitPacket(packet.slice());
+      const accepted = envelope(packet, trafficClass);
+      if (!accepted) return { accepted: false, reason: 'invalid' };
+      options.emitPacket(accepted);
       return { accepted: true };
     },
   };
