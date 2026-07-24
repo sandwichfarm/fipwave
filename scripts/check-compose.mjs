@@ -84,7 +84,7 @@ export function validateFipsComposeTopology(rendered) {
 export function checkFipsComposeSource(composeSource, bridgeDockerfile, fipsDockerfile) {
   if (!bridgeDockerfile.includes('FROM node:22.23.1-bookworm-slim')) fail('bridge image must pin Node 22.23.1');
   if (!fipsDockerfile.includes('FROM rust:1.94.1-bookworm')) fail('fips image must pin Rust 1.94.1');
-  if (!fipsDockerfile.includes('pkg-config') || !fipsDockerfile.includes('libdbus-1-dev')) fail('fips build image must provide dbus build dependencies');
+  if (!fipsDockerfile.includes('pkg-config') || !fipsDockerfile.includes('libdbus-1-dev') || !fipsDockerfile.includes('libclang-dev')) fail('fips build image must provide native FIPS build dependencies');
   if (!fipsDockerfile.includes('libdbus-1-3')) fail('fips runtime image must provide dbus runtime dependency');
   if (/\bnsec\b/i.test(composeSource)) fail('compose must not contain role secrets');
   if (!/^\s+network_mode:\s+service:bridge\s*$/m.test(composeSource)) fail('fips namespace target is missing');

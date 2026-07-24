@@ -1,7 +1,7 @@
 FROM rust:1.94.1-bookworm AS build
 WORKDIR /src
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends pkg-config libdbus-1-dev \
+  && apt-get install -y --no-install-recommends pkg-config libdbus-1-dev libclang-dev \
   && rm -rf /var/lib/apt/lists/*
 COPY . .
 RUN cargo build --locked --release --bin fips
