@@ -14,7 +14,7 @@ import { cyrinxDigitalCases } from './qualification-session.js';
 import { CYRINX_DEADLINE_MS, QUIET_CODEC, TUN_EVIDENCE_CHECKS, validateTunEvidence, type MachineReport, type TunEvidence } from './report.js';
 import { createFipsControlClient } from './fips-control-client.js';
 import { createProofController, projectPublicProofExecution } from './proof-controller.js';
-import { createIsolationResponder } from './isolation-attestation.js';
+import { createIsolationResponder, requestIsolationAttestation } from './isolation-attestation.js';
 
 const execFileAsync = promisify(execFile);
 function findProjectRoot(from: string): string {
@@ -75,6 +75,8 @@ function unavailableTunEvidence(): TunEvidence {
 }
 async function resolveBuildIdentity(injected?: BuildIdentity): Promise<BuildIdentity> {
   if (injected) return { ...injected };
+  const runtimeCommit = process.env.BUILD_COMMIT;
+  if (runtimeCommit && /^[a-f0-9]{40}$/i.test(runtimeCommit)) return { commit: runtimeCommit.toLowerCase(), os: process.platform, architecture: process.arch, dirty: false };
   try {
     const [{ stdout: commit }, { stdout: status }] = await Promise.all([
       execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: PROJECT_ROOT }),
@@ -218,6 +220,9 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
     const control = createFipsControlClient({ socketPath: demoConfig.fips.controlSocketPath });
     owner.register('fips-control', control.close);
     let bridge: Awaited<ReturnType<typeof createBridgeServer>> | undefined;
+    const settingsId = demoConfig.calibrationCandidates[0]?.profileId;
+    if (!settingsId) fail('startup failed');
+    let cachedIsolation: { readonly epoch: number; readonly observedAtMs: number } | undefined;
     const proof = createProofController({
       config: demoConfig, targetIpv6: demoConfig.fips.targetIpv6, control,
       // The bridge's browser-facing state is deliberately not enough to infer
@@ -227,17 +232,22 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
         const state = bridge?.state();
         return { epoch: state?.epoch ?? 0, ready: state?.acousticReady ?? false, observedAtMs: Date.now() };
       },
-      isolation: async () => ({ accepted: false, epoch: 0, observedAtMs: Date.now(), targetIpv6: demoConfig.fips.targetIpv6 }),
+      isolation: async () => {
+        const now = Date.now(); const state = bridge?.state();
+        if (!state?.acousticReady) { cachedIsolation = undefined; return { accepted: false, epoch: state?.epoch ?? 0, observedAtMs: now, targetIpv6: demoConfig.fips.targetIpv6 }; }
+        if (cachedIsolation && cachedIsolation.epoch === state.epoch && now - cachedIsolation.observedAtMs < 10_000) return { accepted: true, epoch: state.epoch, observedAtMs: cachedIsolation.observedAtMs, targetIpv6: demoConfig.fips.targetIpv6 };
+        try {
+          const attestation = await requestIsolationAttestation({ now: () => Date.now(), sourceHost: demoConfig.fips.ipv6Address, targetHost: demoConfig.fips.targetIpv6, port: demoConfig.proof.port, expectedPeerPublicKey: demoConfig.identity.publicKey, expectedTargetIpv6: demoConfig.fips.targetIpv6, expectedBuild: build.commit, expectedEpoch: state.epoch, expectedSettingsId: settingsId, timeoutMs: demoConfig.proof.timeoutMs, maxAttempts: demoConfig.proof.maxAttempts });
+          cachedIsolation = { epoch: state.epoch, observedAtMs: attestation.observedAtMs };
+          return { accepted: true, epoch: state.epoch, observedAtMs: attestation.observedAtMs, targetIpv6: demoConfig.fips.targetIpv6 };
+        } catch { cachedIsolation = undefined; return { accepted: false, epoch: state.epoch, observedAtMs: now, targetIpv6: demoConfig.fips.targetIpv6 }; }
+      },
       now: () => Date.now(),
       execFile: async (file, args, commandOptions) => {
         try { const result = await execFileAsync(file, [...args], { timeout: commandOptions.timeout, maxBuffer: commandOptions.maxBuffer, windowsHide: commandOptions.windowsHide }); return { exitCode: 0, stdout: result.stdout, stderr: result.stderr }; }
         catch (error) { const failed = error as { code?: unknown; stdout?: unknown; stderr?: unknown }; return { exitCode: typeof failed.code === 'number' ? failed.code : 2, stdout: typeof failed.stdout === 'string' ? failed.stdout : '', stderr: typeof failed.stderr === 'string' ? failed.stderr : '' }; }
       },
     });
-    if (demoConfig.role === 'B') {
-      const responder = createIsolationResponder({ now: () => Date.now(), snapshot: async () => { throw new Error('snapshot_invalid'); }, host: demoConfig.fips.ipv6Address, port: demoConfig.proof.port });
-      owner.register('isolation-responder', responder.close);
-    }
     bridgeOptions.proofController = {
       role: demoConfig.role,
       status: async () => projectPublicProofExecution(await proof.status()),
@@ -246,6 +256,28 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
     bridge = await (options.createBridgeServerForTests ?? createBridgeServer)(bridgeOptions);
     owner.register('bridge', bridge.close);
     if (options.fipsConfigOutput && fipsConfig) await publishFipsConfig(options.fipsConfigOutput, fipsConfig);
+    if (demoConfig.role === 'B') {
+      const responder = createIsolationResponder({
+        now: () => Date.now(), host: demoConfig.fips.ipv6Address, port: demoConfig.proof.port,
+        snapshot: async () => {
+          const state = bridge?.state();
+          if (!state?.acousticReady) throw new Error('snapshot_invalid');
+          const [peerData, linkData, transportData] = await Promise.all([control.query('peers'), control.query('links'), control.query('transports')]);
+          const peers = (peerData as { peers: readonly { npub: string; connectivity: string; link_id: number; transport_type: string }[] }).peers;
+          const links = (linkData as { links: readonly { link_id: number; transport_id: number; state: string }[] }).links;
+          const transports = (transportData as { transports: readonly { transport_id: number; type: string; state: string; stats: Readonly<Record<string, unknown>> }[] }).transports;
+          const peer = peers.find((item) => item.npub === demoConfig.fips.expectedPeerPublicKey && item.connectivity === 'connected' && item.transport_type === 'sound');
+          const link = peer && links.find((item) => item.link_id === peer.link_id && item.state === 'active');
+          const transport = link && transports.find((item) => item.transport_id === link.transport_id && item.type === 'sound' && item.state === 'active');
+          if (!peer || !link || !transport || transport.stats.worker_up !== true || transport.stats.acoustic_ready !== true || transport.stats.epoch !== state.epoch) throw new Error('snapshot_invalid');
+          return { expectedPeerPublicKey: demoConfig.fips.expectedPeerPublicKey, targetIpv6: demoConfig.fips.ipv6Address, build: build.commit, epoch: state.epoch, settingsId, observedAtMs: Date.now(), transport: { transportId: transport.transport_id, type: 'sound' as const, state: 'active' as const, workerUp: true as const, acousticReady: true as const }, link: { linkId: link.link_id, peerPublicKey: peer.npub } };
+        },
+      });
+      let stopped = false; let retry: ReturnType<typeof setTimeout> | undefined;
+      const bind = (): void => { void responder.listen().catch(() => { if (!stopped) retry = setTimeout(bind, 250); }); };
+      bind();
+      owner.register('isolation-responder', async () => { stopped = true; if (retry) clearTimeout(retry); await responder.close(); });
+    }
     await options.afterBridgeStartedForTests?.();
     const publicConfig = Object.freeze({ ...toPublicDemoConfig(demoConfig), reportTarget: config.reportTarget });
     return { ...bridge, close: () => owner.close(), config: publicConfig };

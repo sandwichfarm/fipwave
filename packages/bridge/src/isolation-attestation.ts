@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { createSocket, type Socket } from 'node:dgram';
 
 export interface IsolationChallenge { readonly schemaVersion: 1; readonly challenge: string; }
@@ -10,6 +10,19 @@ export interface IsolationSnapshot {
 export interface IsolationAttestation extends IsolationSnapshot { readonly schemaVersion: 1; readonly challenge: string; readonly snapshotDigest: string; }
 export interface IsolationResponder { attest(challenge: IsolationChallenge): Promise<IsolationAttestation>; listen(): Promise<void>; close(): Promise<void>; }
 export interface IsolationResponderOptions { readonly now: () => number; readonly snapshot: () => Promise<IsolationSnapshot>; readonly host?: string; readonly port?: number; }
+export interface IsolationAttestationRequestOptions {
+  readonly now: () => number;
+  readonly sourceHost: string;
+  readonly targetHost: string;
+  readonly port: number;
+  readonly expectedPeerPublicKey: string;
+  readonly expectedTargetIpv6: string;
+  readonly expectedBuild: string;
+  readonly expectedEpoch: number;
+  readonly expectedSettingsId: string;
+  readonly timeoutMs?: number;
+  readonly maxAttempts?: number;
+}
 
 const MAX_BYTES = 1024; const CHALLENGE_BYTES = 32; const WINDOW_MS = 60_000; const REPLAY_TTL_MS = 120_000; const MAX_REPLAYS = 32; const MAX_PER_MINUTE = 6;
 function fail(code: string): never { throw new Error(code); }
@@ -58,8 +71,47 @@ export function createIsolationResponder(options: IsolationResponderOptions): Is
       if (socket) return; socket = createSocket('udp6');
       socket.on('message', (body, remote) => { if (body.byteLength > MAX_BYTES || remote.family !== 'IPv6') return; let request: IsolationChallenge; try { request = challenge(JSON.parse(body.toString('utf8'))); } catch { return; }
         void attest(request).then((response) => socket?.send(Buffer.from(JSON.stringify(response)), remote.port, remote.address)).catch(() => undefined); });
-      await new Promise<void>((resolve, reject) => { socket?.once('error', reject); socket?.bind(options.port ?? 45_900, options.host ?? '::', () => { socket?.off('error', reject); resolve(); }); });
+      try {
+        await new Promise<void>((resolve, reject) => { socket?.once('error', reject); socket?.bind(options.port ?? 45_900, options.host ?? '::', () => { socket?.off('error', reject); resolve(); }); });
+      } catch (error) {
+        const current = socket; socket = undefined; current?.close(); throw error;
+      }
     },
     async close(): Promise<void> { if (!socket) return; const current = socket; socket = undefined; await new Promise<void>((resolve) => current.close(() => resolve())); },
   });
+}
+
+/** One-use in-band UDP6 request. It accepts only the configured B fips0 source and exact current bindings. */
+export async function requestIsolationAttestation(options: IsolationAttestationRequestOptions): Promise<IsolationAttestation> {
+  const timeoutMs = options.timeoutMs ?? 45_000;
+  const maxAttempts = options.maxAttempts ?? 2;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 45_000 || !Number.isSafeInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 2) fail('request_invalid');
+  const request = Object.freeze({ schemaVersion: 1 as const, challenge: randomBytes(CHALLENGE_BYTES).toString('base64url') });
+  const body = Buffer.from(JSON.stringify(request), 'utf8');
+  if (body.byteLength > MAX_BYTES) fail('request_invalid');
+  let lastError = 'attestation_timeout';
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      const response = await new Promise<IsolationAttestation>((resolve, reject) => {
+        const client = createSocket('udp6'); let settled = false;
+        const finish = (error?: Error, value?: IsolationAttestation): void => {
+          if (settled) return; settled = true; clearTimeout(timer); client.removeAllListeners(); client.close(); if (error) reject(error); else resolve(value!);
+        };
+        const timer = setTimeout(() => finish(new Error('attestation_timeout')), timeoutMs);
+        client.once('error', () => finish(new Error('attestation_transport_error')));
+        client.on('message', (incoming, remote) => {
+          if (incoming.byteLength > MAX_BYTES || remote.family !== 'IPv6' || remote.address !== options.targetHost || remote.port !== options.port) return;
+          try {
+            const attestation = parseIsolationAttestation(JSON.parse(incoming.toString('utf8')));
+            const now = options.now();
+            if (attestation.challenge !== request.challenge || attestation.expectedPeerPublicKey !== options.expectedPeerPublicKey || attestation.targetIpv6 !== options.expectedTargetIpv6 || attestation.build !== options.expectedBuild || attestation.epoch !== options.expectedEpoch || attestation.settingsId !== options.expectedSettingsId || now - attestation.observedAtMs > WINDOW_MS || attestation.observedAtMs > now + 1_000) fail('attestation_binding_invalid');
+            finish(undefined, attestation);
+          } catch (error) { finish(error instanceof Error ? error : new Error('attestation_invalid')); }
+        });
+        client.bind(0, options.sourceHost, () => { client.send(body, options.port, options.targetHost, (error) => { if (error) finish(new Error('attestation_transport_error')); }); });
+      });
+      return response;
+    } catch (error) { lastError = error instanceof Error ? error.message : 'attestation_invalid'; }
+  }
+  fail(lastError);
 }

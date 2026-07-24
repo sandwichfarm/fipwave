@@ -59,9 +59,11 @@ export function composeInvocation(plan, args) {
 
 async function compose(plan, args) {
   const invocation = composeInvocation(plan, args);
+  const buildCommit = process.env.BUILD_COMMIT ?? (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: ROOT })).stdout.trim();
+  if (!/^[a-f0-9]{40}$/i.test(buildCommit)) throw new Error('demo requires a resolved 40-hex BUILD_COMMIT');
   return execFileAsync(invocation.command, invocation.args, {
     cwd: invocation.cwd,
-    env: { ...process.env, ...invocation.environment },
+    env: { ...process.env, ...invocation.environment, BUILD_COMMIT: buildCommit },
     maxBuffer: MAX_OUTPUT_BYTES,
   });
 }

@@ -6,6 +6,7 @@ services:
     environment:
       ROLE: ${ROLE:-A}
       MACHINE_ID: ${MACHINE_ID:-fipwave-a}
+      BUILD_COMMIT: ${BUILD_COMMIT:-unresolved}
     command:
       - sh
       - -ec

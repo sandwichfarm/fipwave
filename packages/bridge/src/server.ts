@@ -359,6 +359,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
           response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); response.end(JSON.stringify(await proof.status())); return;
         }
         if (request.method !== 'POST' || proof.role !== 'A' || request.headers['content-type'] !== 'application/json') { response.writeHead(proof.role === 'B' ? 403 : 405).end(); return; }
+        if (!isSameOriginLoopback(request.headers.origin, address.port)) { response.writeHead(403).end(); return; }
         const chunks: Buffer[] = []; let size = 0;
         request.on('data', (chunk: Buffer) => { size += chunk.byteLength; if (size <= 256) chunks.push(Buffer.from(chunk)); });
         await new Promise<void>((resolve) => request.once('end', resolve));

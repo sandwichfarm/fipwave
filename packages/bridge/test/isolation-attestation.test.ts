@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 
 import { describe, expect, it } from 'vitest';
 
-import { createIsolationResponder, parseIsolationAttestation } from '../src/isolation-attestation.js';
+import { createIsolationResponder, parseIsolationAttestation, requestIsolationAttestation } from '../src/isolation-attestation.js';
 
 const now = 1_700_000_000_000;
 const challenge = randomBytes(32).toString('base64url');
@@ -28,5 +28,14 @@ describe('isolation attestation', () => {
     const invalid = createIsolationResponder({ now: () => now, snapshot: async () => ({ ...snapshot, transport: { ...snapshot.transport, acousticReady: false } } as never) });
     await expect(invalid.attest({ schemaVersion: 1, challenge: randomBytes(32).toString('base64url') })).rejects.toThrow('snapshot_invalid');
     await responder.close(); await invalid.close();
+  });
+
+  it('uses a one-use UDP6 nonce and accepts only the exact current responder bindings', async () => {
+    const port = 45_998;
+    const responder = createIsolationResponder({ now: () => now, snapshot: async () => snapshot, host: '::1', port });
+    await responder.listen();
+    try {
+      await expect(requestIsolationAttestation({ now: () => now, sourceHost: '::1', targetHost: '::1', port, expectedPeerPublicKey: snapshot.expectedPeerPublicKey, expectedTargetIpv6: snapshot.targetIpv6, expectedBuild: snapshot.build, expectedEpoch: snapshot.epoch, expectedSettingsId: snapshot.settingsId, timeoutMs: 100, maxAttempts: 1 })).resolves.toMatchObject({ challenge: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/), targetIpv6: snapshot.targetIpv6, snapshotDigest: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    } finally { await responder.close(); }
   });
 });

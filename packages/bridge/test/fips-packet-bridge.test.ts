@@ -165,8 +165,9 @@ describe('FIPS packet bridge', () => {
     const status = await fetch(`http://127.0.0.1:${bridge.port}/proof-status`);
     expect(status.status).toBe(200);
     expect(await status.json()).toMatchObject({ reason: 'peer_missing' });
-    const action = await fetch(`http://127.0.0.1:${bridge.port}/proof-ping`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    const action = await fetch(`http://127.0.0.1:${bridge.port}/proof-ping`, { method: 'POST', headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${bridge.port}` }, body: '{}' });
     expect(action.status).toBe(200);
+    expect((await fetch(`http://127.0.0.1:${bridge.port}/proof-ping`, { method: 'POST', headers: { 'content-type': 'application/json', origin: 'http://localhost:4310' }, body: '{}' })).status).toBe(403);
     expect((await fetch(`http://127.0.0.1:${bridge.port}/proof-ping`, { method: 'GET' })).status).toBe(405);
   });
   it('round-trips each Rust-authored FIPS traffic class beside byte-identical opaque bytes', async () => {
