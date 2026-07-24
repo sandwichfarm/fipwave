@@ -69,10 +69,10 @@ describe('walking skeleton', () => {
     expect(await readdir(artifactDir)).toEqual(['loopback-qualification.json']);
   });
 
-  it('fails closed for non-loopback servers and malformed, mismatched, or oversized frames', async () => {
-    await expect(
-      createBridgeServer({ host: '0.0.0.0' as never, port: 0, artifactDir: tmpdir() }),
-    ).rejects.toThrow('127.0.0.1');
+  it('permits the Docker-private bind while loopback publication and origin checks remain separate gates', async () => {
+    const bridge = await createBridgeServer({ host: '0.0.0.0', port: 0, artifactDir: await mkdtemp(path.join(tmpdir(), 'fipwave-skeleton-')) });
+    servers.push(bridge);
+    expect((await fetch(`http://127.0.0.1:${bridge.port}/bridge-status`)).ok).toBe(true);
 
     const malformed = audioSettingsFrame();
     malformed.write('NOPE', 0, 'ascii');
