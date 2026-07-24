@@ -3,7 +3,10 @@
 //! FIPS sees only bounded opaque packets. Audio, modulation, retries and
 //! browser implementation details deliberately stay outside this module.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 
 use futures::{SinkExt, StreamExt};
 use serde_json::json;
@@ -70,6 +73,7 @@ pub struct SoundTransport {
     config: SoundConfig,
     packet_tx: PacketTx,
     runtime: Arc<Mutex<Runtime>>,
+    outbound_bytes: Arc<AtomicUsize>,
     stop: Option<oneshot::Sender<()>>,
     worker: Option<JoinHandle<()>>,
 }
@@ -88,6 +92,7 @@ impl SoundTransport {
             config,
             packet_tx,
             runtime: Arc::new(Mutex::new(Runtime::default())),
+            outbound_bytes: Arc::new(AtomicUsize::new(0)),
             stop: None,
             worker: None,
         })
@@ -143,6 +148,7 @@ impl SoundTransport {
         let (outbound_tx, mut outbound_rx) = mpsc::channel(self.config.queue_items());
         let (stop_tx, mut stop_rx) = oneshot::channel();
         let runtime = Arc::clone(&self.runtime);
+        let outbound_bytes = Arc::clone(&self.outbound_bytes);
         let packet_tx = self.packet_tx.clone();
         let transport_id = self.transport_id;
         let peer = self.configured_peer();
@@ -159,6 +165,7 @@ impl SoundTransport {
                     _ = &mut stop_rx => break,
                     outbound = outbound_rx.recv() => match outbound {
                         Some(frame) => {
+                            outbound_bytes.fetch_sub(frame.len(), Ordering::AcqRel);
                             if writer.send(Message::Binary(frame.into())).await.is_err() {
                                 let mut current = runtime.lock().expect("sound runtime");
                                 current.counters.disconnects += 1;
@@ -189,6 +196,7 @@ impl SoundTransport {
             if current.state == TransportState::Up {
                 current.state = TransportState::Down;
             }
+            outbound_bytes.store(0, Ordering::Release);
         }));
         self.stop = Some(stop_tx);
         Ok(())
@@ -205,6 +213,7 @@ impl SoundTransport {
         runtime.sender = None;
         runtime.browser_ready = false;
         runtime.state = TransportState::Down;
+        self.outbound_bytes.store(0, Ordering::Release);
         Ok(())
     }
 
@@ -249,7 +258,15 @@ impl SoundTransport {
                 encode_packet(runtime.epoch, runtime.next_sequence, data),
             )
         };
+        let frame_bytes = frame.len();
+        if !reserve_bytes(&self.outbound_bytes, self.config.queue_bytes(), frame_bytes) {
+            let mut runtime = self.runtime.lock().expect("sound runtime");
+            runtime.counters.overflowed += 1;
+            runtime.last_error = Some("sound_queue_byte_budget_exceeded");
+            return Err(TransportError::SendFailed("sound queue byte budget is full".into()));
+        }
         sender.try_send(frame).map_err(|_| {
+            self.outbound_bytes.fetch_sub(frame_bytes, Ordering::AcqRel);
             let mut runtime = self.runtime.lock().expect("sound runtime");
             runtime.counters.overflowed += 1;
             runtime.last_error = Some("sound_queue_full");
@@ -282,6 +299,22 @@ impl SoundTransport {
         runtime.state = TransportState::Failed;
         runtime.last_error = Some(code);
         TransportError::StartFailed(code.into())
+    }
+}
+
+fn reserve_bytes(counter: &AtomicUsize, limit: usize, amount: usize) -> bool {
+    loop {
+        let current = counter.load(Ordering::Acquire);
+        let Some(next) = current.checked_add(amount) else { return false };
+        if next > limit {
+            return false;
+        }
+        if counter
+            .compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return true;
+        }
     }
 }
 
@@ -616,6 +649,27 @@ mod tests {
             runtime.browser_ready = true;
         }
         assert_eq!(sound.connection_state(&peer), ConnectionState::Connected);
+    }
+
+    #[tokio::test]
+    async fn sound_outbound_queue_enforces_its_byte_budget_before_item_capacity() {
+        let (packet_tx, _packet_rx) = packet_channel(2);
+        let mut bounded = config();
+        bounded.queue_items = 2;
+        bounded.queue_bytes = 1_400;
+        let sound = SoundTransport::new(TransportId::new(8), None, bounded, packet_tx).unwrap();
+        let (sender, _receiver) = mpsc::channel(2);
+        {
+            let mut runtime = sound.runtime.lock().unwrap();
+            runtime.state = TransportState::Up;
+            runtime.browser_ready = true;
+            runtime.sender = Some(sender);
+        }
+        let payload = vec![0x7f; 1_357];
+        assert_eq!(sound.send_async(&sound.configured_peer(), &payload).await.unwrap(), 1_357);
+        assert!(sound.send_async(&sound.configured_peer(), &payload).await.is_err());
+        assert_eq!(sound.transport_stats()["overflowed"], 1);
+        assert_eq!(sound.outbound_bytes.load(Ordering::Acquire), 1_389);
     }
 
     #[tokio::test]
