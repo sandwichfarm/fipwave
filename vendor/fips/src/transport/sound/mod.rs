@@ -11,12 +11,12 @@ use serde_json::json;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use tokio_tungstenite::tungstenite::{
-    client::IntoClientRequest,
-    http::{header::ORIGIN, HeaderValue},
     Message,
+    client::IntoClientRequest,
+    http::{HeaderValue, header::ORIGIN},
 };
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 use crate::config::SoundConfig;
 use crate::transport::{
@@ -203,7 +203,9 @@ impl SoundTransport {
                         },
                     }
                 };
-                if !disconnected { break 'supervisor; }
+                if !disconnected {
+                    break 'supervisor;
+                }
                 {
                     let mut current = runtime.lock().expect("sound runtime");
                     current.counters.disconnects += 1;
@@ -305,15 +307,25 @@ impl SoundTransport {
         let Some(next_bytes) = runtime.outbound_bytes.checked_add(frame_bytes) else {
             runtime.counters.overflowed += 1;
             runtime.last_error = Some("sound_queue_byte_budget_exceeded");
-            return Err(TransportError::SendFailed("sound queue byte budget is full".into()));
+            return Err(TransportError::SendFailed(
+                "sound queue byte budget is full".into(),
+            ));
         };
         if next_bytes > self.config.queue_bytes() {
             runtime.counters.overflowed += 1;
             runtime.last_error = Some("sound_queue_byte_budget_exceeded");
-            return Err(TransportError::SendFailed("sound queue byte budget is full".into()));
+            return Err(TransportError::SendFailed(
+                "sound queue byte budget is full".into(),
+            ));
         }
         runtime.outbound_bytes = next_bytes;
-        if sender.try_send(OutboundFrame { bytes: frame, enqueued_at: Instant::now() }).is_err() {
+        if sender
+            .try_send(OutboundFrame {
+                bytes: frame,
+                enqueued_at: Instant::now(),
+            })
+            .is_err()
+        {
             runtime.outbound_bytes = runtime
                 .outbound_bytes
                 .checked_sub(frame_bytes)
@@ -429,7 +441,11 @@ async fn inject_inbound(
     }
     if kind == FWAV_TYPE_BROWSER_ARM || kind == FWAV_TYPE_BROWSER_DISARM {
         let mut current = runtime.lock().expect("sound runtime");
-        if payload_len != 0 || sequence != 0 || current.state != TransportState::Up || current.epoch != epoch {
+        if payload_len != 0
+            || sequence != 0
+            || current.state != TransportState::Up
+            || current.epoch != epoch
+        {
             current.counters.rejected += 1;
             current.last_error = Some("sound_browser_control_invalid");
             return Err(());
@@ -448,16 +464,22 @@ async fn inject_inbound(
         reject(runtime, "sound_packet_not_armed");
         return Err(());
     }
-    if current.highest_received_sequence.is_some_and(|highest| sequence <= highest) {
+    if current
+        .highest_received_sequence
+        .is_some_and(|highest| sequence <= highest)
+    {
         current.counters.rejected += 1;
         current.last_error = Some("sound_packet_replay");
         return Err(());
     }
-    if packet_tx.try_send(ReceivedPacket::new(
+    if packet_tx
+        .try_send(ReceivedPacket::new(
             transport_id,
             peer.clone(),
             data.clone(),
-        )).is_err() {
+        ))
+        .is_err()
+    {
         current.counters.rejected += 1;
         current.last_error = Some("sound_packet_channel_full");
         return Err(());
@@ -604,28 +626,32 @@ mod tests {
 
         // A current-epoch packet may be delivered once only. Replays and
         // noncanonical header variants are rejected before PacketTx injection.
-        assert!(inject_inbound(
-            &sound.runtime,
-            &sound.packet_tx,
-            sound.transport_id,
-            &sound.configured_peer(),
-            sound.mtu(),
-            &packet,
-        )
-        .await
-        .is_err());
+        assert!(
+            inject_inbound(
+                &sound.runtime,
+                &sound.packet_tx,
+                sound.transport_id,
+                &sound.configured_peer(),
+                sound.mtu(),
+                &packet,
+            )
+            .await
+            .is_err()
+        );
         let mut noncanonical = encode_packet(1, 2, &[0x5a]);
         noncanonical[6] = 1;
-        assert!(inject_inbound(
-            &sound.runtime,
-            &sound.packet_tx,
-            sound.transport_id,
-            &sound.configured_peer(),
-            sound.mtu(),
-            &noncanonical,
-        )
-        .await
-        .is_err());
+        assert!(
+            inject_inbound(
+                &sound.runtime,
+                &sound.packet_tx,
+                sound.transport_id,
+                &sound.configured_peer(),
+                sound.mtu(),
+                &noncanonical,
+            )
+            .await
+            .is_err()
+        );
         assert!(rx.try_recv().is_err());
 
         let mut reset = vec![0; FWAV_HEADER_BYTES];
@@ -696,16 +722,18 @@ mod tests {
         assert!(!sound.browser_ready());
 
         arm[12..16].copy_from_slice(&2u32.to_le_bytes());
-        assert!(inject_inbound(
-            &sound.runtime,
-            &sound.packet_tx,
-            sound.transport_id,
-            &sound.configured_peer(),
-            sound.mtu(),
-            &arm,
-        )
-        .await
-        .is_err());
+        assert!(
+            inject_inbound(
+                &sound.runtime,
+                &sound.packet_tx,
+                sound.transport_id,
+                &sound.configured_peer(),
+                sound.mtu(),
+                &arm,
+            )
+            .await
+            .is_err()
+        );
         assert!(!sound.browser_ready());
     }
 
@@ -738,9 +766,13 @@ mod tests {
     #[test]
     fn configured_sound_peer_is_connected_only_after_the_worker_and_browser_are_ready() {
         let (tx, _rx) = packet_channel(2);
-        let sound = SoundTransport::new(TransportId::new(8), Some("desk".into()), config(), tx).unwrap();
+        let sound =
+            SoundTransport::new(TransportId::new(8), Some("desk".into()), config(), tx).unwrap();
         let peer = sound.configured_peer();
-        assert!(matches!(sound.connection_state(&peer), ConnectionState::Failed(_)));
+        assert!(matches!(
+            sound.connection_state(&peer),
+            ConnectionState::Failed(_)
+        ));
         {
             let mut runtime = sound.runtime.lock().unwrap();
             runtime.state = TransportState::Up;
@@ -764,8 +796,19 @@ mod tests {
             runtime.sender = Some(sender);
         }
         let payload = vec![0x7f; 1_357];
-        assert_eq!(sound.send_async(&sound.configured_peer(), &payload).await.unwrap(), 1_357);
-        assert!(sound.send_async(&sound.configured_peer(), &payload).await.is_err());
+        assert_eq!(
+            sound
+                .send_async(&sound.configured_peer(), &payload)
+                .await
+                .unwrap(),
+            1_357
+        );
+        assert!(
+            sound
+                .send_async(&sound.configured_peer(), &payload)
+                .await
+                .is_err()
+        );
         assert_eq!(sound.transport_stats()["overflowed"], 1);
         assert_eq!(sound.runtime.lock().unwrap().outbound_bytes, 1_389);
     }
@@ -783,7 +826,12 @@ mod tests {
             runtime.sender = Some(stale_sender);
         }
         let payload = vec![0x7f; 1_357];
-        assert!(sound.send_async(&sound.configured_peer(), &payload).await.is_err());
+        assert!(
+            sound
+                .send_async(&sound.configured_peer(), &payload)
+                .await
+                .is_err()
+        );
         assert_eq!(sound.runtime.lock().unwrap().outbound_bytes, 0);
 
         let (replacement, mut receiver) = mpsc::channel(1);
@@ -792,8 +840,17 @@ mod tests {
             runtime.sender = Some(replacement);
             runtime.last_error = None;
         }
-        assert_eq!(sound.send_async(&sound.configured_peer(), &payload).await.unwrap(), 1_357);
-        assert_eq!(receiver.recv().await.unwrap().bytes.len(), FWAV_HEADER_BYTES + 1_357);
+        assert_eq!(
+            sound
+                .send_async(&sound.configured_peer(), &payload)
+                .await
+                .unwrap(),
+            1_357
+        );
+        assert_eq!(
+            receiver.recv().await.unwrap().bytes.len(),
+            FWAV_HEADER_BYTES + 1_357
+        );
         assert_eq!(sound.runtime.lock().unwrap().outbound_bytes, 1_389);
     }
 
@@ -870,13 +927,23 @@ mod tests {
             let first = tokio_tungstenite::accept_async(first).await.unwrap();
             let (mut first_writer, mut first_reader) = first.split();
             let first_outbound = tokio::time::timeout(Duration::from_secs(2), first_reader.next())
-                .await.expect("first connection did not receive a packet")
+                .await
+                .expect("first connection did not receive a packet")
                 .expect("first connection closed before receiving a packet")
                 .expect("first connection returned an invalid frame")
                 .into_data();
-            assert_eq!(&first_outbound[FWAV_HEADER_BYTES..], expected_first.as_slice());
-            assert_eq!(u64::from_le_bytes(first_outbound[16..24].try_into().unwrap()), 1);
-            first_writer.send(Message::Binary(encode_packet(1, 9, &[0x41]).into())).await.unwrap();
+            assert_eq!(
+                &first_outbound[FWAV_HEADER_BYTES..],
+                expected_first.as_slice()
+            );
+            assert_eq!(
+                u64::from_le_bytes(first_outbound[16..24].try_into().unwrap()),
+                1
+            );
+            first_writer
+                .send(Message::Binary(encode_packet(1, 9, &[0x41]).into()))
+                .await
+                .unwrap();
             drop(first_writer);
             drop(first_reader);
 
@@ -885,14 +952,25 @@ mod tests {
             let (mut second_writer, mut second_reader) = second.split();
             // Same-epoch sequence 9 was accepted before the disconnect and
             // must remain a replay after the replacement socket is live.
-            second_writer.send(Message::Binary(encode_packet(1, 9, &[0x41]).into())).await.unwrap();
-            let second_outbound = tokio::time::timeout(Duration::from_secs(2), second_reader.next())
-                .await.expect("reconnected socket did not receive a packet")
-                .expect("reconnected socket closed before receiving a packet")
-                .expect("reconnected socket returned an invalid frame")
-                .into_data();
-            assert_eq!(&second_outbound[FWAV_HEADER_BYTES..], expected_second.as_slice());
-            assert_eq!(u64::from_le_bytes(second_outbound[16..24].try_into().unwrap()), 2);
+            second_writer
+                .send(Message::Binary(encode_packet(1, 9, &[0x41]).into()))
+                .await
+                .unwrap();
+            let second_outbound =
+                tokio::time::timeout(Duration::from_secs(2), second_reader.next())
+                    .await
+                    .expect("reconnected socket did not receive a packet")
+                    .expect("reconnected socket closed before receiving a packet")
+                    .expect("reconnected socket returned an invalid frame")
+                    .into_data();
+            assert_eq!(
+                &second_outbound[FWAV_HEADER_BYTES..],
+                expected_second.as_slice()
+            );
+            assert_eq!(
+                u64::from_le_bytes(second_outbound[16..24].try_into().unwrap()),
+                2
+            );
         });
         let config = SoundConfig {
             bridge_url: format!("ws://127.0.0.1:{}/bridge/fips", address.port()),
@@ -906,15 +984,25 @@ mod tests {
         let mut sound = SoundTransport::new(TransportId::new(10), None, config, packet_tx).unwrap();
         sound.start_async().await.unwrap();
         for _ in 0..100 {
-            if sound.state() == TransportState::Up { break; }
+            if sound.state() == TransportState::Up {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
         sound.arm_browser(1).unwrap();
-        assert_eq!(sound.send_async(&sound.configured_peer(), &first_payload).await.unwrap(), 1357);
+        assert_eq!(
+            sound
+                .send_async(&sound.configured_peer(), &first_payload)
+                .await
+                .unwrap(),
+            1357
+        );
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(2), packet_rx.recv())
-                .await.expect("first inbound packet timed out")
-                .expect("first inbound packet channel closed").data,
+                .await
+                .expect("first inbound packet timed out")
+                .expect("first inbound packet channel closed")
+                .data,
             vec![0x41]
         );
         for _ in 0..100 {
@@ -926,9 +1014,16 @@ mod tests {
         assert_eq!(sound.transport_stats()["disconnects"], 1);
         assert_eq!(sound.runtime.lock().unwrap().outbound_bytes, 0);
         sound.arm_browser(1).unwrap();
-        assert_eq!(sound.send_async(&sound.configured_peer(), &second_payload).await.unwrap(), 1357);
+        assert_eq!(
+            sound
+                .send_async(&sound.configured_peer(), &second_payload)
+                .await
+                .unwrap(),
+            1357
+        );
         tokio::time::timeout(Duration::from_secs(2), fixture)
-            .await.expect("reconnect fixture timed out")
+            .await
+            .expect("reconnect fixture timed out")
             .expect("reconnect fixture failed");
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert!(packet_rx.try_recv().is_err());
