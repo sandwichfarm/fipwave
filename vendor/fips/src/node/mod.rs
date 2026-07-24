@@ -163,6 +163,33 @@ pub enum NodeError {
     NoOperationalTransports,
 }
 
+#[cfg(test)]
+mod sound_transport_tests {
+    use super::*;
+    use crate::config::{SoundConfig, TransportInstances};
+    use crate::transport::packet_channel;
+
+    #[tokio::test]
+    async fn configured_sound_constructs_and_sets_preoperational_ipv6_mtu() {
+        let mut config = Config::new();
+        config.transports.sound = TransportInstances::Single(SoundConfig {
+            bridge_url: "ws://127.0.0.1:4310/bridge/fips".into(),
+            peer_addr: "sound-a".into(),
+            mtu: 1357,
+            queue_items: 8,
+            queue_bytes: 10856,
+        });
+        let mut node = Node::new(config).expect("sound config is valid");
+        assert_eq!(node.transport_mtu(), 1357);
+        assert_eq!(node.effective_ipv6_mtu(), 1280);
+
+        let (packet_tx, _packet_rx) = packet_channel(8);
+        let transports = node.create_transports(&packet_tx).await;
+        assert_eq!(transports.len(), 1);
+        assert!(matches!(transports.first(), Some(TransportHandle::Sound(_))));
+    }
+}
+
 /// Node operational state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeState {
@@ -1178,7 +1205,7 @@ impl Node {
     /// Returning the smallest (rather than the first-iterated, which used
     /// to vary across HashMap iteration order + async-startup race) makes
     /// the clamp deterministic across daemon restarts.
-    pub fn transport_mtu(&self) -> u16 {
+pub fn transport_mtu(&self) -> u16 {
         let min_operational = self
             .transports
             .values()
