@@ -404,11 +404,12 @@ retryOnlyMissing(ack.receivedBitmap);
 ## Open Questions (RESOLVED)
 
 1. **Trustworthy FIPS handshake/heartbeat traffic class — decided handling**
-   - Plan 03-01 resolves the metadata seam with a source-authored typed
-     `TrafficClass` tracer from the narrow FIPS handshake, rekey, heartbeat,
-     and ordinary-data callers through `TransportHandle`, Sound/FWAV, the
-     local bridge, and the browser scheduler boundary. The complete FIPS
-     payload remains opaque and is never inspected to infer priority.
+   - Plan 03-01 resolves the source-authored typed `TrafficClass` seam from the
+     narrow FIPS handshake, rekey, heartbeat, and ordinary-data callers through
+     `TransportHandle` into Sound/FWAV. Plan 03-02 completes propagation through
+     FWAV, the local bridge, the browser adapter, and the acoustic scheduler
+     boundary. The complete FIPS payload remains opaque and is never inspected
+     to infer priority.
    - This is a planned source-level contract with focused Rust/TypeScript
      tests; it is not pre-execution evidence that LINK-08 already passes.
 
