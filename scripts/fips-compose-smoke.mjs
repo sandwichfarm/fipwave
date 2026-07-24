@@ -25,7 +25,8 @@ export function assertFipsRuntimeInspect(inspected) {
   const fips = inspected.find((item) => item.Name?.includes('fips'));
   if (!bridge || !fips) throw new Error('inspect must name bridge and fips');
   if (fips.State?.Running !== true) throw new Error('fips daemon container must be running');
-  if (!String(fips.Path ?? '').includes('fips')) throw new Error('fips service must execute the FIPS daemon');
+  const fipsCommand = [fips.Path, ...(Array.isArray(fips.Args) ? fips.Args : [])].filter(Boolean).join(' ');
+  if (!fipsCommand.includes('/usr/local/bin/fips --config /runtime/fips.yaml')) throw new Error('fips service must execute the generated FIPS daemon config');
   // Docker Desktop may expose a published port in HostConfig while omitting it
   // from NetworkSettings when another service shares this namespace.
   const bindings = bridge.NetworkSettings?.Ports?.['4310/tcp'] ?? bridge.HostConfig?.PortBindings?.['4310/tcp'];
