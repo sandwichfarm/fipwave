@@ -86,11 +86,13 @@ export async function requestIsolationAttestation(options: IsolationAttestationR
   const timeoutMs = options.timeoutMs ?? 45_000;
   const maxAttempts = options.maxAttempts ?? 2;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 45_000 || !Number.isSafeInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 2) fail('request_invalid');
-  const request = Object.freeze({ schemaVersion: 1 as const, challenge: randomBytes(CHALLENGE_BYTES).toString('base64url') });
-  const body = Buffer.from(JSON.stringify(request), 'utf8');
-  if (body.byteLength > MAX_BYTES) fail('request_invalid');
   let lastError = 'attestation_timeout';
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    // A retry is another one-use challenge, never a retransmission a responder
+    // could treat as a replay.
+    const request = Object.freeze({ schemaVersion: 1 as const, challenge: randomBytes(CHALLENGE_BYTES).toString('base64url') });
+    const body = Buffer.from(JSON.stringify(request), 'utf8');
+    if (body.byteLength > MAX_BYTES) fail('request_invalid');
     try {
       const response = await new Promise<IsolationAttestation>((resolve, reject) => {
         const client = createSocket('udp6'); let settled = false;
