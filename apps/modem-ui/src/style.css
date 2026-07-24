@@ -17,6 +17,12 @@ h2, h3 { margin-top: 0; font-size: 18px; }
 .console-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 16px; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-top: 16px; overflow-wrap: anywhere; }
 .bridge-card { border-color: var(--accent); min-width: 0; }
+.proof-card { min-width: 0; }
+.proof-card.proof-ready { border-color: var(--accent); }
+.proof-card.proof-failed, .proof-card.proof-error { border-color: #fb7185; }
+.proof-card.proof-blocked, .proof-card.proof-human-needed, .proof-card.proof-running { border-color: #facc15; }
+.proof-card dd, .proof-message { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+.proof-message { margin-bottom: 0; }
 .bridge-card h3 { margin: 16px 0 4px; }
 .bridge-card dd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .qualification-gate { border-color: var(--border); }

@@ -11,6 +11,7 @@ import { reduceBridgeState, validateBridgeSnapshot, type BridgeState } from './b
 import { CyrinxCaseWatchdog, sameCyrinxBrowserCase, type CyrinxBrowserCase } from './cyrinx-case-watchdog.js';
 import { CyrinxQualificationSession, type CyrinxSessionSnapshot } from './qualification-session.js';
 import { safeConfigReason, safeUiReason } from './ui-errors.js';
+import { reduceProofState, type ProofState } from './proof-state.js';
 import {
   QUIET_PROFILE,
   QuietClient,
@@ -66,6 +67,8 @@ let quietFailureReportedEpoch: number | undefined;
 let runnerConfig: Readonly<RunnerConfig> | undefined;
 let configFailure = '';
 let resetFailure = '';
+let proofState: ProofState = reduceProofState(undefined, { type: 'snapshot', value: { state: 'loading', pingReady: false, reason: 'proof_unavailable', result: null } });
+let proofRequest: Promise<void> | undefined;
 let acousticCapability: Readonly<{ epoch: number; bytes: Uint8Array }> | undefined;
 type MeasuredProbe = Readonly<{ received: true; bytePerfect: true; corrupt: false; missing: false; duplicate: false; discontinuity: boolean; latencyMs: undefined; signalDb: undefined; clipping: undefined; confidence: 1 }>;
 const receivedProbes = new Map<string, MeasuredProbe>();
@@ -748,6 +751,32 @@ function appendSetting(table: HTMLTableElement, label: string, value: unknown): 
   row.append(key, element('td', settingValue(value)));
 }
 
+function proofValue(value: string | number | null | undefined): string { return value === null || value === undefined ? 'Unavailable' : String(value); }
+async function refreshProofStatus(): Promise<void> {
+  if (proofRequest) return proofRequest;
+  proofState = reduceProofState(proofState, { type: 'refresh' }); render();
+  proofRequest = fetch('/proof-status', { cache: 'no-store', credentials: 'same-origin' })
+    .then(async (response) => {
+      if (!response.ok && response.status !== 503) throw new Error('proof_unavailable');
+      proofState = reduceProofState(proofState, { type: 'snapshot', source: 'refresh', value: await response.json() });
+    })
+    .catch(() => { proofState = reduceProofState(proofState, { type: 'error' }); })
+    .finally(() => { proofRequest = undefined; render(); });
+  return proofRequest;
+}
+async function runSoundProofPing(): Promise<void> {
+  if (proofRequest || runnerConfig?.role !== 'A' || proofState.mode !== 'ready' || proofState.needsRefresh) return;
+  proofState = reduceProofState(proofState, { type: 'running' }); render();
+  proofRequest = fetch('/proof-ping', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', credentials: 'same-origin' })
+    .then(async (response) => {
+      if (!response.ok) throw new Error('proof_unavailable');
+      proofState = reduceProofState(proofState, { type: 'snapshot', source: 'ping', value: await response.json() });
+    })
+    .catch(() => { proofState = reduceProofState(proofState, { type: 'error' }); })
+    .finally(() => { proofRequest = undefined; render(); });
+  return proofRequest;
+}
+
 type DemoStage = Readonly<{ label: string; explanation: string; tone: 'idle' | 'working' | 'ready' | 'warning' | 'error' }>;
 function demoStage(): DemoStage {
   if (resetFailure || uiState === 'failed') return { label: 'Error', explanation: 'Check the microphone or browser permission, then reset this node.', tone: 'error' };
@@ -796,7 +825,8 @@ function renderDemo(): void {
   const peerRoleLabel = role ? `Node ${peerRole(role)}` : 'Peer node';
   const stage = demoStage();
   const acoustic = acousticSession ? projectAcousticStatus(acousticSession.snapshot, runnerConfig?.evidenceClass ?? 'Fixture', acousticTx, acousticRx) : undefined;
-  const fipsReady = Boolean(acoustic?.ready && browserPacketReady && bridgeState?.soundTransport === 'started');
+  const localFipsAdapterReady = Boolean(acoustic?.ready && browserPacketReady && bridgeState?.soundTransport === 'started');
+  const proofReady = proofState.mode === 'ready' && !proofState.needsRefresh;
   const profile = acousticSession?.snapshot.settings?.aToB.profileId ?? runnerConfig?.acoustic?.profiles[0] ?? 'Bootstrap profile pending';
   const identity = runnerConfig?.machineId ?? 'Loading local identity…';
 
@@ -827,7 +857,7 @@ function renderDemo(): void {
   const peer = element('section'); peer.className = 'demo-card'; peer.append(element('h2', 'Peer link'));
   peer.append(demoStatus(`${peerRoleLabel} · ${role ? (role === 'A' ? 'acoustically isolated peer' : 'Wi-Fi gateway peer') : 'waiting for role'}`));
   peer.append(demoStatus(`Acoustic: ${acoustic?.ready ? 'Connected — committed and heartbeating' : acoustic ? `${acoustic.phase} — not yet ready` : 'Not started'}`, Boolean(acoustic && !acoustic.ready && stage.tone === 'working')));
-  peer.append(demoStatus(`FIPS: ${fipsReady ? 'Ready — sound transport admitted' : 'Waiting for acoustic readiness'}`));
+  peer.append(demoStatus(`FIPS: ${proofReady ? 'Authenticated Sound peer verified' : localFipsAdapterReady ? 'Local sound adapter admitted — peer proof pending' : 'Waiting for acoustic readiness'}`));
   grid.append(peer);
 
   const activity = element('section'); activity.className = 'demo-card demo-activity'; activity.append(element('h2', 'Live link'));
@@ -835,6 +865,7 @@ function renderDemo(): void {
   activity.append(demoStatus(`Heartbeat: ${acoustic?.currentHeartbeat ? 'Current' : 'Waiting'}`, Boolean(acoustic?.currentHeartbeat)));
   activity.append(demoStatus(`Packets TX / RX: ${acoustic?.txPackets ?? 0} / ${acoustic?.rxPackets ?? 0}`));
   activity.append(demoStatus(`Retries / loss: ${acoustic?.retries ?? 0} / ${acoustic?.dropped ?? 0}`));
+  activity.append(demoStatus(`FIPS proof: ${proofState.mode === 'ready' ? 'Ready' : proofState.message}`));
   grid.append(activity);
 
   const next = element('section'); next.className = 'demo-card demo-next'; next.append(element('h2', 'Next action'));
@@ -844,6 +875,13 @@ function renderDemo(): void {
   const unavailable = Boolean(configFailure) && !developmentDiagnostic;
   if (uiState === 'idle' && !unavailable) next.append(control('Start / Connect', startDemo, !runnerConfig && !developmentDiagnostic));
   if (acoustic && !acoustic.ready && uiState === 'ready' && !resetInFlight) next.append(control('Recalibrate', reset, false, 'secondary'));
+  const proofRefresh = control('Refresh proof status', refreshProofStatus, Boolean(proofRequest), 'secondary');
+  next.append(proofRefresh);
+  if (role === 'A') {
+    const ping = control('Run sound-only ping', runSoundProofPing, proofState.mode !== 'ready' || proofState.needsRefresh || Boolean(proofRequest));
+    if (proofState.mode === 'running') ping.setAttribute('aria-busy', 'true');
+    next.append(ping);
+  } else if (role === 'B') next.append(element('p', 'Role B is the acoustically isolated node. The proof ping is issued from Role A.'));
   if (uiState !== 'requesting') next.append(control('Reset', reset, resetInFlight, 'secondary'));
   grid.append(next); shell.append(grid);
 
@@ -857,7 +895,7 @@ function render(): void {
   if (!debugMode) { renderDemo(); return; }
   appRoot.replaceChildren();
   const header = element('header');
-  header.append(element('h1', 'Modem qualification'));
+  header.append(element('h1', 'Sound-only FIPS proof'));
   const demoView = control('Demo view', () => { debugMode = false; render(); }, false, 'secondary');
   demoView.setAttribute('aria-label', 'Return to demo view');
   header.append(demoView);
@@ -920,6 +958,14 @@ function render(): void {
   }
   if (!resetInFlight && (uiState === 'failed' || uiState === 'disconnected')) operator.append(control(resetLabel, reset, false, 'secondary'));
   if (runnerConfig && uiState === 'idle') operator.append(control(resetLabel, reset, false, 'secondary'));
+  const proofRefresh = control('Refresh proof status', refreshProofStatus, Boolean(proofRequest), 'secondary');
+  operator.append(proofRefresh);
+  if (runnerConfig?.role === 'A') {
+    const runPing = control('Run sound-only ping', runSoundProofPing, proofState.mode !== 'ready' || proofState.needsRefresh || Boolean(proofRequest));
+    if (proofState.mode === 'running') runPing.setAttribute('aria-busy', 'true');
+    operator.append(runPing);
+    operator.append(element('p', proofState.mode === 'ready' ? 'Runs one kernel ICMPv6 ping to the isolated Role B address.' : `Ping is blocked — ${proofState.message}`));
+  } else if (runnerConfig?.role === 'B') operator.append(element('p', 'Role B is the acoustically isolated node. The proof ping is issued from Role A.'));
   operator.append(element('p', 'Starts a new local epoch and clears unsent local bridge data.'));
   grid.append(operator);
 
@@ -962,6 +1008,29 @@ function render(): void {
   if (uiState === 'requesting' || bridgeStatus?.status === 'resetting') bridgeAnnouncement.setAttribute('aria-busy', 'true');
   bridgeCard.append(bridgeAnnouncement);
   grid.append(bridgeCard);
+
+  const proofCard = element('section'); proofCard.className = `card proof-card proof-${proofState.mode}`;
+  proofCard.append(element('h2', 'FIPS proof status'));
+  const proofList = element('dl'); const proof = proofState.snapshot;
+  const proofRows: [string, string][] = [
+    ['Proof status', proofState.mode === 'ready' ? 'Ready' : proofState.mode === 'loading' ? 'Waiting for current proof facts…' : proofState.mode],
+    ['Evidence class', proof?.evidenceClass ?? 'Waiting for a current snapshot'],
+    ['Authenticated peer', proof?.peer.verified ? `Verified — ${proof.peer.identity}` : 'Waiting for authenticated Sound peer'],
+    ['Active Sound link', proof?.link.verified ? `Verified — link ${proof.link.id}` : 'Waiting for active Sound link'],
+    ['Role B isolation', proof?.isolationVerified ? 'Verified — Sound is the only usable Role B FIPS transport' : 'Waiting for paired Role B isolation proof'],
+    ['Acoustic session', proof?.transport.verified && proof.transport.epoch !== null ? `Ready — epoch ${proof.transport.epoch}` : 'Disarmed — current acoustic session is not ready'],
+    ['Bridge packet counters', `Complete packets TX/RX: ${proofValue(proof?.counters.completeTx)}/${proofValue(proof?.counters.completeRx)}`],
+    ['Acoustic counters', `Acoustic TX/RX: ${proofValue(proof?.counters.acousticTx)}/${proofValue(proof?.counters.acousticRx)} · fragments: ${proofValue(proof?.counters.fragmentsTx)}/${proofValue(proof?.counters.fragmentsRx)} · integrity failures: ${proofValue(proof?.counters.integrityFailures)} · retries: ${proofValue(proof?.counters.retries)}`],
+    ['Ping readiness', proofState.mode === 'ready' && !proofState.needsRefresh ? 'Ready — all current proof gates agree' : proofState.message],
+  ];
+  proofRows.forEach(([label, value]) => proofList.append(element('dt', label), element('dd', value))); proofCard.append(proofList);
+  const proofMessage = element('p', proofState.message); proofMessage.className = 'proof-message'; proofMessage.setAttribute('role', proofState.mode === 'failed' || proofState.mode === 'error' ? 'alert' : 'status'); proofMessage.setAttribute('aria-live', proofState.mode === 'failed' || proofState.mode === 'error' ? 'assertive' : 'polite'); proofCard.append(proofMessage);
+  if (proofState.outcome) {
+    proofCard.append(element('h3', 'Ping outcome'));
+    const outcome = element('dl'); const result = proofState.outcome;
+    [['Command authority', 'Role A FIPS namespace · system ping -6'], ['Result', result.exitCode === 0 ? 'Reply received' : result.exitCode === 1 ? 'No reply received' : 'Ping command error'], ['ICMPv6 evidence', result.sequence !== null && result.latencyMs !== null && result.lossPercent !== null ? `Sequence ${result.sequence} · ${result.latencyMs} ms · ${result.lossPercent}% packet loss` : 'Bounded ping output did not include a complete summary.'], ['Evidence disposition', proofState.message]].forEach(([label, value]) => outcome.append(element('dt', label), element('dd', value))); proofCard.append(outcome);
+  } else { proofCard.append(element('h3', 'No ping has run in this epoch'), element('p', 'Refresh proof status, then run the sound-only ping from Role A when every current proof gate is ready.')); }
+  grid.append(proofCard);
 
   const acousticCard = element('section');
   acousticCard.className = 'card';
@@ -1212,8 +1281,9 @@ async function reset(): Promise<void> {
 
 render();
 void runAcousticFixtureIfRequested();
-void fetchRunnerConfig().then((config) => { runnerConfig = config; syncBridgeState(); render(); }, (error: unknown) => { configFailure = safeConfigReason(error); render(); });
+void fetchRunnerConfig().then((config) => { runnerConfig = config; syncBridgeState(); render(); if (!developmentDiagnostic) void refreshProofStatus(); }, (error: unknown) => { configFailure = safeConfigReason(error); render(); });
 // Session state and heartbeats are owned by the acoustic controller. Keep the
 // audience projection fresh even between controller callbacks without exposing
 // any additional transport authority to the UI.
 window.setInterval(() => { if (!debugMode) render(); }, 750);
+window.setInterval(() => { if (!developmentDiagnostic && !proofRequest) void refreshProofStatus(); }, 5_000);
