@@ -15,6 +15,12 @@ Both laptops must be on the same Git commit. Docker Desktop must be running.
 On Linux, `/dev/net/tun` must exist. Chrome may show one unavoidable operating
 system microphone prompt on its first run; choose **Allow**.
 
+After permission is already granted, budget roughly 30–120 seconds for
+discovery, the two directional calibration sweeps, settings commitment, and
+FIPS authentication. Room acoustics can extend that time; the stage timer,
+stage log, and protocol activity card must continue changing while retries are
+in progress.
+
 The canonical real-audio preflight/E2E is:
 
 ```sh
@@ -72,6 +78,20 @@ successful result must show a real kernel IPv6 reply and matching transport
 counter movement; browser/WebSocket connectivity alone is never reported as a
 FIPS ping.
 
+## Presenter script
+
+1. “Node A still has the ordinary FIPS mesh. Node B has no network transport;
+   its only route out is the room.”
+2. Start B, then A. As the screens advance, say: “They discover one another,
+   authenticate the expected peer, and test the room in both directions.”
+3. During calibration: “The laptops are negotiating packet size, gain, and
+   guard timing from byte-perfect measurements—not merely choosing the loudest
+   sound.”
+4. At **Connected**, point to the large FIPS TX/RX counters: “These are complete
+   FIPS packets accepted across the acoustic adapter.”
+5. Run the sound-only ping from A: “The absurd part is real: from FIPS’s point
+   of view, sound is simply another transport hop.”
+
 ## Stop and collect evidence
 
 Press `Ctrl-C` in each launcher terminal. The launcher closes only its owned
@@ -110,3 +130,27 @@ If a launcher is killed before cleanup, remove only its known project:
 docker compose -p fipwave_demo_a -f compose.fips.yml down --volumes --remove-orphans
 docker compose -p fipwave_demo_b -f compose.fips.yml down --volumes --remove-orphans
 ```
+
+On a dedicated demo laptop, if Playwright-owned Chrome survives an interrupted
+launcher, close every Chrome process before restarting:
+
+```sh
+pkill -x 'Google Chrome'
+```
+
+This intentionally closes unrelated Chrome windows too; use it only on the
+dedicated presentation machine.
+
+## Current verification status
+
+- A real single-laptop, non-virtual **Loopback** run delivered 5/5 byte-perfect
+  messages in each direction with output 65%, input 90%, browser playback gain
+  200%, 48 kHz mono capture, and processing disabled. Evidence:
+  `.artifacts/diagnostics/self-loop/20260724T110008734Z-89852/`.
+- The current transmitter-serialization and playback-aware handshake-retry
+  changes are covered by a silent asynchronous two-role test through Ready and
+  byte-perfect packets in both directions. Venue constraints prevented another
+  acoustic replay after that fix.
+- No two-laptop **Open air** qualification or successful end-to-end FIPS ping
+  has been recorded. Do not present Loopback, Fixture, or browser state as that
+  missing physical proof.
