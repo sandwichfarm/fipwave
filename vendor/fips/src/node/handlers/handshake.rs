@@ -16,7 +16,7 @@ use crate::proto::fmp::{
     EstablishSnapshot, EstablishView, InboundDecision, InboundReject, OutboundSnapshot,
     PromotionResult, WireOutcome, cross_connection_winner,
 };
-use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket};
+use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket, TrafficClass};
 use crate::utils::index::SessionIndex;
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -222,7 +222,10 @@ impl Node {
                     let msg2_bytes = self.find_stored_msg2(existing_link_id);
                     if let Some(msg2) = msg2_bytes {
                         if let Some(transport) = self.transports.get(&packet.transport_id) {
-                            match transport.send(&packet.remote_addr, &msg2).await {
+                            match transport
+                                .send_classified(&packet.remote_addr, &msg2, TrafficClass::Control)
+                                .await
+                            {
                                 Ok(_) => debug!(
                                     remote_addr = %packet.remote_addr,
                                     "Resent msg2 for duplicate msg1"

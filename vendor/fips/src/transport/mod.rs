@@ -104,6 +104,40 @@ pub fn packet_channel(buffer: usize) -> (PacketTx, PacketRx) {
     tokio::sync::mpsc::channel(buffer)
 }
 
+/// Scheduling metadata supplied by the FIPS semantic caller.
+///
+/// This is deliberately not derived from, or encoded into, the opaque FIPS
+/// packet. Transports that do not understand traffic classes retain their
+/// existing byte-only send behavior.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TrafficClass {
+    /// Handshake, rekey, and other narrow link-control work.
+    Control = 1,
+    /// Liveness work that must not be starved by ordinary payloads.
+    Heartbeat = 2,
+    /// Compatibility default for every existing byte-only caller.
+    #[default]
+    Ordinary = 3,
+}
+
+impl TrafficClass {
+    /// Stable local FWAV metadata discriminant.
+    pub const fn to_wire(self) -> u8 {
+        self as u8
+    }
+
+    /// Accept only the known source-authored traffic classes.
+    pub const fn from_wire(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::Control),
+            2 => Some(Self::Heartbeat),
+            3 => Some(Self::Ordinary),
+            _ => None,
+        }
+    }
+}
+
 // ============================================================================
 // Errors
 // ============================================================================
@@ -726,8 +760,22 @@ impl TransportHandle {
         }
     }
 
-    /// Send data to a remote address asynchronously.
+    /// Send data to a remote address asynchronously with the safe ordinary
+    /// compatibility class.
     pub async fn send(&self, addr: &TransportAddr, data: &[u8]) -> Result<usize, TransportError> {
+        self.send_classified(addr, data, TrafficClass::Ordinary)
+            .await
+    }
+
+    /// Send opaque data with scheduling metadata supplied by its semantic
+    /// source. Non-Sound transports intentionally keep their existing send
+    /// implementation and therefore ignore this local metadata.
+    pub async fn send_classified(
+        &self,
+        addr: &TransportAddr,
+        data: &[u8],
+        class: TrafficClass,
+    ) -> Result<usize, TransportError> {
         match self {
             TransportHandle::Udp(t) => t.send_async(addr, data).await,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -735,7 +783,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.send_async(addr, data).await,
             TransportHandle::Tor(t) => t.send_async(addr, data).await,
             TransportHandle::Nym(t) => t.send_async(addr, data).await,
-            TransportHandle::Sound(t) => t.send_async(addr, data).await,
+            TransportHandle::Sound(t) => t.send_classified_async(addr, data, class).await,
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.send_async(addr, data).await,
             #[cfg(test)]
@@ -1125,6 +1173,32 @@ pub(crate) async fn resolve_socket_addr(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn classified_send_keeps_non_sound_transports_byte_compatible() {
+        let registry = loopback::new_registry();
+        let destination = TransportAddr::from("loopback:destination");
+        let (destination_tx, mut destination_rx) = tokio::sync::mpsc::unbounded_channel();
+        registry
+            .lock()
+            .unwrap()
+            .insert(destination.clone(), destination_tx);
+        let handle = TransportHandle::Loopback(LoopbackTransport::new(
+            TransportId::new(91),
+            TransportAddr::from("loopback:source"),
+            registry,
+        ));
+        let payload = [0x00, 0xf1, 0x50, 0x53, 0xff];
+
+        assert_eq!(
+            handle
+                .send_classified(&destination, &payload, TrafficClass::Control)
+                .await
+                .unwrap(),
+            payload.len()
+        );
+        assert_eq!(destination_rx.recv().await.unwrap().data, payload);
+    }
 
     #[test]
     fn test_transport_id() {

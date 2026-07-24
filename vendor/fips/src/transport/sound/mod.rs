@@ -20,8 +20,8 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 use crate::config::SoundConfig;
 use crate::transport::{
-    ConnectionState, DiscoveredPeer, PacketTx, ReceivedPacket, Transport, TransportAddr,
-    TransportError, TransportId, TransportState, TransportType,
+    ConnectionState, DiscoveredPeer, PacketTx, ReceivedPacket, TrafficClass, Transport,
+    TransportAddr, TransportError, TransportId, TransportState, TransportType,
 };
 
 const FWAV_HEADER_BYTES: usize = 32;
@@ -273,6 +273,19 @@ impl SoundTransport {
         addr: &TransportAddr,
         data: &[u8],
     ) -> Result<usize, TransportError> {
+        self.send_classified_async(addr, data, TrafficClass::Ordinary)
+            .await
+    }
+
+    /// Queue a complete opaque FIPS packet with caller-supplied scheduling
+    /// metadata. The class is carried only in the local FWAV header; FIPS
+    /// packet bytes are never parsed or rewritten here.
+    pub async fn send_classified_async(
+        &self,
+        addr: &TransportAddr,
+        data: &[u8],
+        class: TrafficClass,
+    ) -> Result<usize, TransportError> {
         if addr != &self.configured_peer() {
             return Err(TransportError::InvalidAddress(
                 "sound peer is not configured".into(),
@@ -306,7 +319,7 @@ impl SoundTransport {
             ));
         };
         let sequence = runtime.next_sequence.wrapping_add(1);
-        let frame = encode_packet(runtime.epoch, sequence, data);
+        let frame = encode_packet(runtime.epoch, sequence, class, data);
         let frame_bytes = frame.len();
         let Some(next_bytes) = runtime.outbound_bytes.checked_add(frame_bytes) else {
             runtime.counters.overflowed += 1;
@@ -424,7 +437,7 @@ async fn inject_inbound(
     // Sound accepts only the canonical packet envelope emitted by this module.
     // In particular, PCM metadata and extension flags are not meaningful at the
     // FIPS boundary and must never become an alternate parser surface.
-    if encoded[6..8] != [0, 0]
+    if encoded[7] != 0
         || encoded[24..28] != [0, 0, 0, 0]
         || encoded[28..30] != [0, 0]
         || encoded[30..32] != [0, 0]
@@ -434,7 +447,7 @@ async fn inject_inbound(
     }
     if kind == FWAV_TYPE_RESET {
         let mut current = runtime.lock().expect("sound runtime");
-        if payload_len != 0 || sequence != 0 || epoch <= current.epoch {
+        if encoded[6] != 0 || payload_len != 0 || sequence != 0 || epoch <= current.epoch {
             current.counters.rejected += 1;
             current.last_error = Some("sound_reset_invalid");
             return Err(());
@@ -449,7 +462,8 @@ async fn inject_inbound(
     }
     if kind == FWAV_TYPE_BROWSER_ARM || kind == FWAV_TYPE_BROWSER_DISARM {
         let mut current = runtime.lock().expect("sound runtime");
-        if payload_len != 0
+        if encoded[6] != 0
+            || payload_len != 0
             || sequence != 0
             || current.state != TransportState::Up
             || current.epoch != epoch
@@ -461,7 +475,10 @@ async fn inject_inbound(
         current.browser_ready = kind == FWAV_TYPE_BROWSER_ARM;
         return Ok(());
     }
-    if kind != FWAV_TYPE_FIPS_PACKET || payload_len > mtu as usize {
+    if kind != FWAV_TYPE_FIPS_PACKET
+        || TrafficClass::from_wire(encoded[6]).is_none()
+        || payload_len > mtu as usize
+    {
         reject(runtime, "sound_packet_invalid");
         return Err(());
     }
@@ -498,11 +515,12 @@ async fn inject_inbound(
     Ok(())
 }
 
-fn encode_packet(epoch: u32, sequence: u64, payload: &[u8]) -> Vec<u8> {
+fn encode_packet(epoch: u32, sequence: u64, class: TrafficClass, payload: &[u8]) -> Vec<u8> {
     let mut frame = vec![0; FWAV_HEADER_BYTES + payload.len()];
     frame[0..4].copy_from_slice(b"FWAV");
     frame[4] = 1;
     frame[5] = FWAV_TYPE_FIPS_PACKET;
+    frame[6] = class.to_wire();
     frame[8..12].copy_from_slice(&(payload.len() as u32).to_le_bytes());
     frame[12..16].copy_from_slice(&epoch.to_le_bytes());
     frame[16..24].copy_from_slice(&sequence.to_le_bytes());
@@ -651,7 +669,7 @@ mod tests {
             runtime.browser_ready = true;
         }
         let payload = vec![0x5a; 1357];
-        let packet = encode_packet(1, 1, &payload);
+        let packet = encode_packet(1, 1, TrafficClass::Ordinary, &payload);
         inject_inbound(
             &sound.runtime,
             &sound.packet_tx,
@@ -678,8 +696,8 @@ mod tests {
             .await
             .is_err()
         );
-        let mut noncanonical = encode_packet(1, 2, &[0x5a]);
-        noncanonical[6] = 1;
+        let mut noncanonical = encode_packet(1, 2, TrafficClass::Ordinary, &[0x5a]);
+        noncanonical[7] = 1;
         assert!(
             inject_inbound(
                 &sound.runtime,
@@ -976,7 +994,7 @@ mod tests {
             assert_eq!(&outbound[FWAV_HEADER_BYTES..], expected.as_slice());
             writer
                 .send(Message::Binary(
-                    encode_packet(1, 1, &fixture_returned).into(),
+                    encode_packet(1, 1, TrafficClass::Ordinary, &fixture_returned).into(),
                 ))
                 .await
                 .unwrap();
@@ -1039,7 +1057,9 @@ mod tests {
                 1
             );
             first_writer
-                .send(Message::Binary(encode_packet(1, 9, &[0x41]).into()))
+                .send(Message::Binary(
+                    encode_packet(1, 9, TrafficClass::Ordinary, &[0x41]).into(),
+                ))
                 .await
                 .unwrap();
             drop(first_writer);
@@ -1051,7 +1071,9 @@ mod tests {
             // Same-epoch sequence 9 was accepted before the disconnect and
             // must remain a replay after the replacement socket is live.
             second_writer
-                .send(Message::Binary(encode_packet(1, 9, &[0x41]).into()))
+                .send(Message::Binary(
+                    encode_packet(1, 9, TrafficClass::Ordinary, &[0x41]).into(),
+                ))
                 .await
                 .unwrap();
             let second_outbound =
