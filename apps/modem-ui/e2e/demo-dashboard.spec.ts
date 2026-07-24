@@ -38,3 +38,11 @@ test('role B names the isolated node, its gateway peer, and truthful waiting sta
   await expect(page.getByText('Acoustic: Not started')).toBeVisible();
   await expect(page.getByText('FIPS: Waiting for acoustic readiness')).toBeVisible();
 });
+
+test('Debug mode retains the detailed qualification workflow', async ({ page }) => {
+  await page.goto('http://127.0.0.1:5173/?debug=1');
+
+  await expect(page.getByRole('heading', { name: 'Cyrinx qualification gate' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Corpus evidence' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Demo view' })).toBeVisible();
+});
