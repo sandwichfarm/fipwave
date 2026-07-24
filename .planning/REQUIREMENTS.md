@@ -95,7 +95,7 @@ Requirements for the Sovereign Engineering demo-day proof of concept.
 - [x] **WEB-05**: The bridge validates message type and size, bounds all queues,
       and exposes ready, disconnected, overflow, and last-error states.
 
-- [ ] **WEB-06**: Operator can reset and reconnect the browser, modem state,
+- [x] **WEB-06**: Operator can reset and reconnect the browser, modem state,
       bridge queues, and acoustic epoch through one recovery action.
 
 - [x] **WEB-07**: The same browser implementation operates in Chromium on the
@@ -302,7 +302,7 @@ Roadmap phase mapping is populated during roadmap creation.
 | WEB-03 | Phase 1 | Complete |
 | WEB-04 | Phase 2 | Complete |
 | WEB-05 | Phase 2 | Complete |
-| WEB-06 | Phase 2 | Pending |
+| WEB-06 | Phase 2 | Complete |
 | WEB-07 | Phase 1 | Complete |
 | DEPLOY-01 | Phase 5 | Pending |
 | DEPLOY-02 | Phase 1 | Complete |

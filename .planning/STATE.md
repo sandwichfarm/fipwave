@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: Qualify the Demo Substrate
 status: executing
-stopped_at: Completed 02-03-PLAN.md
-last_updated: "2026-07-24T01:33:33.985Z"
+stopped_at: Completed 02-04-PLAN.md
+last_updated: "2026-07-24T01:43:36.778Z"
 last_activity: 2026-07-23
 last_activity_desc: Plan 01-10 physical checkpoint reached
 progress:
   total_phases: 2
   completed_phases: 0
   total_plans: 17
-  completed_plans: 12
+  completed_plans: 13
 ---
 
 # Project State
@@ -32,7 +32,7 @@ Plan: 10 of 10
 Status: Awaiting blocking-human physical qualification
 Last activity: 2026-07-23 — Plan 01-10 physical checkpoint reached
 
-Progress: [███████░░░] 71%
+Progress: [████████░░] 76%
 
 ## Performance Metrics
 
@@ -69,6 +69,7 @@ Progress: [███████░░░] 71%
 | Phase 02 P01 | 5min | 1 tasks | 5 files |
 | Phase 02 P02 | 4min | 1 tasks | 674 files |
 | Phase 02 P03 | 6min | 2 tasks | 6 files |
+| Phase 02 P04 | 8min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -97,6 +98,8 @@ Recent decisions affecting current work:
 - [Phase ?]: Phase 2: The sound transport may use only direct tokio-tungstenite =0.30.0 while reusing upstream Tokio and futures.
 - [Phase ?]: Phase 2: A/B config uses exact-schema overrides, distinct canonical endpoint ports, and a public allowlist that never includes nsecs.
 - [Phase ?]: Phase 2: ResourceOwner closes only registered return handles in reverse order and startup failures clean only resources already owned.
+- [Phase ?]: Reject packet sends while the opposite endpoint is unavailable instead of retaining retryable packet data.
+- [Phase ?]: Treat RESET acknowledgements as bridge-originated frames so they cannot be echoed back as reset requests.
 
 ### Pending Todos
 
@@ -136,6 +139,6 @@ hardware checkpoint remains explicit.
 
 ## Session Continuity
 
-Last session: 2026-07-24T01:33:33.976Z
-Stopped at: Completed 02-03-PLAN.md
+Last session: 2026-07-24T01:43:36.769Z
+Stopped at: Completed 02-04-PLAN.md
 Resume file: None
