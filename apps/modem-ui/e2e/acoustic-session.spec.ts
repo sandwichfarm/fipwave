@@ -19,6 +19,7 @@ test.afterAll(async () => { await runner?.close(); await rm(reportDirectory, { r
 
 test('built browser reports Fixture-status acoustic readiness as fail-closed before an actual peer session', async ({ page }) => {
   await page.addInitScript(() => {
+    window.__FIPWAVE_ACOUSTIC_FIXTURE__ = true;
     const track = { label: 'Fixture microphone', getSettings: () => ({ sampleRate: 48_000, channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false }), stop: () => undefined };
     Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => ({ getAudioTracks: () => [track], getTracks: () => [track] }) } });
     class FakeAudioContext { state = 'suspended'; sampleRate = 48_000; destination = {}; audioWorklet = { addModule: async () => undefined }; async resume() { this.state = 'running'; } async close() { this.state = 'closed'; } createMediaStreamSource() { return { connect: () => undefined }; } createBuffer() { return { copyToChannel: () => undefined }; } createBufferSource() { return { connect: () => undefined, addEventListener: () => undefined, start: () => undefined, stop: () => undefined }; } }
@@ -30,4 +31,5 @@ test('built browser reports Fixture-status acoustic readiness as fail-closed bef
   await expect(page.getByText('Audio preflight passed on this laptop.')).toBeVisible();
   await expect(page.getByText(/Not started — microphone preflight does not claim an acoustic peer or FIPS readiness/)).toBeVisible();
   await expect(page.getByText(/Evidence: Fixture/)).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.__fipwaveAcousticFixture)).toEqual({ evidenceClass: 'Fixture', aReady: true, bReady: true, aToBBytes: 1_357, bToABytes: 1_357 });
 });

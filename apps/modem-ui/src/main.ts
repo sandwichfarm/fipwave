@@ -26,6 +26,13 @@ import {
 
 type UiState = 'idle' | 'requesting' | 'ready' | 'failed' | 'disconnected';
 
+declare global {
+  interface Window {
+    __FIPWAVE_ACOUSTIC_FIXTURE__?: boolean;
+    __fipwaveAcousticFixture?: Readonly<{ evidenceClass: 'Fixture'; aReady: boolean; bReady: boolean; aToBBytes: number; bToABytes: number }>;
+  }
+}
+
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Modem UI root is unavailable');
 const appRoot: HTMLDivElement = app;
@@ -172,6 +179,37 @@ function configureAcousticSession(config: Readonly<RunnerConfig>): void {
   acousticSession = session;
   acousticAdapter = adapter;
   fipsPackets = adapter.fips;
+}
+
+/** Deterministic in-page FAS1-only acceptance seam; it has no WebSocket or physical-audio path. */
+async function runAcousticFixtureIfRequested(): Promise<void> {
+  if (!window.__FIPWAVE_ACOUSTIC_FIXTURE__) return;
+  class FixtureModem {
+    handler: ((unit: Uint8Array) => void) | undefined;
+    peer: FixtureModem | undefined;
+    send(unit: Uint8Array): void { this.peer?.handler?.(unit.slice()); }
+    onUnit(handler: (unit: Uint8Array) => void): () => void { this.handler = handler; return () => { if (this.handler === handler) this.handler = undefined; }; }
+  }
+  const timers = new Map<number, () => void>(); let timerId = 0;
+  const timerApi = { setTimeout: (callback: () => void) => { const id = ++timerId; timers.set(id, callback); return id as unknown as ReturnType<typeof setTimeout>; }, clearTimeout: (handle: ReturnType<typeof setTimeout>) => { timers.delete(handle as unknown as number); } };
+  const left = new FixtureModem(); const right = new FixtureModem(); left.peer = right; right.peer = left;
+  const receivedA: Uint8Array[] = []; const receivedB: Uint8Array[] = [];
+  const fixtureOptions = (role: 'A' | 'B', modem: FixtureModem, received: Uint8Array[]) => ({
+    role, identity: role === 'A' ? 'fixture-a' : 'fixture-b', expectedPeer: role === 'A' ? 'fixture-b' : 'fixture-a', modem,
+    clock: { now: () => 0 }, timers: timerApi, nonce: () => new Uint8Array(role === 'A' ? Array(16).fill(1) : Array(16).fill(2)),
+    profiles: ['quiet-audible-7k-v1'], ranges: { minPayloadBytes: 96, maxPayloadBytes: 217 },
+    candidates: [{ id: 'quiet-audible-7k-v1', profileId: 'quiet-audible-7k-v1', payloadBytes: 96, repetition: 1, guardMs: 750, playbackGain: 1, ackTimeoutMs: 4_000 }],
+    calibration: { probesPerDirection: 1, maxCandidates: 1, deadlineMs: 30_000 },
+    measureProbe: () => ({ received: true, bytePerfect: true, corrupt: false, missing: false, duplicate: false, discontinuity: false, latencyMs: 1, signalDb: -20, clipping: false, confidence: 1 }),
+    onPacket: (packet: Uint8Array) => received.push(packet.slice()),
+  });
+  const a = new AcousticSession(fixtureOptions('A', left, receivedA)); const b = new AcousticSession(fixtureOptions('B', right, receivedB));
+  a.start(); for (let round = 0; round < 4; round += 1) await Promise.all([a.settle(), b.settle()]); b.heartbeat();
+  const flush = () => { const callbacks = [...timers.values()]; timers.clear(); callbacks.forEach((callback) => callback()); };
+  a.enqueuePacket(Uint8Array.from({ length: 1_357 }, (_, index) => index & 0xff)); flush(); flush(); flush(); flush();
+  b.enqueuePacket(Uint8Array.from({ length: 1_357 }, (_, index) => (255 - index) & 0xff)); flush(); flush(); flush(); flush();
+  window.__fipwaveAcousticFixture = Object.freeze({ evidenceClass: 'Fixture', aReady: a.snapshot.ready, bReady: b.snapshot.ready, aToBBytes: receivedB[0]?.byteLength ?? 0, bToABytes: receivedA[0]?.byteLength ?? 0 });
+  a.dispose(); b.dispose();
 }
 window.addEventListener('fips-packet-send', (event) => {
   const packet = (event as CustomEvent<unknown>).detail;
@@ -950,4 +988,5 @@ async function reset(): Promise<void> {
 }
 
 render();
+void runAcousticFixtureIfRequested();
 void fetchRunnerConfig().then((config) => { runnerConfig = config; syncBridgeState(); render(); }, (error: unknown) => { configFailure = safeConfigReason(error); render(); });
