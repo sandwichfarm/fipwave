@@ -75,6 +75,7 @@ export function validateFipsComposeTopology(rendered) {
   if (bridge.privileged !== undefined && bridge.privileged !== false) fail('bridge privileged mode must be false');
   if (fips.privileged !== false) fail('fips privileged mode must be false');
   exactSet((fips.devices ?? []).map(composeDevice).filter(Boolean), ['/dev/net/tun'], 'fips device');
+  exactSet(fips.cap_drop, ['ALL'], 'fips dropped capabilities');
   exactSet(fips.cap_add, ['NET_ADMIN'], 'fips capabilities');
   exactSet(fips.security_opt, ['no-new-privileges:true'], 'fips security options');
   return { publishedPorts };
@@ -102,6 +103,7 @@ export function checkFipsComposeSource(composeSource, bridgeDockerfile, fipsDock
       fips: {
         network_mode: /^\s+network_mode:\s+service:bridge\s*$/m.test(composeSource) ? 'service:bridge' : undefined,
         devices: /^\s+devices:\s*\n\s+-\s+\/dev\/net\/tun:\/dev\/net\/tun\s*$/m.test(composeSource) ? ['/dev/net/tun:/dev/net/tun'] : [],
+        cap_drop: /^\s+cap_drop:\s*\n\s+-\s+ALL\s*$/m.test(composeSource) ? ['ALL'] : [],
         cap_add: /^\s+cap_add:\s*\n\s+-\s+NET_ADMIN\s*$/m.test(composeSource) ? ['NET_ADMIN'] : [],
         security_opt: /^\s+security_opt:\s*\n\s+-\s+no-new-privileges:true\s*$/m.test(composeSource) ? ['no-new-privileges:true'] : [],
         privileged: (composeSource.match(/^\s+privileged:\s+false\s*$/gm) ?? []).length >= 2 ? false : true,

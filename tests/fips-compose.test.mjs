@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { checkFipsComposeSource, validateFipsComposeTopology } from '../scripts/check-compose.mjs';
-import { assertFipsRuntimeInspect, parseFipsComposeSmokeArgs } from '../scripts/fips-compose-smoke.mjs';
+import { assertFipsRuntimeInspect, assertFipsTunRuntime, parseFipsComposeSmokeArgs } from '../scripts/fips-compose-smoke.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -19,6 +19,7 @@ function topology() {
       fips: {
         network_mode: 'service:bridge',
         devices: ['/dev/net/tun:/dev/net/tun'],
+        cap_drop: ['ALL'],
         cap_add: ['NET_ADMIN'],
         security_opt: ['no-new-privileges:true'],
         privileged: false,
@@ -45,6 +46,7 @@ test('Compose topology rejects namespace, bind, port, and privilege widening mut
   assert.throws(() => validateFipsComposeTopology({ services: { bridge, fips: { ...fips, network_mode: 'service:other' } } }), /namespace/);
   assert.throws(() => validateFipsComposeTopology({ services: { bridge: { ...bridge, ports: ['127.0.0.1:4310:4310', '127.0.0.1:4311:4311'] }, fips } }), /publish exactly/);
   assert.throws(() => validateFipsComposeTopology({ services: { bridge, fips: { ...fips, cap_add: ['NET_ADMIN', 'SYS_ADMIN'] } } }), /capabilities/);
+  assert.throws(() => validateFipsComposeTopology({ services: { bridge, fips: { ...fips, cap_drop: [] } } }), /dropped capabilities/);
   assert.throws(() => validateFipsComposeTopology({ services: { bridge, fips: { ...fips, privileged: true } } }), /privileged/);
   assert.throws(() => validateFipsComposeTopology({ services: { bridge, fips: { ...fips, devices: [] } } }), /device/);
 });
@@ -54,11 +56,13 @@ test('owned runtime smoke accepts one role and rejects unsafe inspected topology
   assert.throws(() => parseFipsComposeSmokeArgs(['--role', 'c']), /role/);
   const inspected = [
     { Name: '/owned_bridge', HostConfig: { Privileged: false, NetworkMode: 'owned_default', CapAdd: null }, NetworkSettings: { Ports: { '4310/tcp': [{ HostIp: '127.0.0.1', HostPort: '4310' }] } } },
-    { Name: '/owned_fips', Path: 'sh', Args: ['-ec', 'exec /usr/local/bin/fips --config /runtime/fips.yaml'], State: { Running: true }, HostConfig: { Privileged: false, NetworkMode: 'container:owned_bridge', CapAdd: ['NET_ADMIN'], Devices: [{ PathOnHost: '/dev/net/tun', PathInContainer: '/dev/net/tun' }], SecurityOpt: ['no-new-privileges:true'] }, NetworkSettings: { Ports: {} } },
+    { Name: '/owned_fips', Path: 'sh', Args: ['-ec', 'exec /usr/local/bin/fips --config /runtime/fips.yaml'], Config: { User: '0:0' }, State: { Running: true }, HostConfig: { Privileged: false, NetworkMode: 'container:owned_bridge', CapDrop: ['ALL'], CapAdd: ['NET_ADMIN'], Devices: [{ PathOnHost: '/dev/net/tun', PathInContainer: '/dev/net/tun' }], SecurityOpt: ['no-new-privileges:true'] }, NetworkSettings: { Ports: {} } },
   ];
   assert.doesNotThrow(() => assertFipsRuntimeInspect(inspected));
   inspected[1].HostConfig.CapAdd = ['NET_ADMIN', 'SYS_ADMIN'];
   assert.throws(() => assertFipsRuntimeInspect(inspected), /capabilities/);
+  assert.deepEqual(assertFipsTunRuntime('0\n0000000000001000\n7: fips0: <POINTOPOINT,UP> mtu 1280 qdisc noop state UNKNOWN\ninet6 fd69:e08d:65cc:3a6b:9c2c:2ac4:bd40:5e4b/128 scope global\n', 'a'), { interface: 'fips0', mtu: 1280, ipv6Address: 'fd69:e08d:65cc:3a6b:9c2c:2ac4:bd40:5e4b' });
+  assert.throws(() => assertFipsTunRuntime('0\n0000000000003000\n7: fips0: <UP> mtu 1280\ninet6 fd69:e08d:65cc:3a6b:9c2c:2ac4:bd40:5e4b/128 scope global\n', 'a'), /exactly effective NET_ADMIN/);
 });
 
 test('both Compose build contexts exclude generated build outputs', async () => {

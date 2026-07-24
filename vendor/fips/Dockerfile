@@ -8,8 +8,9 @@ RUN cargo build --locked --release --bin fips
 
 FROM debian:bookworm-slim
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends libdbus-1-3 \
+  && apt-get install -y --no-install-recommends libdbus-1-3 iproute2 \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/fips /usr/local/bin/fips
-USER 65532:65532
+# The Compose service drops every default capability and adds only NET_ADMIN.
+# FIPS must remain UID 0 so that capability is effective when it creates fips0.
 CMD ["/usr/local/bin/fips"]

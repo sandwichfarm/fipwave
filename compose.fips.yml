@@ -29,11 +29,16 @@ services:
     network_mode: service:bridge
     devices:
       - /dev/net/tun:/dev/net/tun
+    cap_drop:
+      - ALL
     cap_add:
       - NET_ADMIN
     security_opt:
       - no-new-privileges:true
     privileged: false
+    # NET_ADMIN is effective only for the daemon's root process; every other
+    # default capability is explicitly dropped above.
+    user: "0:0"
     volumes:
       - fips-runtime:/runtime:ro
     command: ["sh", "-ec", "until test -r /runtime/fips.yaml; do sleep 0.1; done; exec /usr/local/bin/fips --config /runtime/fips.yaml"]
