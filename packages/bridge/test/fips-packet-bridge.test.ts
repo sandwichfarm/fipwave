@@ -48,6 +48,20 @@ async function drainBridge(): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, 5));
 }
 
+async function expectNoMessage(socket: WebSocket, timeoutMs = 30): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      socket.off('message', onMessage);
+      resolve();
+    }, timeoutMs);
+    const onMessage = (message: WebSocket.RawData) => {
+      clearTimeout(timer);
+      reject(new Error(`unexpected bridge frame: ${decodeFrame(Buffer.from(message)).type}`));
+    };
+    socket.once('message', onMessage);
+  });
+}
+
 function packet(
   epoch: number,
   sequence: bigint,
@@ -155,19 +169,30 @@ describe('FIPS packet bridge', () => {
     browser.close(); fips.close();
   });
 
-  it('relays current-epoch browser arm and disconnect control to the local FIPS endpoint', async () => {
+  it('keeps local audio preflight separate from current acoustic readiness', async () => {
     const bridge = await createBridge();
     const browser = await openEndpoint(bridge.port, 'browser');
     const fips = await openEndpoint(bridge.port, 'fips');
-    const armed = once(fips, 'message');
+
     browser.send(encodeFrame({ type: MessageType.AUDIO_SETTINGS, epoch: 1, sequence: 1n, payload: Buffer.alloc(0) }));
+    await expectNoMessage(fips);
+    expect(packetBridgeState(bridge)).toMatchObject({
+      packetReadiness: { browser: false, fips: false },
+    });
+
+    const armed = once(fips, 'message');
+    browser.send(encodeFrame({ type: 12 as MessageType, epoch: 1, sequence: 2n, payload: Buffer.alloc(0) }));
     const [armFrame] = await armed;
     expect(decodeFrame(Buffer.from(armFrame as Buffer))).toMatchObject({ type: MessageType.BROWSER_ARM, epoch: 1, payload: Buffer.alloc(0) });
 
     const disarmed = once(fips, 'message');
-    browser.close();
+    browser.send(encodeFrame({ type: 13 as MessageType, epoch: 1, sequence: 3n, payload: Buffer.alloc(0) }));
     const [disarmFrame] = await disarmed;
     expect(decodeFrame(Buffer.from(disarmFrame as Buffer))).toMatchObject({ type: MessageType.BROWSER_DISARM, epoch: 1, payload: Buffer.alloc(0) });
+
+    const duplicateDisarm = expectNoMessage(fips);
+    browser.close();
+    await duplicateDisarm;
     fips.close();
   });
 
