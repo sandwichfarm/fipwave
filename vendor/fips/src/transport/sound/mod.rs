@@ -417,10 +417,22 @@ impl Transport for SoundTransport {
 
 impl SoundTransport {
     pub fn connection_state(&self, addr: &TransportAddr) -> ConnectionState {
-        if addr == &self.configured_peer() {
-            ConnectionState::None
-        } else {
+        if addr != &self.configured_peer() {
             ConnectionState::Failed("sound peer is not configured".into())
+        } else {
+            let runtime = self.runtime.lock().expect("sound runtime");
+            if runtime.state == TransportState::Up && runtime.browser_ready {
+                ConnectionState::Connected
+            } else if runtime.state == TransportState::Failed {
+                ConnectionState::Failed(
+                    runtime
+                        .last_error
+                        .unwrap_or("sound transport unavailable")
+                        .into(),
+                )
+            } else {
+                ConnectionState::Failed("sound browser is not armed".into())
+            }
         }
     }
 }
@@ -582,7 +594,7 @@ mod tests {
         assert!(!handle.accept_connections());
         assert!(matches!(
             handle.connection_state(&peer),
-            ConnectionState::None
+            ConnectionState::Failed(ref reason) if reason == "sound browser is not armed"
         ));
         assert!(matches!(
             handle.connection_state(&TransportAddr::from("sound-other")),
@@ -590,6 +602,20 @@ mod tests {
         ));
         assert_eq!(handle.transport_stats()["browser_ready"], false);
         assert_eq!(handle.congestion().recv_drops, Some(0));
+    }
+
+    #[test]
+    fn configured_sound_peer_is_connected_only_after_the_worker_and_browser_are_ready() {
+        let (tx, _rx) = packet_channel(2);
+        let sound = SoundTransport::new(TransportId::new(8), Some("desk".into()), config(), tx).unwrap();
+        let peer = sound.configured_peer();
+        assert!(matches!(sound.connection_state(&peer), ConnectionState::Failed(_)));
+        {
+            let mut runtime = sound.runtime.lock().unwrap();
+            runtime.state = TransportState::Up;
+            runtime.browser_ready = true;
+        }
+        assert_eq!(sound.connection_state(&peer), ConnectionState::Connected);
     }
 
     #[tokio::test]
