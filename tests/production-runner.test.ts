@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
 
 import { decodeFrame, encodeFrame, encodePcmPayload, MessageType, PcmEncoding } from '../packages/bridge/src/protocol.js';
+import { resolveDemoConfig } from '../packages/bridge/src/demo-config.js';
 import { CYRINX_DEADLINE_MS, writeMachineReport, type MachineReport, type TunEvidence } from '../packages/bridge/src/report.js';
 import { startProductionRunner, type ProductionRunner } from '../packages/bridge/src/runner.js';
 import { CYRINX_TRANSMIT_SETTLE_MS } from '../packages/bridge/src/qualification-session.js';
@@ -161,6 +162,39 @@ function exactTun(): TunEvidence {
 }
 
 describe('production runner', () => {
+  it('consumes a resolved config and closes only the bridge it successfully created', async () => {
+    const bridgeClose = vi.fn(async () => {});
+    const createBridge = vi.fn(async () => ({
+      port: 4_310,
+      sendPcmPlayback: vi.fn(),
+      startCyrinx: vi.fn(async () => ({ codec: 'quiet' as const, reasonCode: null, deadlineAtMs: 1 })),
+      reset: vi.fn(async () => 2),
+      close: bridgeClose,
+      state: vi.fn(() => ({ epoch: 1, rejectedFrames: 0, overflowedQueues: [], discontinuities: 0, queueCounts: {}, stampedResults: [], packetCounters: { browserToFips: 0, fipsToBrowser: 0 }, evidenceClass: 'Loopback' as const, acousticReady: false as const, peerConnected: false as const, pingReady: false as const })),
+    }));
+    const runner = await startProductionRunner({
+      machineId: 'laptop-a', report: await reportPath('resolved-config'), tunEvidence: 'none', uiDir: await fixtureUi(),
+      demoConfig: resolveDemoConfig('a'), createBridgeServerForTests: createBridge,
+    });
+
+    expect(runner.config).toMatchObject({ role: 'A', bridge: { browserPort: 4_310 } });
+    expect(JSON.stringify(runner.config)).not.toMatch(/nsec1/i);
+    await runner.close();
+    await runner.close();
+    expect(bridgeClose).toHaveBeenCalledOnce();
+  });
+
+  it('cleans the owned bridge after partial startup failure without exposing internal configuration', async () => {
+    const bridgeClose = vi.fn(async () => {});
+    await expect(startProductionRunner({
+      machineId: 'laptop-a', report: await reportPath('startup-failure'), tunEvidence: 'none', uiDir: await fixtureUi(),
+      demoConfig: resolveDemoConfig('a'),
+      createBridgeServerForTests: async () => ({ port: 4_310, sendPcmPlayback: () => {}, startCyrinx: async () => ({ codec: 'quiet', reasonCode: null, deadlineAtMs: 1 }), reset: async () => 2, close: bridgeClose, state: () => ({ epoch: 1, rejectedFrames: 0, overflowedQueues: [], discontinuities: 0, queueCounts: {}, stampedResults: [], packetCounters: { browserToFips: 0, fipsToBrowser: 0 }, evidenceClass: 'Loopback', acousticReady: false, peerConnected: false, pingReady: false }) }),
+      afterBridgeStartedForTests: async () => { throw new Error('nsec1must-not-leak'); },
+    })).rejects.toThrow('runner startup failed');
+    expect(bridgeClose).toHaveBeenCalledOnce();
+  });
+
   it('serves built UI plus immutable runner-owned codec, timeout, build, role, path, and evidence authority', async () => {
     const runner = await startProductionRunner({ machineId: 'laptop-a', role: 'A', port: 0, report: await reportPath('config'), tunEvidence: 'evidence/tun.json', evidenceMode: 'Loopback', uiDir: await fixtureUi() }); runners.push(runner);
     expect(await (await fetch(`http://127.0.0.1:${runner.port}/assets/app.js`)).text()).toContain('__fipwave');
