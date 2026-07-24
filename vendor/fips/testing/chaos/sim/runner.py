@@ -1,0 +1,634 @@
+"""Main simulation orchestration."""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import random
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime
+
+from .assertions import AssertionOutcome, BloomSendRateMonitor, evaluate_min_parent_switches
+from .compose import generate_compose
+from .config_gen import write_configs
+from .control import snapshot_all_congestion, snapshot_all_mmp, snapshot_all_trees
+from .docker_exec import docker_compose
+from .link_swap import LinkSwapManager
+from .links import LinkManager
+from .logs import AnalysisResult, analyze_logs, collect_logs, write_sim_metadata
+from .naming import name_suffix
+from .netem import NetemManager
+from .nodes import NodeManager
+from .peer_churn import PeerChurnManager
+from .scenario import Scenario
+from .topology import SimTopology, generate_topology
+from .traffic import TrafficManager
+from .veth import VethManager
+
+log = logging.getLogger(__name__)
+
+
+class SimRunner:
+    def __init__(self, scenario: Scenario):
+        self.scenario = scenario
+        self.rng = random.Random(scenario.seed)
+        self.topology: SimTopology | None = None
+        self.compose_file: str | None = None
+        self.output_dir: str = self._resolve_output_dir(scenario)
+        self._interrupted = False
+
+        # Set when setup, warmup or the simulation loop raises. The exception
+        # is logged rather than propagated, so nothing else on the return path
+        # of run() carries the fact that the simulation did not complete.
+        self.aborted = False
+
+        # Whether this run ever owned containers. Teardown runs from a
+        # finally, so it runs after a failed setup too, and container names
+        # are global: without this it would harvest whatever currently
+        # answers to them. topology and compose_file are both set well
+        # before the containers start and so cannot stand in for it.
+        self._containers_started = False
+
+        # Shared set of currently-down node IDs (updated by NodeManager,
+        # read by NetemManager, LinkManager, TrafficManager)
+        self._down_nodes: set[str] = set()
+
+        # Managers (initialized during setup)
+        self.veth_mgr: VethManager | None = None
+        self.netem_mgr: NetemManager | None = None
+        self.link_mgr: LinkManager | None = None
+        self.link_swap_mgr: LinkSwapManager | None = None
+        self.traffic_mgr: TrafficManager | None = None
+        self.node_mgr: NodeManager | None = None
+        self.peer_churn_mgr: PeerChurnManager | None = None
+
+        # Post-run assertion monitors (sampled near end of run).
+        self.bloom_rate_monitor: BloomSendRateMonitor | None = None
+        self.assertion_outcomes: list[AssertionOutcome] = []
+
+    @staticmethod
+    def _resolve_output_dir(scenario: Scenario) -> str:
+        """Build a timestamped output directory path.
+
+        Format: {base}/{scenario_name}-{YYYYMMDD-HHMMSS}/
+
+        The base path is determined by (in priority order):
+        1. FIPS_SIM_OUTPUT environment variable
+        2. The scenario YAML's logging.output_dir (default: ./sim-results)
+        """
+        base = os.environ.get("FIPS_SIM_OUTPUT", scenario.logging.output_dir)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        return os.path.join(base, f"{timestamp}-{scenario.name}")
+
+    def run(self) -> AnalysisResult | None:
+        """Run the full simulation lifecycle."""
+        signal.signal(signal.SIGINT, self._handle_sigint)
+        signal.signal(signal.SIGTERM, self._handle_sigint)
+
+        result = None
+        try:
+            self._setup()
+            self._warmup()
+            self._simulation_loop()
+        except Exception:
+            # Log rather than re-raise: the default excepthook writes to stderr
+            # and would not reach the file handler installed in _setup(), so a
+            # re-raise would lose the traceback from runner.log, which is the
+            # artifact that survives into CI. The flag carries the abort out.
+            log.exception("Simulation failed")
+            self.aborted = True
+        finally:
+            result = self._teardown()
+
+        return result
+
+    def _handle_sigint(self, signum, frame):
+        if self._interrupted:
+            log.warning("Force exit")
+            sys.exit(1)
+        log.info("Interrupt received, shutting down gracefully...")
+        self._interrupted = True
+
+    def _setup(self):
+        """Generate topology, configs, compose file. Start containers."""
+        s = self.scenario
+        mesh_name = f"sim-{s.name}-{s.seed}"
+
+        # Set up runner log file so all sim orchestration output is captured
+        # alongside the per-node FIPS logs for post-run analysis.
+        os.makedirs(self.output_dir, exist_ok=True)
+        runner_log_path = os.path.join(self.output_dir, "runner.log")
+        fh = logging.FileHandler(runner_log_path, mode="w")
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)-5s %(name)s: %(message)s",
+            datefmt="%H:%M:%S",
+        ))
+        logging.getLogger().addHandler(fh)
+        log.info("Runner log: %s", runner_log_path)
+
+        # 1. Generate topology
+        log.info(
+            "Generating %d-node %s topology (seed=%d)...",
+            s.topology.num_nodes,
+            s.topology.algorithm,
+            s.seed,
+        )
+        self.topology = generate_topology(s.topology, self.rng, mesh_name)
+        log.info(
+            "Topology: %d nodes, %d edges",
+            len(self.topology.nodes),
+            len(self.topology.edges),
+        )
+
+        # Log adjacency summary
+        for nid in sorted(self.topology.nodes):
+            peers = sorted(self.topology.nodes[nid].peers)
+            log.info("  %s: peers=%s", nid, ",".join(peers))
+
+        # 2. Generate configs
+        #
+        # The directory carries the same suffix as the container names, so
+        # parallel scenarios cannot overwrite each other's compose file
+        # between writing it and starting containers from it.
+        docker_network_dir = os.path.join(os.path.dirname(__file__), "..")
+        config_dir = os.path.normpath(
+            os.path.join(
+                docker_network_dir,
+                "generated-configs",
+                f"sim{self.topology.name_suffix}",
+            )
+        )
+        # Select ephemeral identity nodes (if peer churn enabled)
+        self._ephemeral_nodes: set[str] = set()
+        if s.peer_churn.enabled and s.peer_churn.ephemeral_fraction > 0:
+            all_nodes = sorted(self.topology.nodes.keys())
+            count = int(len(all_nodes) * s.peer_churn.ephemeral_fraction)
+            self._ephemeral_nodes = set(self.rng.sample(all_nodes, count))
+            log.info(
+                "Ephemeral identity nodes (%d/%d): %s",
+                len(self._ephemeral_nodes),
+                len(all_nodes),
+                ", ".join(sorted(self._ephemeral_nodes)),
+            )
+
+        write_configs(
+            self.topology, config_dir, self.scenario.fips_overrides,
+            ephemeral_nodes=self._ephemeral_nodes,
+        )
+        log.info("Wrote node configs to %s", config_dir)
+
+        # 3. Generate docker-compose.yml
+        self.compose_file = generate_compose(self.topology, self.scenario, config_dir)
+        log.info("Wrote %s", self.compose_file)
+
+        # 4. Build the test image once (avoids per-service build at scale)
+        log.info("Building Docker image...")
+        from .compose import FIPS_SIM_IMAGE
+        docker_dir = os.path.join(os.path.dirname(__file__), "..", "..", "docker")
+        subprocess.run(
+            ["docker", "build", "-t", FIPS_SIM_IMAGE, docker_dir],
+            check=True,
+        )
+
+        # 5. Start containers
+        log.info("Starting %d containers...", len(self.topology.nodes))
+        docker_compose(self.compose_file, ["up", "-d"])
+        self._containers_started = True
+
+        # 6. Set up veth pairs for Ethernet edges (before netem)
+        #
+        # The entrypoint script waits for configured Ethernet interfaces
+        # to appear before starting FIPS, so we just need to create the
+        # veth pairs promptly after containers are running.
+        if self.topology.has_ethernet():
+            self.veth_mgr = VethManager(self.topology)
+            log.info("Setting up Ethernet veth pairs...")
+            self.veth_mgr.setup_all()
+
+        # 7. Initialize managers
+        if s.netem.enabled:
+            bw = s.bandwidth if s.bandwidth.enabled else None
+            ig = s.ingress if s.ingress.enabled else None
+            self.netem_mgr = NetemManager(self.topology, s.netem, self.rng, bandwidth=bw, ingress=ig)
+            self.netem_mgr.down_nodes = self._down_nodes
+            log.info("Applying initial per-link netem...")
+            self.netem_mgr.setup_initial()
+
+        if s.link_flaps.enabled:
+            self.link_mgr = LinkManager(
+                self.topology, s.link_flaps, self.rng, netem_mgr=self.netem_mgr
+            )
+
+        if s.link_swap.enabled:
+            if not self.netem_mgr:
+                raise RuntimeError(
+                    "link_swap requires netem.enabled (depends on per-link tc state)"
+                )
+            self.link_swap_mgr = LinkSwapManager(
+                self.topology, s.link_swap, self.netem_mgr, self.rng,
+            )
+
+        if s.assertions.bloom_send_rate is not None:
+            self.bloom_rate_monitor = BloomSendRateMonitor(
+                self.topology, s.assertions.bloom_send_rate,
+            )
+
+        if s.traffic.enabled:
+            self.traffic_mgr = TrafficManager(
+                self.topology, s.traffic, self.rng, down_nodes=self._down_nodes
+            )
+
+        if s.node_churn.enabled:
+            self.node_mgr = NodeManager(
+                self.topology, s.node_churn, self.rng,
+                netem_mgr=self.netem_mgr, down_nodes=self._down_nodes,
+                veth_mgr=self.veth_mgr,
+                on_node_restart=self._handle_node_restart,
+            )
+
+        if s.peer_churn.enabled:
+            self.peer_churn_mgr = PeerChurnManager(
+                self.topology, s.peer_churn, self.rng,
+                down_nodes=self._down_nodes,
+                ephemeral_nodes=self._ephemeral_nodes,
+            )
+            # Share npub cache with traffic manager so iperf3 targets
+            # use runtime npubs (critical for ephemeral identity nodes).
+            if self.traffic_mgr:
+                self.traffic_mgr.npub_cache = self.peer_churn_mgr.npub_cache
+
+    def _warmup(self):
+        """Wait for mesh convergence."""
+        n = len(self.topology.nodes)
+        wait = max(10, n)  # Heuristic: ~1s per node, minimum 10s
+        log.info("Waiting %ds for mesh convergence...", wait)
+        self._sleep(wait)
+        self._take_snapshot("warmup")
+
+        # Populate npub cache after convergence (nodes must be running)
+        if self.peer_churn_mgr:
+            self.peer_churn_mgr.refresh_all_npubs()
+
+        # Initial link swap policy assignment (after warmup so the netem
+        # tc state is fully set up and the daemons have already
+        # discovered each other under the calm baseline).
+        if self.link_swap_mgr:
+            self.link_swap_mgr.setup_initial()
+
+    def _handle_node_restart(self, node_id: str):
+        """Called after a node container is restarted.
+
+        For ephemeral identity nodes, waits briefly for the daemon to
+        start, then queries its new npub and updates the peer churn
+        manager's cache.
+        """
+        if not self.peer_churn_mgr:
+            return
+        if node_id not in self.peer_churn_mgr.ephemeral_nodes:
+            return
+
+        # Brief delay for daemon startup before querying control socket
+        time.sleep(2)
+        new_npub = self.peer_churn_mgr.refresh_npub(node_id)
+        if new_npub:
+            log.info("Ephemeral node %s new identity: %s...%s", node_id, new_npub[:12], new_npub[-6:])
+        else:
+            log.warning("Failed to refresh npub for ephemeral node %s", node_id)
+
+    def _simulation_loop(self):
+        """Main event loop driving stochastic behavior."""
+        start = time.time()
+        s = self.scenario
+        duration = s.duration_secs
+        log.info("Simulation running for %ds...", duration)
+
+        # Schedule first events
+        next_netem = self._schedule_next(start, s.netem.mutation.interval_secs) if self.netem_mgr else float("inf")
+        next_flap = self._schedule_next(start, s.link_flaps.interval_secs) if self.link_mgr else float("inf")
+        next_traffic = self._schedule_next(start, s.traffic.interval_secs) if self.traffic_mgr else float("inf")
+        next_churn = self._schedule_next(start, s.node_churn.interval_secs) if self.node_mgr else float("inf")
+        next_peer_churn = self._schedule_next(start, s.peer_churn.interval_secs) if self.peer_churn_mgr else float("inf")
+
+        # Bloom-send-rate assertion: sample at window_secs before end.
+        bloom_window_start_at = float("inf")
+        if self.bloom_rate_monitor is not None:
+            bloom_window_start_at = (
+                start + duration - s.assertions.bloom_send_rate.window_secs
+            )
+        bloom_window_started = False
+
+        while not self._interrupted:
+            now = time.time()
+            elapsed = now - start
+            if elapsed >= duration:
+                break
+
+            # Bloom-rate window-start sampling
+            if (
+                self.bloom_rate_monitor is not None
+                and not bloom_window_started
+                and now >= bloom_window_start_at
+            ):
+                log.info(
+                    "Sampling bloom-rate window start (last %ds of run)...",
+                    s.assertions.bloom_send_rate.window_secs,
+                )
+                self.bloom_rate_monitor.sample_window_start()
+                bloom_window_started = True
+
+            # Deterministic link swap (before netem mutation so a
+            # mutation round can't clobber the swap mid-tick).
+            if self.link_swap_mgr:
+                self.link_swap_mgr.maybe_swap(now)
+
+            # Netem mutation
+            if self.netem_mgr and now >= next_netem:
+                self.netem_mgr.mutate()
+                next_netem = self._schedule_next(now, s.netem.mutation.interval_secs)
+
+            # Link flaps
+            if self.link_mgr:
+                if now >= next_flap:
+                    self.link_mgr.maybe_flap()
+                    next_flap = self._schedule_next(now, s.link_flaps.interval_secs)
+                self.link_mgr.restore_expired()
+
+            # Traffic generation
+            if self.traffic_mgr:
+                if now >= next_traffic:
+                    self.traffic_mgr.maybe_spawn()
+                    next_traffic = self._schedule_next(now, s.traffic.interval_secs)
+                self.traffic_mgr.cleanup_expired()
+
+            # Node churn
+            if self.node_mgr:
+                if now >= next_churn:
+                    self.node_mgr.maybe_kill()
+                    next_churn = self._schedule_next(now, s.node_churn.interval_secs)
+                self.node_mgr.restore_expired()
+
+            # Peer churn (topology mutation)
+            if self.peer_churn_mgr:
+                if now >= next_peer_churn:
+                    self.peer_churn_mgr.maybe_churn()
+                    next_peer_churn = self._schedule_next(now, s.peer_churn.interval_secs)
+
+            # Status line
+            down_links = self.link_mgr.down_count if self.link_mgr else 0
+            down_nodes = self.node_mgr.down_count if self.node_mgr else 0
+            active = self.traffic_mgr.active_count if self.traffic_mgr else 0
+            peer_churns = self.peer_churn_mgr.churn_count if self.peer_churn_mgr else 0
+            status_extra = f" peer_churns={peer_churns}" if self.peer_churn_mgr else ""
+            if self.link_swap_mgr:
+                status_extra += f" swaps={self.link_swap_mgr.swap_count}"
+            print(
+                f"\r  [{elapsed:.0f}s/{duration}s] "
+                f"nodes={len(self.topology.nodes)} "
+                f"edges={len(self.topology.edges)} "
+                f"links_down={down_links} "
+                f"nodes_down={down_nodes} "
+                f"traffic={active}"
+                f"{status_extra}   ",
+                end="",
+                flush=True,
+            )
+
+            self._sleep(1)
+
+        print()  # Clear status line
+
+        # Bloom-rate window-end sampling.
+        # Done before teardown so containers are still running.
+        if self.bloom_rate_monitor is not None:
+            if not bloom_window_started:
+                # Loop exited before the window-start mark (e.g.,
+                # interrupted). Take both samples now so we still
+                # produce a finite outcome rather than an empty dict.
+                log.warning(
+                    "Bloom-rate window did not start during run; "
+                    "sampling both endpoints at end (delta will be 0)."
+                )
+                self.bloom_rate_monitor.sample_window_start()
+            log.info("Sampling bloom-rate window end...")
+            self.bloom_rate_monitor.sample_end()
+
+    def _evaluate_assertions(self) -> None:
+        """Evaluate post-run assertions and stash outcomes on self.
+
+        Called from teardown while containers are still running so the
+        assertion outcomes (which include per-node detail) can be
+        written alongside the run artifacts.
+        """
+        if self.bloom_rate_monitor is not None:
+            outcome = self.bloom_rate_monitor.evaluate()
+            self.assertion_outcomes.append(outcome)
+            if outcome.passed:
+                log.info("%s", outcome.detail)
+            else:
+                log.error("%s", outcome.detail)
+
+    @property
+    def assertions_failed(self) -> bool:
+        return any(not o.passed for o in self.assertion_outcomes)
+
+    def _run_status(self) -> str:
+        """Name for how the run itself ended, before teardown is considered."""
+        if self.aborted:
+            return "aborted"
+        if self._interrupted:
+            return "interrupted"
+        return "completed"
+
+    def _write_status(self, status: str) -> None:
+        """Record how the run ended, for a reader who has only this directory.
+
+        One field per line so it can be grepped. The container names are
+        included because they are the handle on everything else the run
+        touched, and because a directory that names them cannot be mistaken
+        for a directory assembled from some other scenario's mesh.
+
+        Never raises. Both callers run this immediately before stopping the
+        containers, so letting a full disk or a vanished output directory
+        out of here would leak the mesh it was about to tear down.
+        """
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+            path = os.path.join(self.output_dir, "status.txt")
+            with open(path, "w") as f:
+                f.write(f"status={status}\n")
+                f.write(f"scenario={self.scenario.name}\n")
+                f.write(f"seed={self.scenario.seed}\n")
+                f.write(f"containers=fips-node-nNN{name_suffix()}\n")
+        except Exception:
+            log.exception("Could not write status file")
+
+    def _teardown(self) -> AnalysisResult | None:
+        """Stop dynamic elements, collect logs, analyze, stop containers."""
+        if not self._containers_started:
+            # There is no mesh to harvest. Snapshots, logs, analysis and
+            # assertions all address containers by a name that is global to
+            # the host, so running them here would describe whoever holds
+            # those names now and leave a plausible report of a run that
+            # never happened. Leaving them out makes the presence of
+            # analysis.txt proof that this scenario's own mesh existed.
+            self._write_status("setup-failed")
+            if self.compose_file:
+                # `up -d` can fail part way through, so this run may own
+                # containers or a network even with no mesh to speak of.
+                log.info("Stopping containers...")
+                docker_compose(self.compose_file, ["down"], check=False)
+            return None
+
+        result = None
+        status = self._run_status()
+        try:
+            # Evaluate post-run assertions before doing any teardown so
+            # control sockets are still reachable.
+            self._evaluate_assertions()
+
+            # Stop traffic
+            if self.traffic_mgr:
+                log.info("Stopping traffic sessions...")
+                self.traffic_mgr.stop_all()
+
+            # Restore links
+            if self.link_mgr:
+                log.info("Restoring downed links...")
+                self.link_mgr.restore_all()
+
+            # Restore stopped nodes (needed for snapshots and log collection)
+            if self.node_mgr:
+                log.info("Restoring stopped nodes...")
+                self.node_mgr.restore_all()
+
+            # Collect iperf3 throughput results before containers stop
+            if self.traffic_mgr:
+                iperf_results = self.traffic_mgr.collect_results()
+                if iperf_results:
+                    iperf_path = os.path.join(self.output_dir, "iperf3-results.json")
+                    with open(iperf_path, "w") as f:
+                        json.dump(iperf_results, f, indent=2)
+                    log.info("Saved %d iperf3 results to %s", len(iperf_results), iperf_path)
+
+            # Take final tree snapshot while nodes are still running
+            self._take_snapshot("final")
+
+            # Collect logs before stopping containers
+            container_names = [
+                self.topology.container_name(nid) for nid in sorted(self.topology.nodes)
+            ]
+            log.info("Collecting logs from %d containers...", len(container_names))
+            logs = collect_logs(container_names, self.output_dir)
+
+            # Analyze
+            result = analyze_logs(logs)
+            analysis_path = os.path.join(self.output_dir, "analysis.txt")
+            with open(analysis_path, "w") as f:
+                f.write(result.summary())
+            print(result.summary())
+
+            # Log-derived assertions (evaluated after analyze_logs so
+            # parent_switches and similar are populated).
+            mps_cfg = self.scenario.assertions.min_parent_switches
+            if mps_cfg is not None:
+                outcome = evaluate_min_parent_switches(
+                    mps_cfg, len(result.parent_switches)
+                )
+                self.assertion_outcomes.append(outcome)
+                if outcome.passed:
+                    log.info("%s", outcome.detail)
+                else:
+                    log.error("%s", outcome.detail)
+
+            # Write assertion outcomes
+            if self.assertion_outcomes:
+                assertions_path = os.path.join(self.output_dir, "assertions.txt")
+                with open(assertions_path, "w") as f:
+                    for o in self.assertion_outcomes:
+                        f.write(o.detail + "\n")
+                print("=== Assertions ===")
+                for o in self.assertion_outcomes:
+                    print(o.detail)
+                print()
+
+            # Write metadata
+            write_sim_metadata(
+                self.output_dir,
+                scenario_name=self.scenario.name,
+                seed=self.scenario.seed,
+                num_nodes=len(self.topology.nodes),
+                num_edges=len(self.topology.edges),
+                duration_secs=self.scenario.duration_secs,
+                topology=self.topology,
+            )
+
+            # Clean up veth pairs
+            if self.veth_mgr:
+                log.info("Cleaning up veth pairs...")
+                self.veth_mgr.teardown_all()
+        except Exception:
+            # Same reasoning as run(): logging keeps the traceback in
+            # runner.log, where re-raising would send it to stderr instead
+            # and past the exit ladder, which would report a harvest that
+            # fell over as a bad command line.
+            log.exception("Teardown failed")
+            self.aborted = True
+            status = "teardown-failed"
+            result = None
+        finally:
+            # Status first: it is the one artifact that must exist whatever
+            # else happens, and stopping containers can still time out.
+            self._write_status(status)
+            log.info("Stopping containers...")
+            docker_compose(
+                self.compose_file,
+                ["down"],
+                check=False,
+            )
+
+        return result
+
+    def _take_snapshot(self, label: str):
+        """Query all nodes via control socket and save tree/MMP/congestion snapshots."""
+        if not self.topology:
+            return
+        log.info("Taking %s snapshot...", label)
+        tree_snap = snapshot_all_trees(self.topology)
+        mmp_snap = snapshot_all_mmp(self.topology)
+        congestion_snap = snapshot_all_congestion(self.topology)
+
+        tree_path = os.path.join(self.output_dir, f"tree-snapshot-{label}.json")
+        mmp_path = os.path.join(self.output_dir, f"mmp-snapshot-{label}.json")
+        congestion_path = os.path.join(self.output_dir, f"congestion-snapshot-{label}.json")
+        os.makedirs(self.output_dir, exist_ok=True)
+        with open(tree_path, "w") as f:
+            json.dump(tree_snap, f, indent=2)
+        with open(mmp_path, "w") as f:
+            json.dump(mmp_snap, f, indent=2)
+        with open(congestion_path, "w") as f:
+            json.dump(congestion_snap, f, indent=2)
+        log.info(
+            "Snapshot %s: %d/%d tree, %d/%d mmp, %d/%d congestion responses",
+            label,
+            len(tree_snap),
+            len(self.topology.nodes),
+            len(mmp_snap),
+            len(self.topology.nodes),
+            len(congestion_snap),
+            len(self.topology.nodes),
+        )
+
+    def _schedule_next(self, now: float, interval) -> float:
+        """Schedule the next event using a Range interval."""
+        return now + self.rng.uniform(interval.min, interval.max)
+
+    def _sleep(self, seconds: float):
+        """Sleep in small increments so SIGINT can break out."""
+        end = time.time() + seconds
+        while time.time() < end and not self._interrupted:
+            time.sleep(min(0.5, end - time.time()))
