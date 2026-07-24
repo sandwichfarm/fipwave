@@ -848,7 +848,11 @@ mod tests {
             let (first, _) = listener.accept().await.unwrap();
             let first = tokio_tungstenite::accept_async(first).await.unwrap();
             let (mut first_writer, mut first_reader) = first.split();
-            let first_outbound = first_reader.next().await.unwrap().unwrap().into_data();
+            let first_outbound = tokio::time::timeout(Duration::from_secs(2), first_reader.next())
+                .await.expect("first connection did not receive a packet")
+                .expect("first connection closed before receiving a packet")
+                .expect("first connection returned an invalid frame")
+                .into_data();
             assert_eq!(&first_outbound[FWAV_HEADER_BYTES..], expected_first.as_slice());
             assert_eq!(u64::from_le_bytes(first_outbound[16..24].try_into().unwrap()), 1);
             first_writer.send(Message::Binary(encode_packet(1, 9, &[0x41]).into())).await.unwrap();
@@ -861,7 +865,11 @@ mod tests {
             // Same-epoch sequence 9 was accepted before the disconnect and
             // must remain a replay after the replacement socket is live.
             second_writer.send(Message::Binary(encode_packet(1, 9, &[0x41]).into())).await.unwrap();
-            let second_outbound = second_reader.next().await.unwrap().unwrap().into_data();
+            let second_outbound = tokio::time::timeout(Duration::from_secs(2), second_reader.next())
+                .await.expect("reconnected socket did not receive a packet")
+                .expect("reconnected socket closed before receiving a packet")
+                .expect("reconnected socket returned an invalid frame")
+                .into_data();
             assert_eq!(&second_outbound[FWAV_HEADER_BYTES..], expected_second.as_slice());
             assert_eq!(u64::from_le_bytes(second_outbound[16..24].try_into().unwrap()), 2);
         });
@@ -882,7 +890,12 @@ mod tests {
         }
         sound.arm_browser(1).unwrap();
         assert_eq!(sound.send_async(&sound.configured_peer(), &first_payload).await.unwrap(), 1357);
-        assert_eq!(packet_rx.recv().await.unwrap().data, vec![0x41]);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), packet_rx.recv())
+                .await.expect("first inbound packet timed out")
+                .expect("first inbound packet channel closed").data,
+            vec![0x41]
+        );
         for _ in 0..100 {
             if sound.transport_stats()["disconnects"] == 1 && sound.state() == TransportState::Up {
                 break;
@@ -893,7 +906,9 @@ mod tests {
         assert_eq!(sound.outbound_bytes.load(Ordering::Acquire), 0);
         sound.arm_browser(1).unwrap();
         assert_eq!(sound.send_async(&sound.configured_peer(), &second_payload).await.unwrap(), 1357);
-        fixture.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), fixture)
+            .await.expect("reconnect fixture timed out")
+            .expect("reconnect fixture failed");
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert!(packet_rx.try_recv().is_err());
         assert_eq!(sound.transport_stats()["tx_packets"], 2);
