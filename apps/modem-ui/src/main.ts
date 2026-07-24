@@ -1,6 +1,7 @@
 import './style.css';
 import { armAudio, canBufferPcmCaptureFrame, enqueuePcmPlayback, resetAudio, setPcmCaptureHandler, validatePcmPlaybackFrame, type AppliedAudioEvidence } from './audio.js';
 import { acceptBridgePlaybackFrame } from '../../../packages/bridge/src/codecs/websocket.js';
+import { createFipsPacketAdapter } from './fips-packet-adapter.js';
 import { CyrinxCaseWatchdog, sameCyrinxBrowserCase, type CyrinxBrowserCase } from './cyrinx-case-watchdog.js';
 import { CyrinxQualificationSession, type CyrinxSessionSnapshot } from './qualification-session.js';
 import {
@@ -33,6 +34,10 @@ let failure = '';
 let bridge: WebSocket | undefined;
 let bridgeSequence = 0n;
 let bridgeDelivery = 'Not connected';
+let packetGeneration = 0;
+let browserPacketReady = false;
+let packetTx = 0;
+let packetRx = 0;
 let quietRuntime = 'Not armed';
 type QuietCorpusSendState = 'unavailable' | 'ready' | 'sending' | 'sent';
 let quietCorpusSendState: QuietCorpusSendState = 'unavailable';
@@ -66,6 +71,44 @@ type Pending<T> = { resolve(value: T): void; reject(error: Error): void; timer: 
 let pendingSettings: Pending<void> | undefined;
 let pendingReset: (Pending<number> & { previousEpoch: number }) | undefined;
 const pendingResults = new Map<string, Pending<void>>();
+
+const FWAV_HEADER_BYTES = 32;
+const FIPS_PACKET_TYPE = 9;
+function encodeFipsPacket(payload: Uint8Array): ArrayBuffer {
+  if (!browserPacketReady || payload.byteLength === 0 || payload.byteLength > 256 * 1024 - FWAV_HEADER_BYTES) throw new Error('FIPS packet adapter is not ready for this packet');
+  const output = new ArrayBuffer(FWAV_HEADER_BYTES + payload.byteLength);
+  const bytes = new Uint8Array(output); const view = new DataView(output);
+  bytes.set([0x46, 0x57, 0x41, 0x56]); view.setUint8(4, 1); view.setUint8(5, FIPS_PACKET_TYPE);
+  view.setUint32(8, payload.byteLength, true); view.setUint32(12, epoch, true); view.setBigUint64(16, bridgeSequence++, true);
+  bytes.set(payload, FWAV_HEADER_BYTES);
+  return output;
+}
+function decodeFipsPacket(input: ArrayBuffer): Uint8Array {
+  if (input.byteLength <= FWAV_HEADER_BYTES || input.byteLength > 256 * 1024) throw new Error('FIPS packet frame size is invalid');
+  const bytes = new Uint8Array(input); const view = new DataView(input);
+  if (String.fromCharCode(...bytes.slice(0, 4)) !== 'FWAV' || view.getUint8(4) !== 1 || view.getUint8(5) !== FIPS_PACKET_TYPE) throw new Error('FIPS packet frame identity is invalid');
+  if (view.getUint32(8, true) !== input.byteLength - FWAV_HEADER_BYTES || view.getUint16(6, true) !== 0 || view.getUint32(24, true) !== 0 || view.getUint16(28, true) !== 0 || view.getUint16(30, true) !== 0) throw new Error('FIPS packet frame header is invalid');
+  if (view.getUint32(12, true) !== epoch) throw new Error('FIPS packet frame is stale');
+  return bytes.slice(FWAV_HEADER_BYTES);
+}
+const fipsPackets = createFipsPacketAdapter({
+  onPacket(packet) {
+    packetRx += 1;
+    window.dispatchEvent(new CustomEvent('fips-packet-received', { detail: packet }));
+  },
+  emitPacket(packet) {
+    const socket = bridge;
+    if (!browserPacketReady || !socket || socket.readyState !== WebSocket.OPEN) throw new Error('FIPS packet adapter is disconnected');
+    socket.send(encodeFipsPacket(packet));
+    packetTx += 1;
+  },
+});
+window.addEventListener('fips-packet-send', (event) => {
+  const packet = (event as CustomEvent<unknown>).detail;
+  if (!(packet instanceof Uint8Array)) return;
+  const result = fipsPackets.send(packet);
+  if (!result.accepted) bridgeDelivery = `FIPS packet rejected — ${result.reason}`;
+});
 
 const labels: Record<UiState, string> = {
   idle: 'Idle', requesting: 'Requesting', ready: 'Ready', failed: 'Failed', disconnected: 'Disconnected',
@@ -181,6 +224,7 @@ function rejectPending(reason: Error): void {
 
 function failBridge(socket: WebSocket, reason: Error): void {
   if (bridge !== socket) return;
+  fipsPackets.invalidate(); browserPacketReady = false; packetGeneration += 1;
   clearCyrinxCase();
   bridge = undefined;
   rejectPending(reason);
@@ -208,6 +252,13 @@ function handleBridgeMessage(socket: WebSocket, event: MessageEvent): void {
         window.clearTimeout(pending.timer);
         pendingReset = undefined;
         pending.resolve(nextEpoch);
+        return;
+      }
+      if (type === FIPS_PACKET_TYPE) {
+        const packet = decodeFipsPacket(event.data);
+        const accepted = fipsPackets.receive(packet, epoch, packetGeneration);
+        if (!accepted.accepted) bridgeDelivery = `FIPS packet rejected — ${accepted.reason}`;
+        render();
         return;
       }
       if (type !== 4) throw new Error(`Local bridge sent unsupported binary FWAV type ${type}`);
@@ -404,6 +455,7 @@ async function reportQuietResult(received: ReceiveCaseEvidence): Promise<void> {
 
 async function requestBridgeReset(): Promise<number> {
   const previousEpoch = epoch;
+  fipsPackets.invalidate(); browserPacketReady = false; packetGeneration += 1;
   const socket = bridge?.readyState === WebSocket.OPEN ? bridge : await openFreshBridge();
   const accepted = new Promise<number>((resolve, reject) => {
     const timer = window.setTimeout(() => {
@@ -547,6 +599,9 @@ async function arm(): Promise<void> {
   try {
     evidence = await armAudio(epoch);
     await reportToBridge(evidence);
+    packetGeneration += 1;
+    fipsPackets.arm(epoch, packetGeneration);
+    browserPacketReady = true;
     bridgeDelivery = `Audio settings accepted for epoch ${epoch}`;
     uiState = 'ready';
   } catch (error) {
@@ -667,6 +722,7 @@ async function reset(): Promise<void> {
   if (uiState === 'requesting') return;
   uiState = 'requesting'; failure = ''; render();
   try {
+    fipsPackets.invalidate(); browserPacketReady = false; packetGeneration += 1;
     clearCyrinxCase();
     for (const incomplete of quiet.flushIncomplete()) await appendQuietEvidence(incomplete);
     const nextEpoch = await requestBridgeReset();
