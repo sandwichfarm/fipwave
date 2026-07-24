@@ -237,8 +237,8 @@ async function runAcousticFixtureIfRequested(): Promise<void> {
     send(unit: Uint8Array): void { this.peer?.handler?.(unit.slice()); }
     onUnit(handler: (unit: Uint8Array) => void): () => void { this.handler = handler; return () => { if (this.handler === handler) this.handler = undefined; }; }
   }
-  const timers = new Map<number, () => void>(); let timerId = 0;
-  const timerApi = { setTimeout: (callback: () => void) => { const id = ++timerId; timers.set(id, callback); return id as unknown as ReturnType<typeof setTimeout>; }, clearTimeout: (handle: ReturnType<typeof setTimeout>) => { timers.delete(handle as unknown as number); } };
+  const timers = new Map<number, { callback: () => void; dueAtMs: number }>(); let timerId = 0; let fixtureNowMs = 0;
+  const timerApi = { setTimeout: (callback: () => void, delayMs = 0) => { const id = ++timerId; timers.set(id, { callback, dueAtMs: fixtureNowMs + delayMs }); return id as unknown as ReturnType<typeof setTimeout>; }, clearTimeout: (handle: ReturnType<typeof setTimeout>) => { timers.delete(handle as unknown as number); } };
   const left = new FixtureModem(); const right = new FixtureModem(); left.peer = right; right.peer = left;
   const receivedA: Uint8Array[] = []; const receivedB: Uint8Array[] = [];
   const fixtureOptions = (role: 'A' | 'B', modem: FixtureModem, received: Uint8Array[]) => ({
@@ -252,7 +252,13 @@ async function runAcousticFixtureIfRequested(): Promise<void> {
   });
   const a = new AcousticSession(fixtureOptions('A', left, receivedA)); const b = new AcousticSession(fixtureOptions('B', right, receivedB));
   a.start(); for (let round = 0; round < 4; round += 1) await Promise.all([a.settle(), b.settle()]);
-  const flush = () => { const callbacks = [...timers.values()]; timers.clear(); callbacks.forEach((callback) => callback()); };
+  const flush = () => {
+    const nextDueAtMs = Math.min(...[...timers.values()].map((timer) => timer.dueAtMs));
+    fixtureNowMs = nextDueAtMs;
+    const callbacks = [...timers.entries()].filter(([, timer]) => timer.dueAtMs === nextDueAtMs);
+    callbacks.forEach(([id]) => timers.delete(id));
+    callbacks.forEach(([, timer]) => timer.callback());
+  };
   const drainUntil = async (complete: () => boolean): Promise<void> => {
     for (let turn = 0; turn < 128; turn += 1) {
       await Promise.all([a.settle(), b.settle()]);
