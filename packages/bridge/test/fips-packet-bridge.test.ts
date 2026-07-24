@@ -5,7 +5,15 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
 
-import { decodeFrame, encodeFrame, MAX_MESSAGE_BYTES, MessageType, PcmEncoding, RESET_ACK_FLAG } from '../src/protocol.js';
+import {
+  decodeFrame,
+  encodeFrame,
+  FipsTrafficClass,
+  MAX_MESSAGE_BYTES,
+  MessageType,
+  PcmEncoding,
+  RESET_ACK_FLAG,
+} from '../src/protocol.js';
 import { createBridgeServer, type BridgeServer, type PacketBridgeState } from '../src/server.js';
 
 const servers: BridgeServer[] = [];
@@ -40,8 +48,13 @@ async function drainBridge(): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, 5));
 }
 
-function packet(epoch: number, sequence: bigint, payload: Buffer): Buffer {
-  return encodeFrame({ type: MessageType.FIPS_PACKET, epoch, sequence, payload });
+function packet(
+  epoch: number,
+  sequence: bigint,
+  payload: Buffer,
+  trafficClass: FipsTrafficClass = FipsTrafficClass.Ordinary,
+): Buffer {
+  return encodeFrame({ type: MessageType.FIPS_PACKET, epoch, sequence, trafficClass, payload });
 }
 
 function patternedPacket(): Buffer {
@@ -53,6 +66,28 @@ function packetBridgeState(bridge: BridgeServer): PacketBridgeState {
 }
 
 describe('FIPS packet bridge', () => {
+  it('round-trips each Rust-authored FIPS traffic class beside byte-identical opaque bytes', async () => {
+    const bridge = await createBridge();
+    const browser = await openEndpoint(bridge.port, 'browser');
+    const fips = await openEndpoint(bridge.port, 'fips');
+
+    for (const [index, trafficClass] of [
+      FipsTrafficClass.Control,
+      FipsTrafficClass.Heartbeat,
+      FipsTrafficClass.Ordinary,
+    ].entries()) {
+      const payload = Buffer.from([index, 0, 255, 127]);
+      const receivedByFips = once(fips, 'message');
+      browser.send(packet(1, BigInt(index + 1), payload, trafficClass));
+      const [received] = await receivedByFips;
+      const decoded = decodeFrame(Buffer.from(received as Buffer));
+      expect(decoded.trafficClass).toBe(trafficClass);
+      expect(decoded.payload.equals(payload)).toBe(true);
+    }
+
+    browser.close(); fips.close();
+  });
+
   it('round-trips opaque packets without PCM metadata and rejects malformed packet frames', () => {
     const payload = patternedPacket();
     const encoded = packet(1, 9n, payload);
@@ -66,6 +101,26 @@ describe('FIPS packet bridge', () => {
     const wrongLength = Buffer.from(encoded); wrongLength.writeUInt32LE(payload.byteLength - 1, 8);
     expect(() => decodeFrame(wrongLength)).toThrow('declared payload length');
     expect(() => packet(1, 1n, Buffer.alloc(MAX_MESSAGE_BYTES))).toThrow('256 KiB');
+    const unknownClass = Buffer.from(encoded); unknownClass.writeUInt8(99, 6);
+    expect(() => decodeFrame(unknownClass)).toThrow('traffic class');
+  });
+
+  it('rejects invalid packet class before queue or acceptance-counter mutation', async () => {
+    const bridge = await createBridge();
+    const browser = await openEndpoint(bridge.port, 'browser');
+    const fips = await openEndpoint(bridge.port, 'fips');
+    const invalidClass = Buffer.from(packet(1, 1n, Buffer.from([1])));
+    invalidClass.writeUInt8(99, 6);
+
+    browser.send(invalidClass);
+    await once(browser, 'close');
+
+    expect(bridge.state().packetCounters).toEqual({ browserToFips: 0, fipsToBrowser: 0 });
+    expect(packetBridgeState(bridge)).toMatchObject({
+      packetQueues: { browserToFips: { items: 0, bytes: 0 } },
+      lastError: { code: 'invalid_fwav_message' },
+    });
+    fips.close();
   });
 
   it('relays exactly 1357 opaque bytes in both directions for distinct endpoint roles', async () => {
