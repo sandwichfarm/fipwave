@@ -25,12 +25,31 @@ class FakeModem implements AcousticModem {
   applyCandidate(candidate: { id: string }): void { this.appliedCandidates.push(candidate.id); }
 }
 
+class DeferredModem extends FakeModem {
+  defer = false;
+  readonly pending: Array<{ release(): void; reject(error: Error): void }> = [];
+
+  override send(unit: Uint8Array): void | Promise<void> {
+    if (!this.defer) return super.send(unit);
+    return new Promise<void>((resolve, reject) => {
+      this.pending.push({
+        release: () => { super.send(unit); resolve(); },
+        reject,
+      });
+    });
+  }
+
+  releaseNext(): void { this.pending.shift()?.release(); }
+  rejectNext(error = new Error('playback failed')): void { this.pending.shift()?.reject(error); }
+}
+
 class FakeTimers {
   #callbacks = new Map<number, { callback: () => void; dueAtMs: number }>();
   #next = 1;
   #nowMs = 0;
   setTimeout(callback: () => void, delayMs = 0): ReturnType<typeof setTimeout> { const id = this.#next++; this.#callbacks.set(id, { callback, dueAtMs: this.#nowMs + delayMs }); return id as unknown as ReturnType<typeof setTimeout>; }
   clearTimeout(handle: ReturnType<typeof setTimeout>): void { this.#callbacks.delete(handle as unknown as number); }
+  count(delayMs: number): number { return [...this.#callbacks.values()].filter((entry) => entry.dueAtMs - this.#nowMs === delayMs).length; }
   runAll(): void {
     const nextDueAtMs = Math.min(...[...this.#callbacks.values()].map((entry) => entry.dueAtMs));
     this.#nowMs = nextDueAtMs;
@@ -341,6 +360,55 @@ describe('AcousticSession packet, fragment, reassembly, retry, duplicate, and tu
 });
 
 describe('AcousticSession priority, backpressure, heartbeat, degraded recovery, and concurrency', () => {
+  it('arms ARQ only after delayed TURN_END playback settles and makes late or failed playback inert', async () => {
+    const timers = new FakeTimers(); const clock = new ManualClock();
+    const aModem = new DeferredModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
+    // Keep the peer ACK from completing the active packet before the local
+    // playback boundary has armed its timeout.
+    bModem.shouldDeliver = (raw) => decodeFas1(raw).type !== Fas1UnitType.Ack;
+    const a = new AcousticSession({ ...options('A', aModem), clock, timers });
+    const b = new AcousticSession({ ...options('B', bModem), clock, timers });
+    a.start(); await settlePair(a, b);
+    const beforeAckTimer = timers.count(candidate.ackTimeoutMs);
+
+    aModem.defer = true;
+    expect(a.enqueuePacket(Uint8Array.of(7), 'ordinary').accepted).toBe(true);
+    expect(aModem.pending).toHaveLength(2); // DATA and the final TURN_END.
+    aModem.releaseNext(); await Promise.resolve();
+    expect(timers.count(candidate.ackTimeoutMs)).toBe(beforeAckTimer);
+    aModem.releaseNext(); await Promise.resolve(); await Promise.resolve();
+    expect(timers.count(candidate.ackTimeoutMs)).toBe(beforeAckTimer + 1);
+
+    // A completion which arrives after authority is reset cannot revive the
+    // old turn or install another retry timer.
+    const lateTimers = new FakeTimers(); const lateA = new DeferredModem(); const lateB = new FakeModem(); lateA.peer = lateB; lateB.peer = lateA;
+    lateB.shouldDeliver = (raw) => decodeFas1(raw).type !== Fas1UnitType.Ack;
+    const late = new AcousticSession({ ...options('A', lateA), clock, timers: lateTimers });
+    const latePeer = new AcousticSession({ ...options('B', lateB), clock, timers: lateTimers });
+    late.start(); await settlePair(late, latePeer);
+    lateA.defer = true;
+    expect(late.enqueuePacket(Uint8Array.of(9), 'ordinary').accepted).toBe(true);
+    lateA.releaseNext(); await Promise.resolve();
+    late.reset(2);
+    const afterResetTimers = lateTimers.count(candidate.ackTimeoutMs);
+    expect(late.snapshot).toMatchObject({ state: 'Idle', epoch: 2 });
+    lateA.releaseNext(); await Promise.resolve(); await Promise.resolve();
+    expect(lateTimers.count(candidate.ackTimeoutMs)).toBe(afterResetTimers);
+
+    const failedTimers = new FakeTimers(); const failedA = new DeferredModem(); const failedB = new FakeModem(); failedA.peer = failedB; failedB.peer = failedA;
+    failedB.shouldDeliver = (raw) => decodeFas1(raw).type !== Fas1UnitType.Ack;
+    const failed = new AcousticSession({ ...options('A', failedA), clock, timers: failedTimers });
+    const failedPeer = new AcousticSession({ ...options('B', failedB), clock, timers: failedTimers });
+    failed.start(); await settlePair(failed, failedPeer);
+    failedA.defer = true;
+    expect(failed.enqueuePacket(Uint8Array.of(8), 'ordinary').accepted).toBe(true);
+    failedA.rejectNext(); await Promise.resolve(); await Promise.resolve();
+    expect(failed.snapshot).toMatchObject({ state: 'Degraded', ready: false, reason: 'acoustic_modem_playback_failed' });
+    expect(failed.snapshot.counters.retries).toBe(0);
+    failedA.releaseNext(); await Promise.resolve();
+    expect(failed.snapshot.counters.retries).toBe(0);
+  });
+
   it('queues simultaneous heartbeat and data work behind the current turn and serializes it with a guarded token handoff', async () => {
     const timers = new FakeTimers(); const clock = new ManualClock();
     const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
