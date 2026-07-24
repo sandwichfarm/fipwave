@@ -70,6 +70,24 @@ export function assertFipsDaemonLogs(logs, role) {
   return { configuredPeer: expectedPeer, state: 'running' };
 }
 
+/** Strictly join the three allowlisted FIPS control snapshots for the live Sound authority. */
+export function assertFipsSoundSnapshot(snapshot, role) {
+  if (!snapshot || typeof snapshot !== 'object' || !Array.isArray(snapshot.peers) || !Array.isArray(snapshot.links) || !Array.isArray(snapshot.transports)) throw new Error('control snapshot is invalid');
+  const expectedPeer = role === 'a' ? 'npub1f49ke5fkzqev4x7j46uajq92f4zan6kcpty5yvm5c3g6wf2dqanqn7qsy2' : 'npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m';
+  const peer = snapshot.peers.find((value) => value?.npub === expectedPeer && value?.connectivity === 'connected' && value?.transport_type === 'sound');
+  if (!peer || !Number.isSafeInteger(peer.link_id)) throw new Error('expected authenticated Sound peer is unavailable');
+  const link = snapshot.links.find((value) => value?.link_id === peer.link_id && value?.state === 'active');
+  if (!link || !Number.isSafeInteger(link.transport_id)) throw new Error('expected active Sound link is unavailable');
+  if (snapshot.transports.length !== (role === 'b' ? 1 : 2)) throw new Error('role transport cardinality is invalid');
+  const transport = snapshot.transports.find((value) => value?.transport_id === link.transport_id);
+  if (!transport || transport.type !== 'sound' || transport.state !== 'active' || transport.stats?.worker_up !== true || transport.stats?.acoustic_ready !== true || !Number.isSafeInteger(transport.stats?.epoch)) throw new Error('expected usable Sound transport is unavailable');
+  if (role === 'b' && snapshot.transports.some((value) => value?.type !== 'sound')) throw new Error('Role B must have exactly one usable Sound transport');
+  if (role === 'a' && !snapshot.transports.some((value) => value?.type === 'udp')) throw new Error('Role A must retain its explicit outbound-only UDP posture');
+  return { transportId: transport.transport_id, linkId: link.link_id, epoch: transport.stats.epoch };
+}
+
+const CONTROL_PROBE_SOURCE = 'import { createFipsControlClient } from "./dist/server/packages/bridge/src/fips-control-client.js"; const client=createFipsControlClient({socketPath:"/run/fips/control.sock"}); try { const peers=await client.query("peers"); const links=await client.query("links"); const transports=await client.query("transports"); process.stdout.write(JSON.stringify({peers:peers.peers,links:links.links,transports:transports.transports})); } finally { await client.close(); }';
+
 async function compose(project, args, environment) {
   return execFileAsync('docker', ['compose', '-p', project, '-f', 'compose.fips.yml', ...args], { cwd: root, env: { ...process.env, ...environment }, maxBuffer: 1024 * 1024 });
 }
@@ -118,7 +136,11 @@ async function main() {
     if (current?.State?.Pid !== firstPid) throw new Error('FIPS must connect on its first process without a manual restart');
     const logs = (await execFileAsync('docker', ['logs', fips.Id], { maxBuffer: 1024 * 1024 })).stdout;
     const daemon = assertFipsDaemonLogs(logs, role);
-    console.log(JSON.stringify({ schemaVersion: 1, project, role, ...evidence, tun, daemon, firstFipsPid: firstPid, soundWorker: 'connected', note: 'Local container topology proves configured peer, first-process Sound bridge, and usable TUN; it does not claim open-air acoustic delivery or ICMPv6 ping.' }));
+    const probe = await compose(project, ['exec', '-T', 'bridge', 'node', '--input-type=module', '-e', CONTROL_PROBE_SOURCE], environment);
+    let sound;
+    try { sound = { status: 'ready', ...assertFipsSoundSnapshot(JSON.parse(probe.stdout), role) }; }
+    catch (error) { sound = { status: 'human_needed', reason: error instanceof Error ? error.message : 'control snapshot unavailable' }; }
+    console.log(JSON.stringify({ schemaVersion: 1, project, role, ...evidence, tun, daemon, sound, firstFipsPid: firstPid, soundWorker: 'connected', note: 'Local container topology proves the private control probe, configured Sound bridge, and usable TUN; a linked remote Sound peer remains a two-laptop physical gate.' }));
   } finally {
     try { await compose(project, ['down', '--volumes', '--remove-orphans'], environment); } catch (error) { cleanupError = error; }
     await rm(tempDirectory, { recursive: true, force: true });

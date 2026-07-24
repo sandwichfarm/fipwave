@@ -40,7 +40,7 @@ export interface DemoConfig {
   readonly identity: PrivateDemoIdentity;
   readonly peer: PrivateDemoIdentity;
   readonly bridge: BridgeConfig;
-  readonly fips: Readonly<{ linkMtu: number; expectedPeerPublicKey: string; ipv6Address: string; targetIpv6: string; transports: readonly TransportPolicy[] }>;
+  readonly fips: Readonly<{ linkMtu: number; expectedPeerPublicKey: string; ipv6Address: string; targetIpv6: string; controlSocketPath: '/run/fips/control.sock'; transports: readonly TransportPolicy[] }>;
   readonly proof: ProofConfig;
   readonly codecCapabilities: readonly ['quiet'];
   readonly audioDefaults: AudioDefaults;
@@ -176,7 +176,7 @@ export function resolveDemoConfig(input?: string, overrides?: unknown): DemoConf
     identity,
     peer,
     bridge,
-    fips: { linkMtu, expectedPeerPublicKey: peer.publicKey, ipv6Address: FIPS_IPV6[input], targetIpv6: FIPS_IPV6.b, transports },
+    fips: { linkMtu, expectedPeerPublicKey: peer.publicKey, ipv6Address: FIPS_IPV6[input], targetIpv6: FIPS_IPV6.b, controlSocketPath: '/run/fips/control.sock', transports },
     proof: { ...DEFAULTS.proof },
     codecCapabilities: [...DEFAULTS.codecCapabilities] as ['quiet'],
     audioDefaults: { ...DEFAULTS.audioDefaults },

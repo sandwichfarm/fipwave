@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { checkFipsComposeSource, validateFipsComposeTopology } from '../scripts/check-compose.mjs';
-import { assertFipsDaemonLogs, assertFipsRuntimeInspect, assertFipsTunRuntime, parseFipsComposeSmokeArgs } from '../scripts/fips-compose-smoke.mjs';
+import { assertFipsDaemonLogs, assertFipsRuntimeInspect, assertFipsSoundSnapshot, assertFipsTunRuntime, parseFipsComposeSmokeArgs } from '../scripts/fips-compose-smoke.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -67,6 +67,8 @@ test('owned runtime smoke accepts one role and rejects unsafe inspected topology
   assert.throws(() => assertFipsTunRuntime('0\n0000000000003000\n7: fips0: <UP> mtu 1280\ninet6 fd69:e08d:65cc:3a6b:9c2c:2ac4:bd40:5e4b/128 scope global\n', 'a'), /exactly effective NET_ADMIN/);
   assert.deepEqual(assertFipsDaemonLogs('Loaded config file\nTUN device active:\nNode started:\nstate: running\nFIPS running\nnpub1f49ke5fkzqev4x7j46uajq92f4zan6kcpty5yvm5c3g6wf2dqanqn7qsy2', 'a'), { configuredPeer: 'npub1f49ke5fkzqev4x7j46uajq92f4zan6kcpty5yvm5c3g6wf2dqanqn7qsy2', state: 'running' });
   assert.throws(() => assertFipsDaemonLogs('Node started: DEGRADED', 'a'), /missing runtime evidence/);
+  assert.deepEqual(assertFipsSoundSnapshot({ peers: [{ npub: 'npub1f49ke5fkzqev4x7j46uajq92f4zan6kcpty5yvm5c3g6wf2dqanqn7qsy2', connectivity: 'connected', link_id: 1, transport_type: 'sound' }], links: [{ link_id: 1, transport_id: 2, state: 'active' }], transports: [{ transport_id: 2, type: 'sound', state: 'active', stats: { worker_up: true, acoustic_ready: true, epoch: 1 } }, { transport_id: 3, type: 'udp', state: 'active', stats: {} }] }, 'a'), { transportId: 2, linkId: 1, epoch: 1 });
+  assert.throws(() => assertFipsSoundSnapshot({ peers: [], links: [], transports: [{ transport_id: 2, type: 'udp', state: 'active', stats: {} }] }, 'b'), /Sound/);
 });
 
 test('both Compose build contexts exclude generated build outputs', async () => {

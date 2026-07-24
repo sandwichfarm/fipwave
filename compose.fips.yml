@@ -21,6 +21,7 @@ services:
     user: "0:0"
     volumes:
       - fips-runtime:/runtime
+      - fips-control:/run/fips:ro
       - ${DEMO_ARTIFACT_DIR:-./.artifacts/demo/default}:/artifacts
 
   fips:
@@ -42,7 +43,9 @@ services:
     user: "0:0"
     volumes:
       - fips-runtime:/runtime:ro
+      - fips-control:/run/fips
     command: ["sh", "-ec", "until test -r /runtime/fips.yaml; do sleep 0.1; done; exec /usr/local/bin/fips --config /runtime/fips.yaml"]
 
 volumes:
   fips-runtime:
+  fips-control:

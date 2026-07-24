@@ -8,8 +8,8 @@ const now = 1_700_000_000_000;
 const challenge = randomBytes(32).toString('base64url');
 const snapshot = {
   expectedPeerPublicKey: 'npub1peer', targetIpv6: 'fd46:f688:3bb:f389:e1df:f3e:3af3:9c30', build: 'a'.repeat(40), epoch: 7, settingsId: 'quiet-audible-7k-v1', observedAtMs: now,
-  transport: { transportId: 2, type: 'sound', state: 'active', workerUp: true, acousticReady: true }, link: { linkId: 1, peerPublicKey: 'npub1peer' },
-};
+  transport: { transportId: 2, type: 'sound' as const, state: 'active' as const, workerUp: true as const, acousticReady: true as const }, link: { linkId: 1, peerPublicKey: 'npub1peer' },
+} as const;
 
 describe('isolation attestation', () => {
   it('returns one bounded nonce-bound Sound-only response with a canonical digest', async () => {
@@ -25,7 +25,7 @@ describe('isolation attestation', () => {
     await expect(responder.attest({ schemaVersion: 1, challenge: 'bad' })).rejects.toThrow('challenge_invalid');
     await responder.attest({ schemaVersion: 1, challenge });
     await expect(responder.attest({ schemaVersion: 1, challenge })).rejects.toThrow('challenge_replayed');
-    const invalid = createIsolationResponder({ now: () => now, snapshot: async () => ({ ...snapshot, transport: { ...snapshot.transport, acousticReady: false } }) });
+    const invalid = createIsolationResponder({ now: () => now, snapshot: async () => ({ ...snapshot, transport: { ...snapshot.transport, acousticReady: false } } as never) });
     await expect(invalid.attest({ schemaVersion: 1, challenge: randomBytes(32).toString('base64url') })).rejects.toThrow('snapshot_invalid');
     await responder.close(); await invalid.close();
   });
