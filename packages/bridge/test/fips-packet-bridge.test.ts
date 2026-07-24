@@ -35,6 +35,9 @@ async function createBridge(): Promise<BridgeServer> {
 async function drainBridge(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
   await new Promise<void>((resolve) => setImmediate(resolve));
+  // ws message dispatch can be scheduled after the immediate queue on a busy
+  // runner; wait one bounded turn before inspecting terminal rejection state.
+  await new Promise<void>((resolve) => setTimeout(resolve, 5));
 }
 
 function packet(epoch: number, sequence: bigint, payload: Buffer): Buffer {
