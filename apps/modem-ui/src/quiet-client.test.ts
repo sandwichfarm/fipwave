@@ -4,6 +4,7 @@ import {
   QUIET_DATA_BYTES,
   QUIET_ENVELOPE_BYTES,
   QuietReceiverEvidence,
+  SerialTransmissionQueue,
   closeAudioContexts,
   decodeFragment,
   decodeResetFrame,
@@ -75,6 +76,50 @@ describe('Quiet fixed audible envelope', () => {
 });
 
 describe('Quiet lifecycle and FWAV reset boundary', () => {
+  const flushQueueStart = async (): Promise<void> => {
+    await Promise.resolve();
+    await Promise.resolve();
+  };
+
+  it('serializes modem transmissions instead of replacing an active transmitter', async () => {
+    const queue = new SerialTransmissionQueue();
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+
+    const first = queue.enqueue(async () => { events.push('start:first'); await firstGate; events.push('finish:first'); });
+    const second = queue.enqueue(async () => { events.push('start:second'); events.push('finish:second'); });
+    await flushQueueStart();
+    expect(events).toEqual(['start:first']);
+
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(events).toEqual(['start:first', 'finish:first', 'start:second', 'finish:second']);
+  });
+
+  it('invalidates queued prior-generation transmissions on reset before accepting fresh work', async () => {
+    const queue = new SerialTransmissionQueue();
+    let releaseActive!: () => void;
+    const activeGate = new Promise<void>((resolve) => { releaseActive = resolve; });
+    const events: string[] = [];
+
+    const active = queue.enqueue(async () => { events.push('start:active'); await activeGate; events.push('finish:active'); });
+    const stale = queue.enqueue(async () => { events.push('stale'); });
+    const staleResult = stale.then(
+      () => 'resolved',
+      (error: unknown) => error instanceof Error ? error.message : String(error),
+    );
+    await flushQueueStart();
+    queue.reset();
+    const fresh = queue.enqueue(async () => { events.push('fresh'); });
+    releaseActive();
+
+    await active;
+    expect(await staleResult).toContain('cancelled by reset');
+    await fresh;
+    expect(events).toEqual(['start:active', 'finish:active', 'fresh']);
+  });
+
   it('closes every tracked live AudioContext and leaves already-closed contexts alone', async () => {
     const live = { state: 'running', close: vi.fn(async () => undefined) };
     const suspended = { state: 'suspended', close: vi.fn(async () => undefined) };

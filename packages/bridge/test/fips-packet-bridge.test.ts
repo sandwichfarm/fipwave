@@ -327,12 +327,34 @@ describe('FIPS packet bridge', () => {
     expect(decodeFrame(Buffer.from(armFrame as Buffer))).toMatchObject({ type: MessageType.BROWSER_ARM, epoch: 1, payload: expect.any(Buffer) });
     expect(decodeFrame(Buffer.from(armFrame as Buffer)).payload).toHaveLength(64);
 
+    const firstCapability = Buffer.from(browser.readinessCapability!);
+    const rotatedCapability = new Promise<Buffer>((resolve) => {
+      const onMessage = (raw: WebSocket.RawData) => {
+        try {
+          const message = JSON.parse(Buffer.from(raw as Buffer).toString('utf8')) as Record<string, unknown>;
+          if (message.kind === 'acoustic-capability' && typeof message.capability === 'string') {
+            browser.off('message', onMessage); resolve(Buffer.from(message.capability, 'hex'));
+          }
+        } catch { /* Binary disarm controls are delivered only to FIPS. */ }
+      };
+      browser.on('message', onMessage);
+    });
     const disarmed = once(fips, 'message');
     browser.send(acousticDisarm(browser, 1));
     const [disarmFrame] = await disarmed;
     expect(decodeFrame(Buffer.from(disarmFrame as Buffer))).toMatchObject({ type: MessageType.BROWSER_DISARM, epoch: 1, payload: expect.any(Buffer) });
     expect(decodeFrame(Buffer.from(disarmFrame as Buffer)).payload).toHaveLength(16);
+    browser.readinessCapability = await rotatedCapability;
+    expect(browser.readinessCapability.equals(firstCapability)).toBe(false);
 
+    const rearmed = once(fips, 'message');
+    browser.send(acousticReady(browser, 1));
+    expect(decodeFrame(Buffer.from((await rearmed)[0] as Buffer))).toMatchObject({ type: MessageType.BROWSER_ARM, epoch: 1 });
+    expect(bridge.state()).toMatchObject({ acousticReady: true });
+
+    const disarmedAgain = once(fips, 'message');
+    browser.send(acousticDisarm(browser, 1));
+    expect(decodeFrame(Buffer.from((await disarmedAgain)[0] as Buffer))).toMatchObject({ type: MessageType.BROWSER_DISARM, epoch: 1 });
     const duplicateDisarm = expectNoMessage(fips);
     browser.close();
     await duplicateDisarm;
@@ -452,7 +474,7 @@ describe('FIPS packet bridge', () => {
     replacement.send(encodeFrame({ type: MessageType.RESET, epoch: 1, sequence: 1n, payload: Buffer.alloc(0) }));
     const [[browserReset], [transportReset]] = await Promise.all([replacementReset, fipsReset]);
     expect(decodeFrame(Buffer.from(browserReset as Buffer))).toMatchObject({ type: MessageType.RESET, epoch: 2, flags: RESET_ACK_FLAG });
-    expect(decodeFrame(Buffer.from(transportReset as Buffer))).toMatchObject({ type: MessageType.RESET, epoch: 2, flags: RESET_ACK_FLAG });
+    expect(decodeFrame(Buffer.from(transportReset as Buffer))).toMatchObject({ type: MessageType.RESET, epoch: 2, flags: 0 });
 
     const currentDelivery = once(replacement, 'message');
     fips.send(packet(2, 1n, Buffer.of(0x42)));
@@ -471,7 +493,7 @@ describe('FIPS packet bridge', () => {
     replacement.close(); fips.close();
   });
 
-  it('makes reset the single epoch authority and broadcasts binary acknowledgements to both endpoint roles', async () => {
+  it('makes reset the single epoch authority with a browser acknowledgement and canonical FIPS worker reset', async () => {
     const bridge = await createBridge();
     const browser = await openEndpoint(bridge.port, 'browser');
     const fips = await openEndpoint(bridge.port, 'fips');
@@ -490,9 +512,8 @@ describe('FIPS packet bridge', () => {
     const fipsAck = once(fips, 'message');
     await expect(bridge.reset()).resolves.toBe(2);
     const [[browserReset], [fipsReset]] = await Promise.all([browserAck, fipsAck]);
-    for (const reset of [browserReset, fipsReset]) {
-      expect(decodeFrame(Buffer.from(reset as Buffer))).toMatchObject({ type: MessageType.RESET, epoch: 2, sequence: 0n, flags: RESET_ACK_FLAG });
-    }
+    expect(decodeFrame(Buffer.from(browserReset as Buffer))).toMatchObject({ type: MessageType.RESET, epoch: 2, sequence: 0n, flags: RESET_ACK_FLAG });
+    expect(decodeFrame(Buffer.from(fipsReset as Buffer))).toMatchObject({ type: MessageType.RESET, epoch: 2, sequence: 0n, flags: 0 });
     expect(packetBridgeState(bridge)).toMatchObject({
       epoch: 2,
       rejectedFrames: 0,
@@ -534,7 +555,7 @@ describe('FIPS packet bridge', () => {
     const resetControls = (await disarmThenReset).map((raw) => decodeFrame(Buffer.from(raw as Buffer)));
     expect(resetControls).toEqual([
       expect.objectContaining({ type: MessageType.BROWSER_DISARM, epoch: 1, sequence: 0n }),
-      expect.objectContaining({ type: MessageType.RESET, epoch: 2, sequence: 0n, flags: RESET_ACK_FLAG }),
+      expect.objectContaining({ type: MessageType.RESET, epoch: 2, sequence: 0n, flags: 0 }),
     ]);
     expect(bridge.state()).toMatchObject({ acousticReady: false });
 

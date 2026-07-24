@@ -14,6 +14,7 @@ export type EvidenceClass = 'Fixture' | 'Loopback' | 'Open air';
 export interface RunnerConfig {
   machineId: string;
   role: Role;
+  fipsNetwork?: Readonly<{ localPublicKey: string; peerPublicKey: string; localIpv6: string; peerIpv6: string }>;
   reportTarget: string;
   tunEvidence: string;
   evidenceMode: EvidenceClass;
@@ -59,6 +60,32 @@ type QuietRuntimeWindow = Window & {
 
 declare global { interface Window { Quiet?: QuietApi; } }
 
+/**
+ * Quiet exposes a single mutable transmitter. Starting another transmission
+ * destroys the current one, so every caller must share one FIFO boundary.
+ * Reset invalidates work that has not started without allowing it to overlap
+ * the next armed generation.
+ */
+export class SerialTransmissionQueue {
+  #generation = 0;
+  #tail: Promise<void> = Promise.resolve();
+
+  enqueue(task: () => Promise<void>): Promise<void> {
+    const generation = this.#generation;
+    const ready = this.#tail.catch(() => undefined);
+    const current = ready.then(() => {
+      if (generation !== this.#generation) throw new Error('Quiet transmission cancelled by reset');
+      return task();
+    });
+    this.#tail = current;
+    return current;
+  }
+
+  reset(): void {
+    this.#generation += 1;
+  }
+}
+
 const encoder = new TextEncoder();
 const seed = 'fipwave-phase-01-corpus-v1';
 const FWAV_HEADER_BYTES = 32;
@@ -87,6 +114,7 @@ export async function fetchRunnerConfig(): Promise<Readonly<RunnerConfig>> {
   const value = await response.json() as Partial<RunnerConfig>;
   const evidenceClass = value.evidenceClass;
   const acoustic = value.acoustic;
+  const fipsNetwork = value.fipsNetwork;
   const integerBetween = (input: unknown, minimum: number, maximum: number): input is number => Number.isInteger(input) && typeof input === 'number' && input >= minimum && input <= maximum;
   const exactRecord = (input: unknown, keys: readonly string[]): input is Record<string, unknown> => !!input && typeof input === 'object' && !Array.isArray(input) && Object.keys(input).length === keys.length && keys.every((key) => key in input);
   const validCandidate = (candidate: unknown): candidate is NonNullable<RunnerConfig['acoustic']>['candidates'][number] => {
@@ -95,7 +123,7 @@ export async function fetchRunnerConfig(): Promise<Readonly<RunnerConfig>> {
     return typeof record.id === 'string' && /^[a-z0-9][a-z0-9-]{2,63}$/.test(record.id)
       && record.profileId === 'quiet-audible-7k-v1'
       && integerBetween(record.payloadBytes, 96, 217)
-      && record.repetition === 1
+      && integerBetween(record.repetition, 1, 3)
       && integerBetween(record.guardMs, 1, 5_000)
       && (record.playbackGain === 1 || record.playbackGain === 2)
       && integerBetween(record.ackTimeoutMs, 4_000, 15_000);
@@ -114,12 +142,19 @@ export async function fetchRunnerConfig(): Promise<Readonly<RunnerConfig>> {
       && integerBetween(calibration.deadlineMs, 1, 120_000)
       && calibration.maximumPlaybackGain === 2;
   })();
+  const validFipsNetwork = exactRecord(fipsNetwork, ['localPublicKey', 'peerPublicKey', 'localIpv6', 'peerIpv6']) && (() => {
+    const npub = (input: unknown): input is string => typeof input === 'string' && /^npub1[0-9a-z]{20,100}$/.test(input);
+    const ipv6 = (input: unknown): input is string => typeof input === 'string' && /^fd[0-9a-f]{2}:[0-9a-f:]+$/i.test(input);
+    return npub(fipsNetwork.localPublicKey) && npub(fipsNetwork.peerPublicKey)
+      && ipv6(fipsNetwork.localIpv6) && ipv6(fipsNetwork.peerIpv6);
+  })();
   // Local audio preflight/bridge UI predates the acoustic calibration contract
   // and remains valid without an acoustic peer.  If a runner supplies the
   // acoustic projection it must still pass the exact fail-closed schema above.
-  if (!value.machineId || (value.role !== 'A' && value.role !== 'B') || !value.reportTarget || !value.tunEvidence || !evidenceClass || !['Fixture', 'Loopback', 'Open air'].includes(evidenceClass) || value.evidenceMode !== evidenceClass || (acoustic !== undefined && !validAcoustic)) throw new Error('runner qualification configuration is invalid');
+  if (!value.machineId || (value.role !== 'A' && value.role !== 'B') || !value.reportTarget || !value.tunEvidence || !evidenceClass || !['Fixture', 'Loopback', 'Open air'].includes(evidenceClass) || value.evidenceMode !== evidenceClass || (acoustic !== undefined && !validAcoustic) || (fipsNetwork !== undefined && !validFipsNetwork)) throw new Error('runner qualification configuration is invalid');
   const publicAcoustic = validAcoustic ? Object.freeze({ profiles: ['quiet-audible-7k-v1'] as ['quiet-audible-7k-v1'], ranges: Object.freeze({ ...(acoustic as NonNullable<RunnerConfig['acoustic']>).ranges }), candidates: Object.freeze((acoustic as NonNullable<RunnerConfig['acoustic']>).candidates.map((candidate) => Object.freeze({ ...candidate }))), calibration: Object.freeze({ ...(acoustic as NonNullable<RunnerConfig['acoustic']>).calibration }) }) : undefined;
-  return Object.freeze({ machineId: value.machineId, role: value.role, reportTarget: value.reportTarget, tunEvidence: value.tunEvidence, evidenceMode: evidenceClass, evidenceClass, ...(publicAcoustic ? { acoustic: publicAcoustic } : {}) });
+  const publicFipsNetwork = validFipsNetwork ? Object.freeze({ ...fipsNetwork }) : undefined;
+  return Object.freeze({ machineId: value.machineId, role: value.role, reportTarget: value.reportTarget, tunEvidence: value.tunEvidence, evidenceMode: evidenceClass, evidenceClass, ...(publicFipsNetwork ? { fipsNetwork: publicFipsNetwork } : {}), ...(publicAcoustic ? { acoustic: publicAcoustic } : {}) });
 }
 
 export function directionForRole(role: Role): LiteralDirection { return role === 'A' ? 'A → B' : 'B → A'; }
@@ -317,6 +352,7 @@ export class QuietClient {
   #outputGains = new Set<GainNode>();
   #generation = 0;
   #cancelTransmission: (() => void) | undefined;
+  #transmissions = new SerialTransmissionQueue();
   #unitHandler: ((unit: Uint8Array) => void) | undefined;
   #metrics: QuietMetrics = { captureHighWaterBytes: 0, captureHighWaterMs: 0, playbackHighWaterBytes: 0, playbackHighWaterMs: 0, discontinuities: 0 };
 
@@ -415,10 +451,15 @@ export class QuietClient {
   }
 
   /** Resolves only after local `onFinish` and the fixed local guard. */
-  async sendUnit(unit: Uint8Array, epoch = this.#epoch): Promise<void> {
-    const runtime = this.#runtimeWindow;
-    if (!(unit instanceof Uint8Array) || unit.byteLength < 1 || unit.byteLength > QUIET_FRAME_BYTES || epoch === undefined || epoch !== this.#epoch || !runtime?.Quiet || !this.#receiver) throw new Error('Quiet is not armed');
+  sendUnit(unit: Uint8Array, epoch = this.#epoch): Promise<void> {
+    const queued = unit.slice();
     const generation = this.#generation;
+    return this.#transmissions.enqueue(() => this.transmitUnitNow(queued, epoch, generation));
+  }
+
+  private async transmitUnitNow(unit: Uint8Array, epoch: number | undefined, generation: number): Promise<void> {
+    const runtime = this.#runtimeWindow;
+    if (unit.byteLength < 1 || unit.byteLength > QUIET_FRAME_BYTES || generation !== this.#generation || epoch === undefined || epoch !== this.#epoch || !runtime?.Quiet || !this.#receiver) throw new Error('Quiet is not armed');
     const startedAt = performance.now();
     this.#metrics.playbackHighWaterBytes = Math.max(this.#metrics.playbackHighWaterBytes, unit.byteLength);
     await new Promise<void>((resolve, reject) => {
@@ -465,6 +506,7 @@ export class QuietClient {
 
   async reset(): Promise<void> {
     this.#generation += 1;
+    this.#transmissions.reset();
     this.#cancelTransmission?.();
     this.#cancelTransmission = undefined;
     this.#transmitter?.destroy(); this.#receiver?.destroy(); this.#transmitter = undefined; this.#receiver = undefined; this.#track?.stop(); this.#track = undefined; this.#applied = undefined; this.#contextSampleRate = undefined; this.#outputGains.clear(); this.#acousticRepetition = 1; this.#acousticGuardMs = QUIET_GUARD_MS; this.#metrics = { captureHighWaterBytes: 0, captureHighWaterMs: 0, playbackHighWaterBytes: 0, playbackHighWaterMs: 0, discontinuities: 0 };

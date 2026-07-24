@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { AcousticSession, type AcousticModem, type AcousticSessionOptions } from './acoustic-session.js';
 import { decodeFas1, encodeFas1, Fas1UnitType } from './acoustic-protocol.js';
+import { SerialTransmissionQueue } from './quiet-client.js';
 
 class FakeModem implements AcousticModem {
   #handler: ((unit: Uint8Array) => void) | undefined;
@@ -43,6 +44,52 @@ class DeferredModem extends FakeModem {
   rejectNext(error = new Error('playback failed')): void { this.pending.shift()?.reject(error); }
 }
 
+/**
+ * Silent end-to-end modem seam with the same asynchronous FIFO contract as
+ * QuietClient. Unlike FakeModem, a send does not reach the peer synchronously.
+ */
+class SerialLoopbackModem implements AcousticModem {
+  #handler: ((unit: Uint8Array) => void) | undefined;
+  #queue = new SerialTransmissionQueue();
+  #tail: Promise<void> = Promise.resolve();
+  #active = 0;
+  pending = 0;
+  maxActive = 0;
+  peer: SerialLoopbackModem | undefined;
+  readonly sent: Uint8Array[] = [];
+
+  send(unit: Uint8Array): Promise<void> {
+    const copied = unit.slice();
+    this.pending += 1;
+    const completion = this.#queue.enqueue(async () => {
+      this.#active += 1;
+      this.maxActive = Math.max(this.maxActive, this.#active);
+      await Promise.resolve();
+      this.sent.push(copied);
+      const peer = this.peer;
+      if (peer) peer.#handler?.(copied.slice());
+      this.#active -= 1;
+    });
+    this.#tail = completion.finally(() => { this.pending -= 1; }).catch(() => undefined);
+    return completion;
+  }
+
+  onUnit(handler: (unit: Uint8Array) => void): () => void {
+    this.#handler = handler;
+    return () => { if (this.#handler === handler) this.#handler = undefined; };
+  }
+
+  applyCandidate(): void {}
+
+  async settle(): Promise<void> {
+    let current: Promise<void>;
+    do {
+      current = this.#tail;
+      await current;
+    } while (current !== this.#tail);
+  }
+}
+
 class FakeTimers {
   #callbacks = new Map<number, { callback: () => void; dueAtMs: number }>();
   #next = 1;
@@ -74,7 +121,7 @@ const candidate = {
   ackTimeoutMs: 4_000,
 } as const;
 
-function options(role: 'A' | 'B', modem: FakeModem): AcousticSessionOptions {
+function options(role: 'A' | 'B', modem: AcousticModem): AcousticSessionOptions {
   return {
     role,
     identity: role === 'A' ? 'npub-a' : 'npub-b',
@@ -96,6 +143,55 @@ async function settlePair(a: AcousticSession, b: AcousticSession): Promise<void>
 }
 
 describe('AcousticSession bootstrap handshake', () => {
+  it('reaches readiness and transfers byte-perfect packets both ways through the asynchronous serialized playback contract', async () => {
+    const aModem = new SerialLoopbackModem();
+    const bModem = new SerialLoopbackModem();
+    aModem.peer = bModem;
+    bModem.peer = aModem;
+    const receivedA: Uint8Array[] = [];
+    const receivedB: Uint8Array[] = [];
+    const a = new AcousticSession({ ...options('A', aModem), onPacket: (packet) => receivedA.push(packet) });
+    const b = new AcousticSession({ ...options('B', bModem), onPacket: (packet) => receivedB.push(packet) });
+    const settleSerializedPair = async (): Promise<void> => {
+      let idleSweeps = 0;
+      for (let round = 0; round < 64; round += 1) {
+        await aModem.settle();
+        await bModem.settle();
+        await a.settle();
+        await b.settle();
+        await Promise.resolve();
+        idleSweeps = aModem.pending + bModem.pending === 0 ? idleSweeps + 1 : 0;
+        if (idleSweeps === 2) return;
+      }
+      throw new Error('serialized acoustic pair did not settle');
+    };
+
+    expect(a.start()).toBe(true);
+    await settleSerializedPair();
+
+    expect({ a: a.snapshot, b: b.snapshot }).toMatchObject({
+      a: { state: 'Ready', ready: true, turnOwner: 'A' },
+      b: { state: 'Ready', ready: true, turnOwner: 'A' },
+    });
+    expect(a.snapshot.sessionId).toBe(b.snapshot.sessionId);
+    expect(a.snapshot.settingsDigest).toEqual(b.snapshot.settingsDigest);
+    expect(a.snapshot.ledger).toHaveLength(8);
+    expect(b.snapshot.ledger).toHaveLength(8);
+
+    const toB = Uint8Array.from({ length: 257 }, (_, index) => index & 0xff);
+    const toA = Uint8Array.from({ length: 257 }, (_, index) => (255 - index) & 0xff);
+    expect(a.enqueuePacket(toB, 'ordinary').accepted).toBe(true);
+    await settleSerializedPair();
+    expect(receivedB).toEqual([toB]);
+    expect(b.enqueuePacket(toA, 'ordinary').accepted).toBe(true);
+    await settleSerializedPair();
+    expect(receivedA).toEqual([toA]);
+
+    expect(aModem.maxActive).toBe(1);
+    expect(bModem.maxActive).toBe(1);
+    expect(aModem.pending + bModem.pending).toBe(0);
+  });
+
   it('allows only A to initiate and carries the pair into A-to-B calibration over encoded FAS1 units', () => {
     const aModem = new FakeModem();
     const bModem = new FakeModem();
@@ -172,6 +268,52 @@ describe('AcousticSession bootstrap handshake', () => {
     expect(b.snapshot.state).toBe('Listening');
   });
 
+  it('retries a lost capability frame and completes the handshake without operator ordering', async () => {
+    const timers = new FakeTimers();
+    const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
+    let droppedCaps = false;
+    aModem.shouldDeliver = (raw) => {
+      if (!droppedCaps && decodeFas1(raw).type === Fas1UnitType.Caps) { droppedCaps = true; return false; }
+      return true;
+    };
+    const a = new AcousticSession({ ...options('A', aModem), timers });
+    const b = new AcousticSession({ ...options('B', bModem), timers });
+
+    a.start();
+    expect({ a: a.snapshot.state, b: b.snapshot.state }).toEqual({ a: 'CapsSent', b: 'HelloAckSent' });
+    await settlePair(a, b);
+    timers.runAll();
+    await settlePair(a, b);
+
+    expect(droppedCaps).toBe(true);
+    expect({ a: a.snapshot.ready, b: b.snapshot.ready }).toEqual({ a: true, b: true });
+    expect(a.snapshot.counters.retries + b.snapshot.counters.retries).toBeGreaterThan(0);
+  });
+
+  it('starts each handshake retry timeout only after the preceding playback completes', async () => {
+    const timers = new FakeTimers();
+    const modem = new DeferredModem();
+    modem.defer = true;
+    const a = new AcousticSession({ ...options('A', modem), timers });
+
+    expect(a.start()).toBe(true);
+    expect(modem.pending).toHaveLength(1);
+    expect(timers.count(2_500)).toBe(0);
+
+    modem.releaseNext();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(timers.count(2_500)).toBe(1);
+
+    timers.runAll();
+    expect(modem.pending).toHaveLength(1);
+    expect(timers.count(2_500)).toBe(0);
+    modem.releaseNext();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(timers.count(2_500)).toBe(1);
+  });
+
   it('accepts an exact capability boundary and rejects a one-byte non-overlap before transition', () => {
     const exactA = new FakeModem(); const exactB = new FakeModem(); exactA.peer = exactB; exactB.peer = exactA;
     const a = new AcousticSession({ ...options('A', exactA), ranges: { minPayloadBytes: 96, maxPayloadBytes: 96 } });
@@ -215,6 +357,54 @@ describe('AcousticSession calibration, selection, and commitment', () => {
     expect(probes.slice(4).map((probe) => probe.body[0])).toEqual([2, 2, 2, 2]);
   });
 
+  it('retries a lost calibration report and replays the cached observation without stalling the sweep', async () => {
+    const timers = new FakeTimers();
+    const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
+    let droppedReport = false;
+    aModem.shouldDeliver = (raw) => {
+      if (!droppedReport && decodeFas1(raw).type === Fas1UnitType.Report) { droppedReport = true; return false; }
+      return true;
+    };
+    const a = new AcousticSession({ ...options('A', aModem), timers });
+    const b = new AcousticSession({ ...options('B', bModem), timers });
+
+    a.start();
+    expect(droppedReport).toBe(true);
+    expect({ a: a.snapshot.state, b: b.snapshot.state }).toEqual({ a: 'CalibratingBToA', b: 'CalibratingBToA' });
+    await settlePair(a, b);
+    timers.runAll();
+    await settlePair(a, b);
+
+    expect({ a: a.snapshot.ready, b: b.snapshot.ready }).toEqual({ a: true, b: true });
+    expect(a.snapshot.ledger).toHaveLength(8);
+    expect(b.snapshot.ledger).toHaveLength(8);
+    expect(a.snapshot.counters.duplicates).toBeGreaterThan(0);
+    expect(b.snapshot.counters.retries).toBeGreaterThan(0);
+  });
+
+  it('retries a lost commit acknowledgement and replays the committed digest without stalling readiness', async () => {
+    const timers = new FakeTimers();
+    const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
+    let droppedCommitAck = false;
+    aModem.shouldDeliver = (raw) => {
+      if (!droppedCommitAck && decodeFas1(raw).type === Fas1UnitType.CommitAck) { droppedCommitAck = true; return false; }
+      return true;
+    };
+    const a = new AcousticSession({ ...options('A', aModem), timers });
+    const b = new AcousticSession({ ...options('B', bModem), timers });
+
+    a.start();
+    await settlePair(a, b);
+    expect(droppedCommitAck).toBe(true);
+    expect({ a: a.snapshot.state, b: b.snapshot.state }).toEqual({ a: 'AwaitingHeartbeat', b: 'Committing' });
+    timers.runAll();
+    await settlePair(a, b);
+
+    expect({ a: a.snapshot.ready, b: b.snapshot.ready }).toEqual({ a: true, b: true });
+    expect(a.snapshot.counters.duplicates).toBeGreaterThan(0);
+    expect(b.snapshot.counters.retries).toBeGreaterThan(0);
+  });
+
   it('sweeps a failed warm candidate through later fallbacks and commits different literal directional winners', async () => {
     const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
     const candidates = [
@@ -245,13 +435,15 @@ describe('AcousticSession calibration, selection, and commitment', () => {
     expect(entry.observation).toEqual({ received: false, bytePerfect: false, corrupt: true, missing: true, duplicate: true, discontinuity: true, latencyMs: 42, signalDb: -37.5, clipping: true, confidence: 0.25 });
   });
 
-  it('enters a bounded safe error on deadline or a mismatched COMMIT digest', async () => {
+  it('keeps retrying recoverable calibration loss but rejects a mismatched COMMIT digest', async () => {
     const timers = new FakeTimers(); const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
     aModem.shouldDeliver = (raw) => decodeFas1(raw).type !== Fas1UnitType.Probe;
     const a = new AcousticSession({ ...options('A', aModem), timers }); const b = new AcousticSession({ ...options('B', bModem), timers });
-    a.start(); timers.runAll();
-    expect(a.snapshot).toMatchObject({ state: 'Error', ready: false, reason: 'acoustic_calibration_deadline' });
-    expect(b.snapshot).toMatchObject({ state: 'Error', ready: false, reason: 'acoustic_calibration_deadline' });
+    a.start();
+    for (let round = 0; round < 10; round += 1) timers.runAll();
+    expect(a.snapshot).toMatchObject({ state: 'CalibratingAToB', ready: false });
+    expect(b.snapshot).toMatchObject({ state: 'CalibratingAToB', ready: false });
+    expect(a.snapshot.counters.retries).toBeGreaterThanOrEqual(10);
 
     const cModem = new FakeModem(); const dModem = new FakeModem(); cModem.peer = dModem; dModem.peer = cModem;
     dModem.transform = (raw) => {
@@ -312,6 +504,28 @@ describe('AcousticSession packet, fragment, reassembly, retry, duplicate, and tu
     expect(data.filter((unit) => unit.fragmentIndex === 2).length).toBeGreaterThan(1);
     expect(data.filter((unit) => unit.fragmentIndex >= 4)).toHaveLength(11);
     expect(a.snapshot.counters.retries).toBeGreaterThan(0);
+  });
+
+  it('preserves one token owner after a lost ACK and still drains queued packets in both directions', async () => {
+    const timers = new FakeTimers(); const clock = new ManualClock();
+    const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
+    const receivedA: Uint8Array[] = []; const receivedB: Uint8Array[] = []; let droppedAck = false;
+    bModem.shouldDeliver = (raw) => {
+      if (!droppedAck && decodeFas1(raw).type === Fas1UnitType.Ack) { droppedAck = true; return false; }
+      return true;
+    };
+    const a = new AcousticSession({ ...options('A', aModem), clock, timers, onPacket: (packet) => receivedA.push(packet) });
+    const b = new AcousticSession({ ...options('B', bModem), clock, timers, onPacket: (packet) => receivedB.push(packet) });
+    a.start(); await settlePair(a, b);
+
+    expect(b.enqueuePacket(Uint8Array.of(0xb0), 'ordinary').accepted).toBe(true);
+    expect(a.enqueuePacket(Uint8Array.of(0xa0), 'ordinary').accepted).toBe(true);
+    for (let round = 0; round < 32; round += 1) timers.runAll();
+
+    expect(droppedAck).toBe(true);
+    expect(receivedA).toEqual([Uint8Array.of(0xb0)]);
+    expect(receivedB).toEqual([Uint8Array.of(0xa0)]);
+    expect(a.snapshot.turnOwner).toBe(b.snapshot.turnOwner);
   });
 
   it('ignores a held prior-session/packet ACK while a new packet has its own active turn', async () => {
@@ -409,7 +623,7 @@ describe('AcousticSession priority, backpressure, heartbeat, degraded recovery, 
     expect(failed.snapshot.counters.retries).toBe(0);
   });
 
-  it('queues simultaneous heartbeat and data work behind the current turn and serializes it with a guarded token handoff', async () => {
+  it('treats queued packet work as liveness and sends an idle heartbeat only after data', async () => {
     const timers = new FakeTimers(); const clock = new ManualClock();
     const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
     const a = new AcousticSession({ ...options('A', aModem), clock, timers }); const b = new AcousticSession({ ...options('B', bModem), clock, timers });
@@ -417,7 +631,7 @@ describe('AcousticSession priority, backpressure, heartbeat, degraded recovery, 
     expect(a.snapshot.turnOwner).toBe('A');
 
     // B's timer fires while A owns the acoustic turn: it queues work but
-    // cannot touch the modem.  A's simultaneous timer owns the first frame.
+    // cannot touch the modem. Queued FIPS data wins the next local turn.
     const bBefore = bModem.sent.length;
     expect(b.heartbeat()).toBe(true);
     expect(bModem.sent).toHaveLength(bBefore);
@@ -430,11 +644,11 @@ describe('AcousticSession priority, backpressure, heartbeat, degraded recovery, 
     const bUnits = bModem.sent.slice(bBefore).map(decodeFas1);
     const heartbeatIndex = bUnits.findIndex((unit) => unit.type === Fas1UnitType.Heartbeat);
     const dataIndex = bUnits.findIndex((unit) => unit.type === Fas1UnitType.Data);
-    expect(heartbeatIndex).toBeGreaterThanOrEqual(0);
-    expect(dataIndex).toBeGreaterThan(heartbeatIndex);
+    expect(dataIndex).toBeGreaterThanOrEqual(0);
+    expect(heartbeatIndex).toBeGreaterThan(dataIndex);
   });
 
-  it('uses stable control, heartbeat, ordinary priority with FIFO within each class and rejects a fifth complete packet before retaining bytes', async () => {
+  it('uses stable control, heartbeat, ordinary priority with FIFO and bounds the FIPS control burst queue at sixteen packets', async () => {
     const timers = new FakeTimers(); const clock = new ManualClock();
     const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
     const a = new AcousticSession({ ...options('A', aModem), clock, timers }); const b = new AcousticSession({ ...options('B', bModem), clock, timers });
@@ -443,16 +657,17 @@ describe('AcousticSession priority, backpressure, heartbeat, degraded recovery, 
     expect(b.enqueuePacket(Uint8Array.of(2), 'control').accepted).toBe(true);
     expect(b.enqueuePacket(Uint8Array.of(3), 'heartbeat').accepted).toBe(true);
     expect(b.enqueuePacket(Uint8Array.of(4), 'ordinary').accepted).toBe(true);
-    expect(b.enqueuePacket(Uint8Array.of(5), 'ordinary')).toEqual({ accepted: false, reason: 'acoustic_queue_full' });
-    expect(b.snapshot.counters).toMatchObject({ queuedPackets: 4, queuedBytes: 4 });
+    for (let value = 5; value <= 16; value += 1) expect(b.enqueuePacket(Uint8Array.of(value), 'ordinary').accepted).toBe(true);
+    expect(b.enqueuePacket(Uint8Array.of(17), 'ordinary')).toEqual({ accepted: false, reason: 'acoustic_queue_full' });
+    expect(b.snapshot.counters).toMatchObject({ queuedPackets: 16, queuedBytes: 16 });
 
     expect(a.enqueuePacket(Uint8Array.of(9), 'ordinary').accepted).toBe(true);
     for (let round = 0; round < 16; round += 1) timers.runAll();
     const bData = bModem.sent.map(decodeFas1).filter((unit) => unit.type === Fas1UnitType.Data).map((unit) => unit.body[0]);
-    expect(bData).toEqual([2, 3, 1, 4]);
+    expect(bData.slice(0, 4)).toEqual([2, 3, 1, 4]);
   });
 
-  it('disarms once on repeated missed heartbeats, accepts only a current-session heartbeat for finite recovery, and reaches one terminal error on exhaustion', async () => {
+  it('disarms on a missed heartbeat, accepts current-session recovery, and never makes recoverable loss terminal', async () => {
     const timers = new FakeTimers(); const clock = new ManualClock();
     const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
     const a = new AcousticSession({ ...options('A', aModem), clock, timers }); const b = new AcousticSession({ ...options('B', bModem), clock, timers });
@@ -465,7 +680,7 @@ describe('AcousticSession priority, backpressure, heartbeat, degraded recovery, 
     expect(a.snapshot).toMatchObject({ state: 'Ready', ready: true });
 
     a.markHeartbeatMissed(); timers.runAll(); a.markHeartbeatMissed(); timers.runAll(); a.markHeartbeatMissed(); timers.runAll();
-    expect(a.snapshot).toMatchObject({ state: 'Error', ready: false, reason: 'acoustic_recovery_exhausted' });
-    expect(a.snapshot.counters.queuedPackets).toBe(0);
+    expect(a.snapshot).toMatchObject({ state: 'Recovering', ready: false });
+    expect(a.snapshot.reason).toBeUndefined();
   });
 });

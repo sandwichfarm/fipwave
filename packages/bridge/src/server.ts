@@ -57,6 +57,7 @@ export interface RunnerAcousticCalibration {
 export interface RunnerQualificationConfig {
   machineId: string;
   role: 'A' | 'B';
+  fipsNetwork?: Readonly<{ localPublicKey: string; peerPublicKey: string; localIpv6: string; peerIpv6: string }>;
   reportTarget: string;
   tunEvidence: string;
   tunEvidenceSource: TunEvidence['source'];
@@ -159,6 +160,7 @@ function contentType(file: string): string {
 function immutableConfig(config: RunnerQualificationConfig): RunnerQualificationConfig {
   return Object.freeze({
     ...config,
+    ...(config.fipsNetwork ? { fipsNetwork: Object.freeze({ ...config.fipsNetwork }) } : {}),
     codec: Object.freeze({ ...config.codec }),
     acoustic: Object.freeze({
       profiles: [...config.acoustic.profiles] as ['quiet-audible-7k-v1'],
@@ -912,8 +914,11 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     }
     clearQueues(); reconnectAllowed = true; reconnectRequiresReset = false;
     await persist(generation);
-    const resetFrame = encodeFrame({ type: MessageType.RESET, flags: RESET_ACK_FLAG, epoch: state.epoch, sequence: 0n, payload: Buffer.alloc(0) });
-    for (const client of clients) if (client.readyState === client.OPEN) client.send(resetFrame);
+    const browserResetAck = encodeFrame({ type: MessageType.RESET, flags: RESET_ACK_FLAG, epoch: state.epoch, sequence: 0n, payload: Buffer.alloc(0) });
+    const fipsWorkerReset = encodeFrame({ type: MessageType.RESET, epoch: state.epoch, sequence: 0n, payload: Buffer.alloc(0) });
+    for (const client of clients) {
+      if (client.readyState === client.OPEN) client.send(client === fipsOwner ? fipsWorkerReset : browserResetAck);
+    }
     broadcastSession();
     return state.epoch;
   };
@@ -1197,6 +1202,10 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
         } else {
           if (!acousticReadinessProof || !timingSafeEqual(frame.payload, connection.acousticCapability)) fail('acoustic_disarm_capability_invalid');
           disarmAcousticSession();
+          // The capability is intentionally single-use. Recovery in the same
+          // epoch therefore receives a fresh capability instead of replaying
+          // the just-consumed readiness proof and being disconnected.
+          issueAcousticCapability(socket, connection);
         }
         return;
       }

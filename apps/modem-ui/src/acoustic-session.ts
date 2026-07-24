@@ -71,11 +71,14 @@ const OBS_MISSING = 8;
 const OBS_DUPLICATE = 16;
 const OBS_DISCONTINUITY = 32;
 const OBS_CLIPPING = 64;
-const MAX_QUEUED_PACKETS = 4;
+const MAX_QUEUED_PACKETS = 16;
 const MAX_DELIVERED_IDS = 32;
-const MAX_PACKET_AGE_MS = 30_000;
+const MAX_PACKET_AGE_MS = 120_000;
 const MAX_ATTEMPTS = 3;
 const WINDOW_SIZE = 4;
+const HANDSHAKE_RETRY_MS = 2_500;
+const PROBE_RETRY_MS = 1_500;
+const COMMIT_RETRY_MS = 2_000;
 
 function invalid(message: string): never { throw new Error(`acoustic session ${message}`); }
 function validInteger(value: number, minimum: number, maximum: number): boolean { return Number.isSafeInteger(value) && value >= minimum && value <= maximum; }
@@ -163,6 +166,13 @@ export class AcousticSession {
   #sequence = 1;
   #unsubscribe: () => void;
   #timer: ReturnType<typeof setTimeout> | undefined;
+  #handshakeTimer: ReturnType<typeof setTimeout> | undefined;
+  #handshakeAttempts = 0;
+  #probeTimer: ReturnType<typeof setTimeout> | undefined;
+  #probeRetry: { direction: 'AtoB' | 'BtoA'; ordinal: number; attempts: number } | undefined;
+  #lastProbeReport: Partial<Record<'AtoB' | 'BtoA', { ordinal: number; body: Uint8Array }>> = {};
+  #commitTimer: ReturnType<typeof setTimeout> | undefined;
+  #commitAttempts = 0;
   #reason: string | undefined;
   #ledger: AcousticProbeLedgerEntry[] = [];
   #sentProbes: Record<'AtoB' | 'BtoA', number> = { AtoB: 0, BtoA: 0 };
@@ -236,16 +246,20 @@ export class AcousticSession {
     const nonce = this.options.nonce().slice();
     if (nonce.byteLength !== 16) invalid('nonce must be 128 bits');
     this.#localNonce = nonce; this.#sessionId = toSessionId(nonce); this.#state = 'HelloSent';
-    this.send(Fas1UnitType.Hello, 0n, encodeHandshake({ role: 'A', identity: this.options.identity, expectedPeer: this.options.expectedPeer, nonce, profiles: this.options.profiles, ranges: this.options.ranges, epoch: this.#epoch, sessionId: this.#sessionId }));
+    const completion = this.send(Fas1UnitType.Hello, 0n, encodeHandshake({ role: 'A', identity: this.options.identity, expectedPeer: this.options.expectedPeer, nonce, profiles: this.options.profiles, ranges: this.options.ranges, epoch: this.#epoch, sessionId: this.#sessionId }));
+    this.continueHandshakeAfterPlayback(completion, 'HelloSent');
     return true;
   }
 
   reset(epoch: number): void {
     if (!validInteger(epoch, 0, 0xffff_ffff)) invalid('epoch is invalid');
     if (this.#timer !== undefined) this.options.timers.clearTimeout(this.#timer);
+    this.clearHandshakeRetry();
+    this.clearProbeRetry();
+    this.clearCommitRetry();
     if (this.#deliveryTimer !== undefined) this.options.timers.clearTimeout(this.#deliveryTimer);
     this.clearHeartbeatTimers(); this.#generation += 1;
-    this.#timer = undefined; this.#deliveryTimer = undefined; this.#epoch = epoch; this.#sessionId = undefined; this.#localNonce = undefined; this.#peerNonce = undefined; this.#sequence = 1; this.#reason = undefined; this.#ledger = []; this.#sentProbes = { AtoB: 0, BtoA: 0 }; this.#receivedReports = { AtoB: 0, BtoA: 0 }; this.#receivedProbes = { AtoB: 0, BtoA: 0 }; this.#selected = {}; this.#settings = undefined; this.#settingsDigest = undefined; this.#lastHeartbeatAtMs = undefined; this.#turnOwner = undefined; this.#heartbeatDue = false; this.#queues = { control: [], heartbeat: [], ordinary: [] }; this.#active = undefined; this.#inbound = undefined; this.#lastAck = undefined; this.#delivered.clear(); this.#awaitingAck = false; this.#work = Promise.resolve(); this.#state = this.options.role === 'A' ? 'Idle' : 'Listening';
+    this.#timer = undefined; this.#deliveryTimer = undefined; this.#epoch = epoch; this.#sessionId = undefined; this.#localNonce = undefined; this.#peerNonce = undefined; this.#sequence = 1; this.#reason = undefined; this.#ledger = []; this.#sentProbes = { AtoB: 0, BtoA: 0 }; this.#receivedReports = { AtoB: 0, BtoA: 0 }; this.#receivedProbes = { AtoB: 0, BtoA: 0 }; this.#lastProbeReport = {}; this.#selected = {}; this.#settings = undefined; this.#settingsDigest = undefined; this.#lastHeartbeatAtMs = undefined; this.#turnOwner = undefined; this.#heartbeatDue = false; this.#queues = { control: [], heartbeat: [], ordinary: [] }; this.#active = undefined; this.#inbound = undefined; this.#lastAck = undefined; this.#delivered.clear(); this.#awaitingAck = false; this.#work = Promise.resolve(); this.#state = this.options.role === 'A' ? 'Idle' : 'Listening';
   }
 
   dispose(): void { this.reset(this.#epoch); this.#unsubscribe(); }
@@ -288,6 +302,88 @@ export class AcousticSession {
   private queueBytes(): number { return [...this.#queues.control, ...this.#queues.heartbeat, ...this.#queues.ordinary].reduce((total, item) => total + item.packet.byteLength, 0) + (this.#active?.packet.byteLength ?? 0); }
   private nextPacketId(): number { const value = this.#packetId; this.#packetId = this.#packetId === 0xffff_ffff ? 1 : this.#packetId + 1; return value; }
   private clearDeliveryTimer(): void { if (this.#deliveryTimer !== undefined) this.options.timers.clearTimeout(this.#deliveryTimer); this.#deliveryTimer = undefined; }
+  private clearHandshakeRetry(): void {
+    if (this.#handshakeTimer !== undefined) this.options.timers.clearTimeout(this.#handshakeTimer);
+    this.#handshakeTimer = undefined; this.#handshakeAttempts = 0;
+  }
+  private clearProbeRetry(): void {
+    if (this.#probeTimer !== undefined) this.options.timers.clearTimeout(this.#probeTimer);
+    this.#probeTimer = undefined;
+    this.#probeRetry = undefined;
+  }
+  private clearCommitRetry(): void {
+    if (this.#commitTimer !== undefined) this.options.timers.clearTimeout(this.#commitTimer);
+    this.#commitTimer = undefined;
+    this.#commitAttempts = 0;
+  }
+  private continueHandshakeAfterPlayback(completion: void | Promise<void>, expectedState: 'HelloSent' | 'HelloAckSent' | 'CapsSent'): void {
+    const generation = this.#generation;
+    void Promise.resolve(completion).then(
+      () => {
+        if (generation === this.#generation && this.#state === expectedState) this.armHandshakeRetry();
+      },
+      () => {
+        if (generation === this.#generation && this.#state === expectedState) this.fail('acoustic_handshake_playback_failed');
+      },
+    );
+  }
+  private armCommitRetry(): void {
+    if (this.options.role !== 'B' || this.#state !== 'Committing' || !this.#sessionId || !this.#settingsDigest || this.#commitTimer !== undefined) return;
+    const epoch = this.#epoch; const sessionId = this.#sessionId; const generation = this.#generation;
+    this.#commitTimer = this.options.timers.setTimeout(() => {
+      this.#commitTimer = undefined;
+      if (epoch !== this.#epoch || sessionId !== this.#sessionId || generation !== this.#generation || this.#state !== 'Committing' || !this.#settingsDigest) return;
+      this.#commitAttempts += 1;
+      this.#counters.retries += 1;
+      const completion = this.send(Fas1UnitType.Commit, sessionId, this.#settingsDigest);
+      void Promise.resolve(completion).then(
+        () => this.armCommitRetry(),
+        () => this.fail('acoustic_commit_failed'),
+      );
+    }, COMMIT_RETRY_MS);
+  }
+  private armProbeRetry(direction: 'AtoB' | 'BtoA', ordinal: number): void {
+    this.clearProbeRetry();
+    this.#probeRetry = { direction, ordinal, attempts: 0 };
+    const scheduleRetry = (): void => {
+      const pending = this.#probeRetry;
+      if (!pending || pending.direction !== direction || pending.ordinal !== ordinal || this.#state !== this.stateFor(direction) || this.options.role !== this.expectedSender(direction) || !this.#sessionId) return;
+      this.#probeTimer = this.options.timers.setTimeout(() => {
+        this.#probeTimer = undefined;
+        const current = this.#probeRetry;
+        if (!current || current.direction !== direction || current.ordinal !== ordinal || this.#state !== this.stateFor(direction) || this.options.role !== this.expectedSender(direction) || !this.#sessionId) return;
+        current.attempts += 1;
+        this.#counters.retries += 1;
+        const probe = this.probeFor(direction, ordinal);
+        this.options.modem.applyCandidate?.(probe.candidate);
+        const completion = this.send(Fas1UnitType.Probe, this.#sessionId, new Uint8Array([this.directionByte(direction), probe.candidateIndex, probe.probeIndex]));
+        void Promise.resolve(completion).then(
+          scheduleRetry,
+          () => this.fail('acoustic_probe_playback_failed'),
+        );
+      }, PROBE_RETRY_MS);
+    };
+    scheduleRetry();
+  }
+  private armHandshakeRetry(): void {
+    if (!['HelloSent', 'HelloAckSent', 'CapsSent'].includes(this.#state) || this.#handshakeTimer !== undefined) return;
+    const epoch = this.#epoch; const sessionId = this.#sessionId; const generation = this.#generation;
+    this.#handshakeTimer = this.options.timers.setTimeout(() => {
+      this.#handshakeTimer = undefined;
+      if (epoch !== this.#epoch || sessionId !== this.#sessionId || generation !== this.#generation || !['HelloSent', 'HelloAckSent', 'CapsSent'].includes(this.#state)) return;
+      this.#handshakeAttempts += 1; this.#counters.retries += 1;
+      const expectedState = this.#state as 'HelloSent' | 'HelloAckSent' | 'CapsSent';
+      let completion: void | Promise<void>;
+      if (this.#state === 'HelloSent' && this.#localNonce && this.#sessionId) {
+        completion = this.send(Fas1UnitType.Hello, 0n, encodeHandshake({ role: 'A', identity: this.options.identity, expectedPeer: this.options.expectedPeer, nonce: this.#localNonce, profiles: this.options.profiles, ranges: this.options.ranges, epoch: this.#epoch, sessionId: this.#sessionId }));
+      } else if (this.#state === 'HelloAckSent' && this.#localNonce && this.#peerNonce && this.#sessionId) {
+        completion = this.send(Fas1UnitType.HelloAck, this.#sessionId, encodeHandshake({ role: 'B', identity: this.options.identity, expectedPeer: this.options.expectedPeer, nonce: this.#localNonce, echoedNonce: this.#peerNonce, profiles: this.options.profiles, ranges: this.options.ranges, epoch: this.#epoch }));
+      } else if (this.#state === 'CapsSent' && this.#sessionId) {
+        completion = this.send(Fas1UnitType.Caps, this.#sessionId, this.capsBody());
+      } else return;
+      this.continueHandshakeAfterPlayback(completion, expectedState);
+    }, HANDSHAKE_RETRY_MS);
+  }
   private clearHeartbeatTimers(): void {
     if (this.#heartbeatTimer !== undefined) this.options.timers.clearTimeout(this.#heartbeatTimer);
     if (this.#heartbeatDeadline !== undefined) this.options.timers.clearTimeout(this.#heartbeatDeadline);
@@ -306,8 +402,20 @@ export class AcousticSession {
     if (this.#heartbeatDeadline !== undefined) this.options.timers.clearTimeout(this.#heartbeatDeadline);
     const deadlineGeneration = ++this.#heartbeatTimerGeneration;
     this.#heartbeatDeadline = this.options.timers.setTimeout(() => {
-      this.#heartbeatDeadline = undefined; if (deadlineGeneration === this.#heartbeatTimerGeneration && current()) this.markHeartbeatMissed();
-    }, this.ackTimeoutMs() * 2);
+      this.#heartbeatDeadline = undefined;
+      if (deadlineGeneration !== this.#heartbeatTimerGeneration || !current()) return;
+      // A queued or in-flight FIPS exchange is itself evidence that the modem
+      // is making progress. Keep the ready session armed until the burst has
+      // drained instead of disconnecting one role mid-authentication.
+      if (this.queueLength() > 0 || this.#active || this.#inbound || this.#awaitingAck) {
+        this.armHeartbeatTimers();
+        return;
+      }
+      this.markHeartbeatMissed();
+    // A complete maximum-size acoustic ARQ exchange can exceed the packet ACK
+    // timeout, especially while the initial FIPS authentication burst drains.
+    // Do not disarm a healthy, busy modem before it can produce peer liveness.
+    }, Math.max(60_000, this.ackTimeoutMs() * 4));
   }
   private outboundSettings(): DirectionalSettings { if (!this.#settings) invalid('settings are not committed'); return this.options.role === 'A' ? this.#settings.aToB : this.#settings.bToA; }
   private inboundPayloadBytes(): number { if (!this.#settings) invalid('settings are not committed'); return this.options.role === 'A' ? this.#settings.bToA.payloadBytes : this.#settings.aToB.payloadBytes; }
@@ -335,17 +443,17 @@ export class AcousticSession {
     this.expireWork();
     if (this.#state !== 'Ready' || !this.#sessionId || this.#turnOwner !== this.options.role || this.#awaitingAck) return;
     this.applyOutboundCandidate();
-    // A due heartbeat is the scheduler's highest-priority control item.  The
-    // timer only sets this bit; it never calls the modem during a peer-owned
-    // turn.  This check is after all session/generation/turn guards above.
-    if (this.#heartbeatDue) {
+    // Real acoustic playback can exceed the heartbeat interval. Packet work is
+    // itself liveness, so drain one queued FIPS packet before considering an
+    // idle heartbeat; otherwise every slow turn can starve packet transit.
+    this.#active ??= this.dequeue();
+    if (!this.#active && this.#heartbeatDue) {
       this.#heartbeatDue = false;
       this.send(Fas1UnitType.Heartbeat, this.#sessionId, new Uint8Array());
       this.send(Fas1UnitType.TurnEnd, this.#sessionId, new Uint8Array());
       this.#turnOwner = complement(this.options.role);
       return;
     }
-    this.#active ??= this.dequeue();
     if (!this.#active) {
       // A guarded empty turn keeps the deterministic token rotating.  It is
       // a scheduler operation, never a timer-side heartbeat transmission.
@@ -375,10 +483,6 @@ export class AcousticSession {
   private beginRecovery(): void {
     if (this.#state !== 'Degraded') return;
     this.#recoveryAttempts += 1;
-    if (this.#recoveryAttempts > 2) {
-      this.#state = 'Error'; this.#reason = 'acoustic_recovery_exhausted'; this.#queues = { control: [], heartbeat: [], ordinary: [] }; this.#active = undefined; this.#inbound = undefined; this.#awaitingAck = false; this.clearDeliveryTimer();
-      return;
-    }
     this.#state = 'Recovering'; this.#reason = undefined;
   }
   private onData(unit: Fas1Unit): void {
@@ -411,8 +515,14 @@ export class AcousticSession {
     // An ACK is meaningful only for a DATA packet.  Empty turns transfer
     // ownership without creating an unbound packet acknowledgement.
     if (this.#lastAck) {
-      this.sendAck(this.#lastAck.packetId, this.#lastAck.bitmap);
+      const ack = this.#lastAck;
       this.#lastAck = undefined;
+      // ACK does not transfer the token. The sender explicitly yields after
+      // receiving it, so a lost ACK cannot make both half-duplex peers believe
+      // they own the next acoustic turn.
+      this.#turnOwner = complement(this.options.role);
+      this.sendAck(ack.packetId, ack.bitmap);
+      return;
     }
     this.#turnOwner = this.options.role;
     this.schedule(() => this.driveTurn(), this.guardMs());
@@ -432,8 +542,17 @@ export class AcousticSession {
     // exhaustion applies to a stalled window, not to a large valid packet.
     if (pending.acknowledged !== before) pending.attempts = 0;
     this.#awaitingAck = false; this.clearDeliveryTimer();
-    if (pending.acknowledged === legalMask) { this.#active = undefined; this.#turnOwner = complement(this.options.role); return; }
-    this.#counters.retries += 1; this.#turnOwner = complement(this.options.role);
+    if (pending.acknowledged === legalMask) {
+      this.#active = undefined;
+      // Complete the two-step handoff: DATA/TURN_END → ACK → TURN_END. The
+      // receiver remains passive until this explicit yield arrives.
+      this.send(Fas1UnitType.TurnEnd, this.#sessionId, new Uint8Array());
+      this.#turnOwner = complement(this.options.role);
+      return;
+    }
+    this.#counters.retries += 1;
+    this.#turnOwner = this.options.role;
+    this.schedule(() => this.driveTurn(), this.guardMs());
   }
   private sendUnit(unit: Fas1Unit): void | Promise<void> { return this.options.modem.send(encodeFas1(unit)); }
   private degrade(reason: string): void { if (this.#state === 'Error' || this.#state === 'Degraded') return; this.clearDeliveryTimer(); this.#awaitingAck = false; this.#state = 'Degraded'; this.#reason = reason; this.schedule(() => this.beginRecovery(), this.guardMs()); }
@@ -442,17 +561,21 @@ export class AcousticSession {
     if (this.options.role !== 'B' || this.#state !== 'Listening' || headerSessionId !== 0n) return;
     const hello = decodeHandshake(body);
     if (hello.role !== 'A' || hello.identity !== this.options.expectedPeer || hello.expectedPeer !== this.options.identity || hello.epoch !== this.#epoch || !hello.sessionId || !sameProfiles(hello.profiles, this.options.profiles) || !this.mutualRange(hello.ranges)) return;
+    this.clearHandshakeRetry();
     const localNonce = this.options.nonce().slice(); if (localNonce.byteLength !== 16) invalid('nonce must be 128 bits');
     this.#sessionId = hello.sessionId; this.#peerNonce = hello.nonce; this.#localNonce = localNonce; this.#state = 'HelloAckSent';
-    this.send(Fas1UnitType.HelloAck, hello.sessionId, encodeHandshake({ role: 'B', identity: this.options.identity, expectedPeer: this.options.expectedPeer, nonce: localNonce, echoedNonce: hello.nonce, profiles: this.options.profiles, ranges: this.options.ranges, epoch: this.#epoch }));
+    const completion = this.send(Fas1UnitType.HelloAck, hello.sessionId, encodeHandshake({ role: 'B', identity: this.options.identity, expectedPeer: this.options.expectedPeer, nonce: localNonce, echoedNonce: hello.nonce, profiles: this.options.profiles, ranges: this.options.ranges, epoch: this.#epoch }));
+    this.continueHandshakeAfterPlayback(completion, 'HelloAckSent');
   }
 
   private onHelloAck(sessionId: bigint, body: Uint8Array): void {
     if (this.options.role !== 'A' || this.#state !== 'HelloSent' || sessionId !== this.#sessionId || !this.#localNonce) return;
     const ack = decodeHandshake(body);
     if (ack.role !== 'B' || ack.identity !== this.options.expectedPeer || ack.expectedPeer !== this.options.identity || ack.epoch !== this.#epoch || !equal(ack.echoedNonce, this.#localNonce) || !sameProfiles(ack.profiles, this.options.profiles) || !this.mutualRange(ack.ranges)) return;
+    this.clearHandshakeRetry();
     this.#peerNonce = ack.nonce; this.#state = 'CapsSent';
-    this.send(Fas1UnitType.Caps, sessionId, this.capsBody());
+    const completion = this.send(Fas1UnitType.Caps, sessionId, this.capsBody());
+    this.continueHandshakeAfterPlayback(completion, 'CapsSent');
   }
 
   private onCaps(sessionId: bigint, body: Uint8Array): void {
@@ -460,9 +583,10 @@ export class AcousticSession {
     const expectedB = this.options.role === 'B' ? this.#localNonce : this.#peerNonce;
     if (sessionId !== this.#sessionId || !expectedA || !expectedB || body.byteLength !== 32 || !equal(body.slice(0, 16), expectedA) || !equal(body.slice(16), expectedB)) return;
     if (this.options.role === 'B' && this.#state === 'HelloAckSent') {
+      this.clearHandshakeRetry();
       this.#state = 'CalibratingAToB'; this.armDeadline(); this.send(Fas1UnitType.Caps, sessionId, this.capsBody()); return;
     }
-    if (this.options.role === 'A' && this.#state === 'CapsSent') { this.#state = 'CalibratingAToB'; this.armDeadline(); this.driveProbe('AtoB'); }
+    if (this.options.role === 'A' && this.#state === 'CapsSent') { this.clearHandshakeRetry(); this.#state = 'CalibratingAToB'; this.armDeadline(); this.driveProbe('AtoB'); }
   }
 
   private capsBody(): Uint8Array {
@@ -476,7 +600,11 @@ export class AcousticSession {
     if (this.#timer !== undefined) return;
     const epoch = this.#epoch;
     this.#timer = this.options.timers.setTimeout(() => {
-      if (epoch === this.#epoch && (this.#state === 'CalibratingAToB' || this.#state === 'CalibratingBToA')) this.fail('acoustic_calibration_deadline');
+      this.#timer = undefined;
+      if (epoch === this.#epoch && (this.#state === 'CalibratingAToB' || this.#state === 'CalibratingBToA')) {
+        this.#counters.retries += 1;
+        this.armDeadline();
+      }
     }, this.options.calibration.deadlineMs);
   }
   private directionByte(direction: 'AtoB' | 'BtoA'): number { return direction === 'AtoB' ? PROBE_DIRECTION_A_TO_B : PROBE_DIRECTION_B_TO_A; }
@@ -512,15 +640,27 @@ export class AcousticSession {
   }
   private onProbe(sessionId: bigint, body: Uint8Array): void {
     if (sessionId !== this.#sessionId || body.byteLength !== 3) return;
-    const direction = this.parseDirection(body[0]!); const ordinal = this.#receivedProbes[direction];
-    if (this.#state !== this.stateFor(direction) || this.options.role === this.expectedSender(direction) || body[1] !== Math.floor(ordinal / this.options.calibration.probesPerDirection) || body[2] !== ordinal % this.options.calibration.probesPerDirection) return;
+    const direction = this.parseDirection(body[0]!);
+    const receivedOrdinal = body[1]! * this.options.calibration.probesPerDirection + body[2]!;
+    const ordinal = this.#receivedProbes[direction];
+    if (receivedOrdinal === ordinal - 1) {
+      const cached = this.#lastProbeReport[direction];
+      if (cached?.ordinal === receivedOrdinal) {
+        this.#counters.duplicates += 1;
+        this.send(Fas1UnitType.Report, sessionId, cached.body);
+      }
+      return;
+    }
+    if (this.#state !== this.stateFor(direction) || this.options.role === this.expectedSender(direction) || receivedOrdinal !== ordinal || body[1] !== Math.floor(ordinal / this.options.calibration.probesPerDirection) || body[2] !== ordinal % this.options.calibration.probesPerDirection) return;
     const probe = this.probeFor(direction, ordinal); const observation = this.normalizeObservation(this.options.measureProbe(probe));
-    this.#receivedProbes[direction] += 1; this.#ledger.push({ ...probe, observation }); this.send(Fas1UnitType.Report, sessionId, this.encodeReport(probe, observation)); this.completeDirection(direction);
+    const report = this.encodeReport(probe, observation);
+    this.#receivedProbes[direction] += 1; this.#ledger.push({ ...probe, observation }); this.#lastProbeReport[direction] = { ordinal, body: report }; this.send(Fas1UnitType.Report, sessionId, report); this.completeDirection(direction);
   }
   private onReport(sessionId: bigint, body: Uint8Array): void {
     if (sessionId !== this.#sessionId) return;
     const { probe, observation } = this.decodeReport(body); const ordinal = this.#receivedReports[probe.direction];
     if (this.#state !== this.stateFor(probe.direction) || this.options.role !== this.expectedSender(probe.direction) || probe.candidateIndex !== Math.floor(ordinal / this.options.calibration.probesPerDirection) || probe.probeIndex !== ordinal % this.options.calibration.probesPerDirection) return;
+    this.clearProbeRetry();
     this.#receivedReports[probe.direction] += 1; this.#ledger.push({ ...probe, observation });
     if (!this.completeDirection(probe.direction)) this.driveProbe(probe.direction);
   }
@@ -556,7 +696,11 @@ export class AcousticSession {
     const ordinal = this.#sentProbes[direction]; const total = this.options.candidates.length * this.options.calibration.probesPerDirection;
     if (ordinal >= total) return;
     const probe = this.probeFor(direction, ordinal); this.options.modem.applyCandidate?.(probe.candidate); this.#sentProbes[direction] += 1;
-    this.send(Fas1UnitType.Probe, this.#sessionId, new Uint8Array([this.directionByte(direction), probe.candidateIndex, probe.probeIndex]));
+    const completion = this.send(Fas1UnitType.Probe, this.#sessionId, new Uint8Array([this.directionByte(direction), probe.candidateIndex, probe.probeIndex]));
+    void Promise.resolve(completion).then(
+      () => this.armProbeRetry(direction, ordinal),
+      () => this.fail('acoustic_probe_playback_failed'),
+    );
   }
   private queueCommit(): void {
     this.#work = this.#work.then(async () => {
@@ -564,11 +708,19 @@ export class AcousticSession {
       this.#settings = { aToB: this.toSettings(this.#selected.AtoB), bToA: this.toSettings(this.#selected.BtoA) };
       this.applyOutboundCandidate();
       this.#settingsDigest = await digestSettings(this.#settings);
-      this.send(Fas1UnitType.Commit, this.#sessionId, this.#settingsDigest);
+      await Promise.resolve(this.send(Fas1UnitType.Commit, this.#sessionId, this.#settingsDigest));
+      this.armCommitRetry();
     }).catch(() => this.fail('acoustic_commit_failed'));
   }
   private onCommit(sessionId: bigint, body: Uint8Array): void {
-    if (this.options.role !== 'A' || this.#state !== 'Committing' || sessionId !== this.#sessionId || body.byteLength !== 32 || !this.#selected.AtoB || !this.#selected.BtoA) return;
+    if (this.options.role !== 'A' || sessionId !== this.#sessionId || body.byteLength !== 32) return;
+    if ((this.#state === 'AwaitingHeartbeat' || this.#state === 'Ready') && equal(body, this.#settingsDigest)) {
+      this.#counters.duplicates += 1;
+      this.send(Fas1UnitType.CommitAck, sessionId, body);
+      if (this.#state === 'AwaitingHeartbeat') this.send(Fas1UnitType.Heartbeat, sessionId, new Uint8Array());
+      return;
+    }
+    if (this.#state !== 'Committing' || !this.#selected.AtoB || !this.#selected.BtoA) return;
     const received = body.slice();
     this.#work = this.#work.then(async () => {
       if (this.#state !== 'Committing' || !this.#sessionId) return;
@@ -585,6 +737,7 @@ export class AcousticSession {
   }
   private onCommitAck(sessionId: bigint, body: Uint8Array): void {
     if (this.options.role !== 'B' || this.#state !== 'Committing' || sessionId !== this.#sessionId || !equal(body, this.#settingsDigest)) return;
+    this.clearCommitRetry();
     // A owns the post-commit bootstrap turn.  B becomes ready only after it
     // receives this bound heartbeat and returns the one explicit bootstrap
     // reply below; periodic heartbeats never bypass the turn scheduler.
@@ -606,7 +759,7 @@ export class AcousticSession {
     const candidate = this.options.role === 'A' ? this.#selected.AtoB : this.#selected.BtoA;
     if (candidate) this.options.modem.applyCandidate?.(candidate);
   }
-  private fail(reason: string): void { if (this.#timer !== undefined) this.options.timers.clearTimeout(this.#timer); this.#timer = undefined; this.clearHeartbeatTimers(); this.#state = 'Error'; this.#reason = reason; }
+  private fail(reason: string): void { if (this.#timer !== undefined) this.options.timers.clearTimeout(this.#timer); this.#timer = undefined; this.clearHandshakeRetry(); this.clearProbeRetry(); this.clearCommitRetry(); this.clearHeartbeatTimers(); this.#state = 'Error'; this.#reason = reason; }
   private mutualRange(peer: AcousticCapabilityRange): boolean { return peer.minPayloadBytes <= this.options.ranges.maxPayloadBytes && peer.maxPayloadBytes >= this.options.ranges.minPayloadBytes; }
   private send(type: Fas1UnitType, sessionId: bigint, body: Uint8Array): void | Promise<void> { const raw = encodeFas1({ type, flags: 0, sessionId, sequence: this.#sequence++, packetId: 0, fragmentIndex: 0, fragmentCount: 0, packetLength: 0, body }); return this.options.modem.send(raw); }
 }
