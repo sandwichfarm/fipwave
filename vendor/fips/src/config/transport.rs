@@ -921,10 +921,21 @@ impl SoundConfig {
 
     /// Validate the narrow, local-only configuration accepted by Sound.
     pub fn validate(&self) -> Result<(), String> {
-        let loopback = self.bridge_url.starts_with("ws://127.")
-            || self.bridge_url.starts_with("ws://localhost")
-            || self.bridge_url.starts_with("ws://[::1]");
-        if !loopback || !self.bridge_url.contains("/bridge/fips") {
+        let parsed = self
+            .bridge_url
+            .parse::<tokio_tungstenite::tungstenite::http::Uri>()
+            .map_err(|_| "sound_bridge_url_must_be_loopback_fips_endpoint".to_string())?;
+        let authority = parsed
+            .authority()
+            .ok_or_else(|| "sound_bridge_url_must_be_loopback_fips_endpoint".to_string())?;
+        let host = authority.host();
+        let loopback = matches!(host, "127.0.0.1" | "localhost" | "::1");
+        if parsed.scheme_str() != Some("ws")
+            || !loopback
+            || authority.as_str().contains('@')
+            || parsed.path() != "/bridge/fips"
+            || parsed.query().is_some()
+        {
             return Err("sound_bridge_url_must_be_loopback_fips_endpoint".into());
         }
         if !self.peer_addr.starts_with("sound-") || self.peer_addr.len() > 64 {
@@ -1043,6 +1054,11 @@ mod tests {
 
         for invalid in [
             "bridge_url: ws://example.com/bridge/fips\npeer_addr: sound-a\n",
+            "bridge_url: ws://localhost.attacker.example/bridge/fips\npeer_addr: sound-a\n",
+            "bridge_url: ws://127.attacker.example/bridge/fips\npeer_addr: sound-a\n",
+            "bridge_url: ws://127.0.0.1:4310/bridge/fips/extra\npeer_addr: sound-a\n",
+            "bridge_url: ws://127.0.0.1:4310/bridge/fips?redirect=attacker\npeer_addr: sound-a\n",
+            "bridge_url: ws://user@127.0.0.1:4310/bridge/fips\npeer_addr: sound-a\n",
             "bridge_url: ws://127.0.0.1:4310/bridge/fips\npeer_addr: 198.51.100.2:9\n",
             "bridge_url: ws://127.0.0.1:4310/bridge/fips\npeer_addr: sound-a\nmtu: 1356\n",
             "bridge_url: ws://127.0.0.1:4310/bridge/fips\npeer_addr: sound-a\ncodec: cyrinx\n",
