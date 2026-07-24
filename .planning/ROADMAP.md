@@ -31,7 +31,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 ### Phase 1: Qualify the Demo Substrate
 
-**Goal**: The exact two demo laptops have a qualified, intentionally audible browser-audio path and a Docker/TUN preflight, leaving either a proven Cyrinx path or an immediate browser-ready fallback before FIPS integration begins.
+**Goal**: As a demo operator, I want to qualify the exact two laptops with an audible browser-audio path and Docker/TUN preflight, so that FIPS integration starts with either a proven Cyrinx path or an immediate browser-ready fallback.
 **Mode:** mvp
 **Depends on**: Nothing (first phase)
 **Requirements**: CODEC-02, CODEC-03, CODEC-04, WEB-01, WEB-02, WEB-03, WEB-07, DEPLOY-02
@@ -59,7 +59,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 ### Phase 2: Configure and Establish the Codec-Neutral FIPS Bridge
 
-**Goal**: Each role resolves from one configuration authority and FIPS can use a codec-neutral sound transport to exchange complete opaque packets with an armed local browser modem through a bounded binary bridge.
+**Goal**: As a demo operator, I want to resolve each role from one configuration authority and connect FIPS to an armed local browser modem through a bounded codec-neutral sound bridge, so that complete opaque packets can safely cross the local modem boundary.
 **Mode:** mvp
 **Depends on**: Phase 1
 **Requirements**: FIPS-01, FIPS-02, FIPS-03, CODEC-01, WEB-04, WEB-05, WEB-06, CONFIG-02
@@ -94,7 +94,7 @@ Plans:
 
 ### Phase 3: Negotiate and Deliver Reliable Acoustic Packets
 
-**Goal**: Each laptop establishes a measured, mutually committed acoustic session and then provides safe, bounded, deterministic half-duplex delivery of complete FIPS packets below the FIPS boundary.
+**Goal**: As a demo operator, I want to establish a measured and mutually committed acoustic session between both laptops, so that complete FIPS packets receive safe bounded deterministic half-duplex delivery below the FIPS boundary.
 **Mode:** mvp
 **Depends on**: Phase 2
 **Requirements**: LINK-01, LINK-02, LINK-03, LINK-04, LINK-05, LINK-06, LINK-07, LINK-08, LINK-09, NEG-01, NEG-02, NEG-03, NEG-04, NEG-05, NEG-06, NEG-07
@@ -110,7 +110,7 @@ Plans:
 
 ### Phase 4: Prove the Sound-Only FIPS Ping
 
-**Goal**: An otherwise isolated FIPS node is a real authenticated acoustic peer of the wider mesh and returns a kernel IPv6 echo reply across the same sound link.
+**Goal**: As a demo participant, I want to reach the otherwise isolated FIPS node as an authenticated acoustic peer of the wider mesh, so that it returns a real kernel IPv6 echo reply across the same sound link.
 **Mode:** mvp
 **Depends on**: Phase 3
 **Requirements**: FIPS-04, FIPS-05, DEPLOY-03, DEPLOY-04, DEPLOY-05, DEMO-01, DEMO-02, DEMO-03, DEMO-04, CONFIG-04
@@ -126,7 +126,7 @@ Plans:
 
 ### Phase 5: Present, Freeze, and Rehearse the Demo
 
-**Goal**: The sound-only ping proof launches with one role argument, explains itself on two no-scroll laptop screens, preserves actionable evidence, and can be checked, recovered, and repeated without improvised setup.
+**Goal**: As a demo operator, I want to launch the sound-only ping proof with one role argument and explain it on two no-scroll screens, so that the demo preserves evidence and can be checked recovered and repeated without improvised setup.
 **Mode:** mvp
 **Depends on**: Phase 4
 **Requirements**: DEPLOY-01, DEMO-05, DEMO-06, DEMO-07, DEMO-08, CONFIG-01, CONFIG-03, UI-01, UI-02, UI-03, UI-04, UI-05, OBS-01
