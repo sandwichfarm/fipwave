@@ -538,15 +538,17 @@ function render(): void {
   operator.append(element('p', quietRuntime));
   if (uiState === 'idle') operator.append(control('Arm modem', arm, !runnerConfig && !developmentDiagnostic));
   if (uiState === 'requesting') operator.append(control('Arm modem', arm, true));
+  const resetLabel = 'Reset and reconnect';
+  const failedRecoveryLabel = developmentDiagnostic ? 'Reset / re-arm' : resetLabel;
   if (uiState === 'ready') {
     if (cyrinxSession.canRequestStart) operator.append(control('Start Cyrinx qualification', startQualification));
     if (quietCorpusSendState === 'ready' && runnerConfig && cyrinxSession.snapshot.codec === 'quiet') {
       operator.append(control(`Send Quiet ${directionForRole(runnerConfig.role)} corpus`, sendQuietCorpus));
     }
-    operator.append(control('Reset and reconnect', reset, false, 'secondary'));
+    operator.append(control(resetLabel, reset, false, 'secondary'));
   }
-  if (uiState === 'failed' || uiState === 'disconnected') operator.append(control('Reset and reconnect', reset, false, 'secondary'));
-  if (runnerConfig && uiState === 'idle') operator.append(control('Reset and reconnect', reset, false, 'secondary'));
+  if (uiState === 'failed' || uiState === 'disconnected') operator.append(control(failedRecoveryLabel, reset, false, 'secondary'));
+  if (runnerConfig && uiState === 'idle') operator.append(control(resetLabel, reset, false, 'secondary'));
   operator.append(element('p', 'Starts a new local epoch and clears unsent local bridge data.'));
   grid.append(operator);
 
