@@ -34,6 +34,7 @@ let evidence: AppliedAudioEvidence | undefined;
 let uiState: UiState = 'idle';
 let failure = '';
 let bridge: WebSocket | undefined;
+let bridgeGeneration = 0;
 let bridgeSequence = 0n;
 let bridgeDelivery = 'Not connected';
 let packetGeneration = 0;
@@ -73,7 +74,7 @@ const cyrinxCaseWatchdog = new CyrinxCaseWatchdog((value) => {
 
 type Pending<T> = { resolve(value: T): void; reject(error: Error): void; timer: number };
 let pendingSettings: Pending<void> | undefined;
-let pendingReset: (Pending<number> & { previousEpoch: number }) | undefined;
+let pendingReset: (Pending<number> & { previousEpoch: number; socket: WebSocket; generation: number }) | undefined;
 const pendingResults = new Map<string, Pending<void>>();
 
 const FWAV_HEADER_BYTES = 32;
@@ -284,7 +285,11 @@ function failBridge(socket: WebSocket, reason: Error): void {
   render();
 }
 
-function handleBridgeMessage(socket: WebSocket, event: MessageEvent): void {
+function handleBridgeMessage(socket: WebSocket, generation: number, event: MessageEvent): void {
+  // A retiring socket can still receive server broadcasts after a replacement
+  // is open. Only the current connection generation owns UI state or pending
+  // acknowledgements.
+  if (bridge !== socket || bridgeGeneration !== generation) return;
   try {
     if (developmentDiagnostic && pendingSettings && (event.data === undefined || event.data === '{}')) {
       const pending = pendingSettings;
@@ -298,6 +303,7 @@ function handleBridgeMessage(socket: WebSocket, event: MessageEvent): void {
       if (type === 8) {
         const pending = pendingReset;
         if (!pending) throw new Error('Local bridge sent an unsolicited RESET');
+        if (pending.socket !== socket || pending.generation !== generation) return;
         const nextEpoch = decodeResetFrame(event.data, pending.previousEpoch);
         window.clearTimeout(pending.timer);
         pendingReset = undefined;
@@ -321,14 +327,15 @@ function handleBridgeMessage(socket: WebSocket, event: MessageEvent): void {
         throw error;
       }
       if (activeTransmit) {
+        const completionSocket = socket;
+        const completionGeneration = generation;
         void scheduled.completion.then(() => {
-          const socket = bridge;
           if (transmitCase !== activeTransmit || !cyrinxCaseWatchdog.owns(activeTransmit)) return;
-          if (!socket || socket.readyState !== WebSocket.OPEN) { cyrinxCaseWatchdog.fail(activeTransmit); return; }
+          if (bridge !== completionSocket || bridgeGeneration !== completionGeneration || completionSocket.readyState !== WebSocket.OPEN) return;
           try {
             const payload = new TextEncoder().encode(JSON.stringify({ action: 'playback_complete', caseId: activeTransmit.caseId, direction: activeTransmit.direction }));
             const frame = encodeControlFrame({ type: 5, epoch: activeTransmit.epoch, sequence: bridgeSequence, payload });
-            socket.send(frame);
+            completionSocket.send(frame);
             bridgeSequence += 1n;
             activeTransmit.completionSent = true;
             cyrinxCaseWatchdog.markTransmitCompletionSent(activeTransmit);
@@ -336,7 +343,7 @@ function handleBridgeMessage(socket: WebSocket, event: MessageEvent): void {
             cyrinxCaseWatchdog.fail(activeTransmit);
           }
         }).catch(() => {
-          if (transmitCase === activeTransmit) cyrinxCaseWatchdog.fail(activeTransmit);
+          if (bridge === completionSocket && bridgeGeneration === completionGeneration && transmitCase === activeTransmit) cyrinxCaseWatchdog.fail(activeTransmit);
         });
       }
       return;
@@ -432,9 +439,10 @@ async function openFreshBridge(): Promise<WebSocket> {
   rejectPending(new Error('Local bridge connection was replaced'));
   bridgeSequence = 0n;
   const socket = new WebSocket(`ws://${window.location.host}/bridge`);
+  const generation = ++bridgeGeneration;
   bridge = socket;
   socket.binaryType = 'arraybuffer';
-  socket.addEventListener('message', (event) => handleBridgeMessage(socket, event));
+  socket.addEventListener('message', (event) => handleBridgeMessage(socket, generation, event));
   socket.addEventListener('error', () => failBridge(socket, new Error('Local bridge disconnected')));
   socket.addEventListener('close', () => failBridge(socket, new Error('Local bridge closed before delivery was accepted')));
   await new Promise<void>((resolve, reject) => {
@@ -513,7 +521,7 @@ async function requestBridgeReset(): Promise<number> {
       pendingReset = undefined;
       reject(new Error('Local bridge did not return RESET'));
     }, 5_000);
-    pendingReset = { previousEpoch, resolve, reject, timer };
+    pendingReset = { previousEpoch, socket, generation: bridgeGeneration, resolve, reject, timer };
   });
   try { socket.send(encodeControlFrame({ type: 8, epoch: previousEpoch, sequence: bridgeSequence++ })); } catch (error) { failBridge(socket, asError(error, 'Local bridge RESET delivery failed')); }
   const nextEpoch = await accepted;
