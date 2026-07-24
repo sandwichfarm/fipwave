@@ -70,8 +70,7 @@ test('both Compose build contexts exclude generated build outputs', async () => 
     assert.match(bridgeIgnore, new RegExp(`^${pattern.replaceAll('/', '\\/').replaceAll('.', '\\.')}$`, 'm'));
   }
   assert.match(bridgeIgnore, /^\.artifacts\/\*$/m);
-  assert.match(bridgeIgnore, /^!\.artifacts\/codecs\/$/m);
-  assert.match(bridgeIgnore, /^!\.artifacts\/build\/cyrinx\/cyrinx_batch$/m);
+  assert.doesNotMatch(bridgeIgnore, /^!\.artifacts\//m, 'the image must build its verified codec cache on one Docker filesystem');
   assert.match(fipsIgnore, /^target$/m);
   assert.match(fipsIgnore, /^\.git$/m);
 });
