@@ -18,6 +18,9 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/codec-assets.lock.json ./
 COPY --from=build /app/.artifacts/codecs ./.artifacts/codecs
 COPY --from=build /app/.artifacts/build/cyrinx ./.artifacts/build/cyrinx
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends iputils-ping \
+  && rm -rf /var/lib/apt/lists/*
 RUN mkdir -p .artifacts/qualification && chown -R node:node .artifacts
 USER node
 EXPOSE 4310
