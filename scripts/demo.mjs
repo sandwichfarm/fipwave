@@ -213,20 +213,24 @@ async function launchOwnedBrowser(plan, recorder) {
   return browser;
 }
 
-function waitForStop(browser) {
+export function waitForStop(browser, signals = process) {
   return new Promise((resolve) => {
     let settled = false;
     const finish = (reason) => {
       if (settled) return;
       settled = true;
-      process.off('SIGINT', onSigint);
-      process.off('SIGTERM', onSigterm);
       resolve(reason);
     };
     const onSigint = () => finish('SIGINT');
     const onSigterm = () => finish('SIGTERM');
-    process.once('SIGINT', onSigint);
-    process.once('SIGTERM', onSigterm);
+    const onSighup = () => finish('SIGHUP');
+    // Keep these handlers installed through the `finally` cleanup. `npm run`
+    // may relay another termination signal after the terminal's first SIGINT;
+    // reverting to the default handler here would strand the owned Compose
+    // project before `down --volumes` and the canonical summary can finish.
+    signals.on('SIGINT', onSigint);
+    signals.on('SIGTERM', onSigterm);
+    signals.on('SIGHUP', onSighup);
     browser.once('disconnected', () => finish('browser-closed'));
   });
 }

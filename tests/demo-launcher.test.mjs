@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import test from 'node:test';
 
-import { composeInvocation, createDemoPlan, parseDemoArgs } from '../scripts/demo.mjs';
+import { composeInvocation, createDemoPlan, parseDemoArgs, waitForStop } from '../scripts/demo.mjs';
 
 test('demo accepts only one literal role or check mode', () => {
   assert.deepEqual(parseDemoArgs(['a']), { mode: 'run', role: 'a' });
@@ -41,4 +42,17 @@ test('Compose invocation is exact-project and argument-array only', () => {
   ]);
   assert.equal(invocation.environment, plan.environment);
   assert.throws(() => composeInvocation(plan, ['up', 1]), /arguments/);
+});
+
+test('demo keeps termination signals absorbed until owned cleanup can finish', async () => {
+  const signals = new EventEmitter();
+  const browser = new EventEmitter();
+  const stopped = waitForStop(browser, signals);
+  assert.equal(signals.listenerCount('SIGINT'), 1);
+  assert.equal(signals.listenerCount('SIGTERM'), 1);
+  assert.equal(signals.listenerCount('SIGHUP'), 1);
+  signals.emit('SIGINT');
+  assert.equal(await stopped, 'SIGINT');
+  assert.equal(signals.listenerCount('SIGTERM'), 1);
+  assert.doesNotThrow(() => signals.emit('SIGTERM'));
 });
