@@ -7,6 +7,7 @@ export interface SoundProofInput { readonly expectedPeerPublicKey: string; reado
 export interface SoundProofJoin { readonly pingReady: boolean; readonly reason: ProofReason; readonly peer?: FipsPeer; readonly link?: FipsLink; readonly transport?: FipsTransport; }
 export interface RawPingResult { readonly exitCode: number; readonly stdout: string; readonly stderr: string; }
 export interface PublicPingResult { readonly exitCode: number; readonly sequence: number | null; readonly latencyMs: number | null; readonly lossPercent: number | null; readonly safeReason: string | null; }
+export interface PublicProofState { readonly state: 'loading' | 'blocked' | 'ready' | 'running' | 'degraded' | 'failed'; readonly epoch: number; readonly pingReady: boolean; readonly reason: string; readonly result: PublicPingResult | null; }
 
 const MAX_SNAPSHOT_AGE_MS = 60_000;
 function ipv6(value: unknown): value is string {
@@ -15,6 +16,11 @@ function ipv6(value: unknown): value is string {
 }
 function integer(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+export function reduceProofState(previous: PublicProofState | undefined, action: { readonly type: 'snapshot'; readonly epoch: number; readonly pingReady: boolean; readonly reason: string } | { readonly type: 'invalidate'; readonly epoch: number; readonly reason: string }): PublicProofState {
+  if (action.type === 'invalidate') return Object.freeze({ state: 'degraded', epoch: action.epoch, pingReady: false, reason: action.reason, result: null });
+  if (previous && action.epoch < previous.epoch) return previous;
+  return Object.freeze({ state: action.pingReady ? 'ready' : 'blocked', epoch: action.epoch, pingReady: action.pingReady, reason: action.reason, result: null });
 }
 
 export function parseSoundProofInput(value: unknown): SoundProofInput {

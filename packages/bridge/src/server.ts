@@ -96,6 +96,7 @@ export interface PacketQueueSnapshot extends PacketQueueLimits { items: number; 
 export interface BridgeServer {
   port: number; sendPcmPlayback(frame: Buffer): void; startCyrinx(): Promise<{ codec: 'cyrinx' | 'quiet'; reasonCode: string | null; deadlineAtMs: number }>; reset(): Promise<number>; close(): Promise<void>; state(): BridgeState;
 }
+export interface ProofControllerApi { readonly role: 'A' | 'B'; status(): Promise<unknown>; ping(): Promise<unknown>; }
 export interface CyrinxWorkerRuntime {
   begin(value: CyrinxCase, epoch: number, mode: CyrinxCaseMode): Promise<Buffer | undefined>;
   receiveCapture(encoded: Buffer): Promise<CyrinxResult | undefined>;
@@ -134,6 +135,8 @@ export interface BridgeServerOptions {
   cyrinxWorker?: CyrinxWorkerRuntime;
   cyrinxTimer?: CyrinxTimer;
   cyrinxSettle?: (delayMs: number) => Promise<void>;
+  /** Runner-owned proof surface; absence is explicit 503 rather than inferred readiness. */
+  proofController?: ProofControllerApi;
 }
 
 class BridgeInputError extends Error {
@@ -345,6 +348,25 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   };
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? '/', `http://${LOOPBACK_HOST}`);
+    if (url.pathname === '/proof-status' || url.pathname === '/proof-ping') {
+      void (async () => {
+        const address = server.address();
+        if (url.search || !address || typeof address === 'string' || request.headers.host !== `${LOOPBACK_HOST}:${address.port}`) { response.writeHead(403).end(); return; }
+        const proof = options.proofController;
+        if (!proof) { response.writeHead(503, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ state: 'loading', pingReady: false, reason: 'proof_unavailable', result: null })); return; }
+        if (url.pathname === '/proof-status') {
+          if (request.method !== 'GET') { response.writeHead(405).end(); return; }
+          response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); response.end(JSON.stringify(await proof.status())); return;
+        }
+        if (request.method !== 'POST' || proof.role !== 'A' || request.headers['content-type'] !== 'application/json') { response.writeHead(proof.role === 'B' ? 403 : 405).end(); return; }
+        const chunks: Buffer[] = []; let size = 0;
+        request.on('data', (chunk: Buffer) => { size += chunk.byteLength; if (size <= 256) chunks.push(Buffer.from(chunk)); });
+        await new Promise<void>((resolve) => request.once('end', resolve));
+        if (size > 256 || Buffer.concat(chunks).toString('utf8') !== '{}') { response.writeHead(400).end(); return; }
+        response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); response.end(JSON.stringify(await proof.ping()));
+      })().catch(() => { if (!response.headersSent) response.writeHead(503); response.end(); });
+      return;
+    }
     if (request.method !== 'GET' && request.method !== 'HEAD') { response.writeHead(405).end(); return; }
     if (url.pathname === '/qualification-config' && config) { response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); response.end(JSON.stringify(config)); return; }
     if (url.pathname === '/bridge-status' && !url.search) { response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); response.end(JSON.stringify(safeStatus())); return; }
