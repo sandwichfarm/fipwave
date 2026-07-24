@@ -58,6 +58,18 @@ export function assertFipsTunRuntime(output, role) {
   return { interface: 'fips0', mtu: 1280, ipv6Address: expected };
 }
 
+/** Phase 2 proves a configured, non-degraded local node; acoustic linkage is later work. */
+export function assertFipsDaemonLogs(logs, role) {
+  const expectedPeer = role === 'a'
+    ? 'npub1f49ke5fkzqev4x7j46uajq92f4zan6kcpty5yvm5c3g6wf2dqanqn7qsy2'
+    : 'npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m';
+  for (const required of ['Loaded config file', 'TUN device active:', 'Node started:', 'state: running', 'FIPS running', expectedPeer]) {
+    if (!String(logs).includes(required)) throw new Error(`first FIPS process is missing runtime evidence: ${required}`);
+  }
+  if (/\bDEGRADED\b|sound_bridge_connect_failed/.test(String(logs))) throw new Error('first FIPS process must not be degraded or lose its sound bridge on startup');
+  return { configuredPeer: expectedPeer, state: 'running' };
+}
+
 async function compose(project, args, environment) {
   return execFileAsync('docker', ['compose', '-p', project, '-f', 'compose.fips.yml', ...args], { cwd: root, env: { ...process.env, ...environment }, maxBuffer: 1024 * 1024 });
 }
@@ -77,11 +89,12 @@ async function main() {
     const evidence = assertFipsRuntimeInspect(inspected);
     const fips = inspected.find((item) => item.Name?.includes('fips'));
     if (!fips?.Id) throw new Error('fips inspect identity is missing');
-    const tunOutput = await execFileAsync('docker', ['exec', fips.Id, 'sh', '-ec', 'id -u; sed -n "s/^CapEff:[[:space:]]*//p" /proc/1/status; ip -o link show dev fips0; ip -6 -o addr show dev fips0 scope global'], { maxBuffer: 1024 * 1024 });
-    const tun = assertFipsTunRuntime(tunOutput.stdout, role);
+    const firstPid = fips.State?.Pid;
+    if (!Number.isInteger(firstPid) || firstPid <= 0) throw new Error('first FIPS process PID is invalid');
     const deadline = Date.now() + timeoutMs;
     let bridgeReady = false;
     let soundWorker = false;
+    let tun;
     while (Date.now() < deadline) {
       try {
         const response = await fetch(`http://127.0.0.1:${environment.BROWSER_PORT}/`);
@@ -89,14 +102,23 @@ async function main() {
           bridgeReady = true;
           const status = await fetch(`http://127.0.0.1:${environment.BROWSER_PORT}/bridge-status`).then((value) => value.json());
           soundWorker = status?.soundTransport === 'started';
-          if (soundWorker) break;
+          if (soundWorker) {
+            const tunOutput = await execFileAsync('docker', ['exec', fips.Id, 'sh', '-ec', 'id -u; sed -n "s/^CapEff:[[:space:]]*//p" /proc/1/status; ip -o link show dev fips0; ip -6 -o addr show dev fips0 scope global'], { maxBuffer: 1024 * 1024 });
+            tun = assertFipsTunRuntime(tunOutput.stdout, role);
+            break;
+          }
         }
       } catch {}
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
     if (!bridgeReady) throw new Error(`bridge did not become ready on loopback port ${environment.BROWSER_PORT}`);
     if (!soundWorker) throw new Error('FIPS sound worker did not connect to the bridge');
-    console.log(JSON.stringify({ schemaVersion: 1, project, role, ...evidence, tun, soundWorker: 'connected', note: 'Local container topology only; no Open air, acoustic peer, or ping claim.' }));
+    if (!tun) throw new Error('fips0 did not become ready before the smoke deadline');
+    const current = JSON.parse((await execFileAsync('docker', ['inspect', fips.Id], { maxBuffer: 1024 * 1024 })).stdout)[0];
+    if (current?.State?.Pid !== firstPid) throw new Error('FIPS must connect on its first process without a manual restart');
+    const logs = (await execFileAsync('docker', ['logs', fips.Id], { maxBuffer: 1024 * 1024 })).stdout;
+    const daemon = assertFipsDaemonLogs(logs, role);
+    console.log(JSON.stringify({ schemaVersion: 1, project, role, ...evidence, tun, daemon, firstFipsPid: firstPid, soundWorker: 'connected', note: 'Local container topology proves configured peer, first-process Sound bridge, and usable TUN; it does not claim open-air acoustic delivery or ICMPv6 ping.' }));
   } finally {
     try { await compose(project, ['down', '--volumes', '--remove-orphans'], environment); } catch (error) { cleanupError = error; }
     await rm(tempDirectory, { recursive: true, force: true });

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { checkFipsComposeSource, validateFipsComposeTopology } from '../scripts/check-compose.mjs';
-import { assertFipsRuntimeInspect, assertFipsTunRuntime, parseFipsComposeSmokeArgs } from '../scripts/fips-compose-smoke.mjs';
+import { assertFipsDaemonLogs, assertFipsRuntimeInspect, assertFipsTunRuntime, parseFipsComposeSmokeArgs } from '../scripts/fips-compose-smoke.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -63,6 +63,8 @@ test('owned runtime smoke accepts one role and rejects unsafe inspected topology
   assert.throws(() => assertFipsRuntimeInspect(inspected), /capabilities/);
   assert.deepEqual(assertFipsTunRuntime('0\n0000000000001000\n7: fips0: <POINTOPOINT,UP> mtu 1280 qdisc noop state UNKNOWN\ninet6 fd69:e08d:65cc:3a6b:9c2c:2ac4:bd40:5e4b/128 scope global\n', 'a'), { interface: 'fips0', mtu: 1280, ipv6Address: 'fd69:e08d:65cc:3a6b:9c2c:2ac4:bd40:5e4b' });
   assert.throws(() => assertFipsTunRuntime('0\n0000000000003000\n7: fips0: <UP> mtu 1280\ninet6 fd69:e08d:65cc:3a6b:9c2c:2ac4:bd40:5e4b/128 scope global\n', 'a'), /exactly effective NET_ADMIN/);
+  assert.deepEqual(assertFipsDaemonLogs('Loaded config file\nTUN device active:\nNode started:\nstate: running\nFIPS running\nnpub1f49ke5fkzqev4x7j46uajq92f4zan6kcpty5yvm5c3g6wf2dqanqn7qsy2', 'a'), { configuredPeer: 'npub1f49ke5fkzqev4x7j46uajq92f4zan6kcpty5yvm5c3g6wf2dqanqn7qsy2', state: 'running' });
+  assert.throws(() => assertFipsDaemonLogs('Node started: DEGRADED', 'a'), /missing runtime evidence/);
 });
 
 test('both Compose build contexts exclude generated build outputs', async () => {
