@@ -58,7 +58,7 @@ use crate::transport::tcp::TcpTransport;
 use crate::transport::tor::TorTransport;
 use crate::transport::udp::UdpTransport;
 use crate::transport::{
-    ConnectionState, Link, LinkId, PacketRx, PacketTx, TransportAddr, TransportError,
+    ConnectionState, Link, LinkId, PacketRx, PacketTx, TrafficClass, TransportAddr, TransportError,
     TransportHandle, TransportId,
 };
 use crate::upper::hosts::HostMap;
@@ -2910,7 +2910,20 @@ impl Node {
         node_addr: &NodeAddr,
         plaintext: &[u8],
     ) -> Result<(), NodeError> {
-        self.send_encrypted_link_message_with_ce(node_addr, plaintext, false)
+        self.send_encrypted_link_message_classified(node_addr, plaintext, TrafficClass::Ordinary)
+            .await
+    }
+
+    /// Encrypt and send a link-layer message with semantic scheduling metadata.
+    /// Callers choose the class before encryption; no packet bytes are examined
+    /// to infer it.
+    pub(super) async fn send_encrypted_link_message_classified(
+        &mut self,
+        node_addr: &NodeAddr,
+        plaintext: &[u8],
+        class: TrafficClass,
+    ) -> Result<(), NodeError> {
+        self.send_encrypted_link_message_with_ce_classified(node_addr, plaintext, class, false)
             .await
     }
 
@@ -2921,6 +2934,22 @@ impl Node {
         &mut self,
         node_addr: &NodeAddr,
         plaintext: &[u8],
+        ce_flag: bool,
+    ) -> Result<(), NodeError> {
+        self.send_encrypted_link_message_with_ce_classified(
+            node_addr,
+            plaintext,
+            TrafficClass::Ordinary,
+            ce_flag,
+        )
+        .await
+    }
+
+    async fn send_encrypted_link_message_with_ce_classified(
+        &mut self,
+        node_addr: &NodeAddr,
+        plaintext: &[u8],
+        class: TrafficClass,
         ce_flag: bool,
     ) -> Result<(), NodeError> {
         let peer = self
@@ -3100,7 +3129,7 @@ impl Node {
         }
 
         let bytes_sent = transport
-            .send(&remote_addr, &wire_packet)
+            .send_classified(&remote_addr, &wire_packet, class)
             .await
             .map_err(|e| match e {
                 TransportError::MtuExceeded { packet_size, mtu } => NodeError::MtuExceeded {

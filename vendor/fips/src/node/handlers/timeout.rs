@@ -6,7 +6,7 @@ use crate::peer::machine::TimerKind;
 use crate::proto::fmp::{
     ConnAction, ConnSnapshot, LifecycleView, PeerSnapshot, RekeyResendSnapshot,
 };
-use crate::transport::LinkId;
+use crate::transport::{LinkId, TrafficClass};
 use tracing::{debug, info};
 
 impl LifecycleView for Node {
@@ -336,7 +336,10 @@ impl Node {
             };
 
             let sent = if let Some(transport) = self.transports.get(&transport_id) {
-                match transport.send(&remote_addr, &bytes).await {
+                match transport
+                    .send_classified(&remote_addr, &bytes, TrafficClass::Control)
+                    .await
+                {
                     Ok(_) => true,
                     Err(e) => {
                         debug!(

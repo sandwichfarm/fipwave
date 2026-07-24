@@ -36,7 +36,7 @@ use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::peer::machine::{LostKind, PeerAction, PeerEvent};
 use crate::proto::fmp::PromotionResult;
 use crate::proto::fmp::wire::build_msg2;
-use crate::transport::{LinkId, TransportAddr, TransportId};
+use crate::transport::{LinkId, TrafficClass, TransportAddr, TransportId};
 use crate::utils::index::SessionIndex;
 use std::collections::VecDeque;
 use tracing::{debug, trace, warn};
@@ -181,9 +181,14 @@ impl Node {
                         // L494-503) and ABORTS the remaining queue so the queued
                         // `PromoteToActive` never runs.
                         let send_err = match self.transports.get(&ambient.transport_id) {
-                            Some(transport) => {
-                                transport.send(&ambient.remote_addr, &frame).await.err()
-                            }
+                            Some(transport) => transport
+                                .send_classified(
+                                    &ambient.remote_addr,
+                                    &frame,
+                                    TrafficClass::Control,
+                                )
+                                .await
+                                .err(),
                             None => None,
                         };
                         if let Some(e) = send_err {

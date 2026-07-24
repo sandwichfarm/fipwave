@@ -18,7 +18,9 @@ use crate::nostr::{BootstrapHandoffResult, EstablishedTraversal};
 use crate::peer::machine::{HandshakeCrypto, PeerEvent, PeerMachine};
 use crate::proto::fmp::wire::build_msg1;
 use crate::proto::fmp::{Disconnect, DisconnectReason};
-use crate::transport::{Link, LinkDirection, LinkId, TransportAddr, TransportId, packet_channel};
+use crate::transport::{
+    Link, LinkDirection, LinkId, TrafficClass, TransportAddr, TransportId, packet_channel,
+};
 use crate::upper::tun::{TunDevice, TunState, run_tun_reader, shutdown_tun_interface};
 use crate::{NodeAddr, PeerIdentity};
 use std::collections::{HashMap, HashSet};
@@ -711,7 +713,10 @@ impl Node {
 
         // Send the wire format handshake message
         if let Some(transport) = self.transports.get(&transport_id) {
-            match transport.send(remote_addr, &wire_msg1).await {
+            match transport
+                .send_classified(remote_addr, &wire_msg1, TrafficClass::Control)
+                .await
+            {
                 Ok(bytes) => {
                     if let Some(idx) = our_index {
                         debug!(

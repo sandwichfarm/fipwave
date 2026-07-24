@@ -16,7 +16,7 @@ use crate::proto::fsp::{
     FspAction, RekeyMsg3ResendSnapshot, SessionSetup, SessionSnapshot, cutover_timer_elapsed,
 };
 use crate::proto::link::SessionDatagram;
-use crate::transport::{TransportAddr, TransportId};
+use crate::transport::{TrafficClass, TransportAddr, TransportId};
 use tracing::{debug, trace, warn};
 
 /// Keep previous session alive for this long after cutover.
@@ -319,7 +319,10 @@ impl Node {
 
         // Send msg1 on the existing link (same transport + address)
         if let Some(transport) = self.transports.get(&transport_id) {
-            match transport.send(&remote_addr, &wire_msg1).await {
+            match transport
+                .send_classified(&remote_addr, &wire_msg1, TrafficClass::Control)
+                .await
+            {
                 Ok(_) => {
                     debug!(
                         peer = %self.peer_display_name(node_addr),
@@ -397,7 +400,10 @@ impl Node {
                     };
 
                     let sent = if let Some(transport) = self.transports.get(&transport_id) {
-                        transport.send(&remote_addr, &bytes).await.is_ok()
+                        transport
+                            .send_classified(&remote_addr, &bytes, TrafficClass::Control)
+                            .await
+                            .is_ok()
                     } else {
                         false
                     };

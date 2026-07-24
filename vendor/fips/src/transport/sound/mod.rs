@@ -621,21 +621,57 @@ mod tests {
         let handle = TransportHandle::Sound(sound);
         let payload = vec![0xf1, 0x50, 0x53, 0x00, 0x7e];
 
-        assert_eq!(
-            handle
-                .send_classified(&peer, &payload, TrafficClass::Control)
-                .await
-                .unwrap(),
-            payload.len()
-        );
-        let control = receiver.recv().await.unwrap().bytes;
-        assert_eq!(control[6], TrafficClass::Control.to_wire());
-        assert_eq!(&control[FWAV_HEADER_BYTES..], payload.as_slice());
+        for class in [
+            TrafficClass::Control,
+            TrafficClass::Heartbeat,
+            TrafficClass::Ordinary,
+        ] {
+            assert_eq!(
+                handle
+                    .send_classified(&peer, &payload, class)
+                    .await
+                    .unwrap(),
+                payload.len()
+            );
+            let frame = receiver.recv().await.unwrap().bytes;
+            assert_eq!(frame[6], class.to_wire());
+            assert_eq!(&frame[FWAV_HEADER_BYTES..], payload.as_slice());
+        }
 
         assert_eq!(handle.send(&peer, &payload).await.unwrap(), payload.len());
         let ordinary = receiver.recv().await.unwrap().bytes;
         assert_eq!(ordinary[6], TrafficClass::Ordinary.to_wire());
         assert_eq!(&ordinary[FWAV_HEADER_BYTES..], payload.as_slice());
+    }
+
+    #[tokio::test]
+    async fn sound_transport_traffic_class_rejects_unknown_metadata_before_delivery() {
+        let (packet_tx, mut packet_rx) = packet_channel(2);
+        let sound = SoundTransport::new(TransportId::new(8), None, config(), packet_tx).unwrap();
+        {
+            let mut runtime = sound.runtime.lock().unwrap();
+            runtime.state = TransportState::Up;
+            runtime.browser_ready = true;
+        }
+        let mut unknown = encode_packet(1, 1, TrafficClass::Ordinary, &[0x44]);
+        unknown[6] = 0xff;
+
+        assert!(
+            inject_inbound(
+                &sound.runtime,
+                &sound.packet_tx,
+                sound.transport_id,
+                &sound.configured_peer(),
+                sound.mtu(),
+                &unknown,
+            )
+            .await
+            .is_err()
+        );
+        assert!(packet_rx.try_recv().is_err());
+        let runtime = sound.runtime.lock().unwrap();
+        assert_eq!(runtime.counters.rx_packets, 0);
+        assert_eq!(runtime.highest_received_sequence, None);
     }
 
     #[tokio::test]

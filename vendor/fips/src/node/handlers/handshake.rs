@@ -402,7 +402,10 @@ impl Node {
                 if let Some(msg2) = msg2.as_deref()
                     && let Some(transport) = self.transports.get(&packet.transport_id)
                 {
-                    match transport.send(&packet.remote_addr, msg2).await {
+                    match transport
+                        .send_classified(&packet.remote_addr, msg2, TrafficClass::Control)
+                        .await
+                    {
                         Ok(_) => debug!(
                             peer = %self.peer_display_name(&peer_node_addr),
                             "Resent msg2 for duplicate msg1 (same epoch)"
@@ -471,7 +474,10 @@ impl Node {
                 // Send msg2 response using the new handshake.
                 let wire_msg2 = build_msg2(our_new_index, wire.their_index, &wire.msg2_payload);
                 if let Some(transport) = self.transports.get(&packet.transport_id) {
-                    match transport.send(&packet.remote_addr, &wire_msg2).await {
+                    match transport
+                        .send_classified(&packet.remote_addr, &wire_msg2, TrafficClass::Control)
+                        .await
+                    {
                         Ok(_) => {
                             debug!(
                                 peer = %self.peer_display_name(&peer),

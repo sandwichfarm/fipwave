@@ -16,7 +16,7 @@ use crate::proto::mmp::{
     SenderReport,
 };
 use crate::proto::stp::ParentEval;
-use crate::transport::{TransportAddr, TransportId};
+use crate::transport::{TrafficClass, TransportAddr, TransportId};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, trace, warn};
 
@@ -518,7 +518,11 @@ impl Node {
                         p.mark_heartbeat_sent(now);
                     }
                     if let Err(e) = self
-                        .send_encrypted_link_message(&peer, &heartbeat_msg)
+                        .send_encrypted_link_message_classified(
+                            &peer,
+                            &heartbeat_msg,
+                            TrafficClass::Heartbeat,
+                        )
                         .await
                     {
                         trace!(peer = %self.peer_display_name(&peer), error = %e, "Failed to send heartbeat");
