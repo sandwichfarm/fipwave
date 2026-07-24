@@ -11,9 +11,10 @@ use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
 use serde_json::json;
+use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use tokio_tungstenite::tungstenite::{
     client::IntoClientRequest,
     http::{header::ORIGIN, HeaderValue},
@@ -31,6 +32,8 @@ const FWAV_TYPE_FIPS_PACKET: u8 = 9;
 const FWAV_TYPE_RESET: u8 = 8;
 const FWAV_TYPE_BROWSER_ARM: u8 = 10;
 const FWAV_TYPE_BROWSER_DISARM: u8 = 11;
+const RECONNECT_INITIAL_DELAY: Duration = Duration::from_millis(100);
+const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug, Default)]
 struct SoundCounters {
@@ -136,24 +139,9 @@ impl SoundTransport {
             return Err(TransportError::AlreadyStarted);
         }
         self.runtime.lock().expect("sound runtime").state = TransportState::Starting;
-        let mut request = self
-            .config
-            .bridge_url
-            .clone()
-            .into_client_request()
-            .map_err(|_| self.start_failed("sound_bridge_request_invalid"))?;
-        let authority = request
-            .uri()
-            .authority()
-            .ok_or_else(|| self.start_failed("sound_bridge_request_invalid"))?;
-        let origin = HeaderValue::from_str(&format!("http://{authority}"))
-            .map_err(|_| self.start_failed("sound_bridge_request_invalid"))?;
-        request.headers_mut().insert(ORIGIN, origin);
-        let (stream, _) = connect_async(request)
+        let stream = connect_bridge(&self.config.bridge_url)
             .await
-            .map_err(|_| self.start_failed("sound_bridge_connect_failed"))?;
-        let (mut writer, mut reader) = stream.split();
-        let (outbound_tx, mut outbound_rx) = mpsc::channel(self.config.queue_items());
+            .map_err(|code| self.start_failed(code))?;
         let (stop_tx, mut stop_rx) = oneshot::channel();
         let runtime = Arc::clone(&self.runtime);
         let outbound_bytes = Arc::clone(&self.outbound_bytes);
@@ -162,52 +150,85 @@ impl SoundTransport {
         let peer = self.configured_peer();
         let mtu = self.config.mtu();
         let queue_max_age = Duration::from_millis(self.config.queue_max_age_ms());
+        let queue_items = self.config.queue_items();
+        let bridge_url = self.config.bridge_url.clone();
         self.worker = Some(tokio::spawn(async move {
-            {
-                let mut current = runtime.lock().expect("sound runtime");
-                current.state = TransportState::Up;
-                current.sender = Some(outbound_tx);
-                current.browser_ready = false;
-            }
-            loop {
-                tokio::select! {
-                    _ = &mut stop_rx => break,
-                    outbound = outbound_rx.recv() => match outbound {
-                        Some(frame) => {
-                            outbound_bytes.fetch_sub(frame.bytes.len(), Ordering::AcqRel);
-                            if outbound_expired(frame.enqueued_at, queue_max_age) {
-                                reject(&runtime, "sound_queue_item_expired");
-                                continue;
-                            }
-                            if writer.send(Message::Binary(frame.bytes.into())).await.is_err() {
-                                let mut current = runtime.lock().expect("sound runtime");
-                                current.counters.disconnects += 1;
-                                current.last_error = Some("sound_bridge_disconnected");
-                                current.browser_ready = false;
-                                break;
-                            }
-                        }
-                        None => break,
-                    },
-                    inbound = reader.next() => match inbound {
-                        Some(Ok(Message::Binary(bytes))) => {
-                            let prior_epoch = runtime.lock().expect("sound runtime").epoch;
-                            let accepted = inject_inbound(&runtime, &packet_tx, transport_id, &peer, mtu, &bytes).await;
-                            if accepted.is_ok() && runtime.lock().expect("sound runtime").epoch != prior_epoch {
-                                while let Ok(expired) = outbound_rx.try_recv() {
-                                    outbound_bytes.fetch_sub(expired.bytes.len(), Ordering::AcqRel);
+            let mut next_stream = Some(stream);
+            'supervisor: loop {
+                let stream = next_stream.take().expect("sound supervisor stream");
+                let (mut writer, mut reader) = stream.split();
+                let (outbound_tx, mut outbound_rx) = mpsc::channel(queue_items);
+                {
+                    let mut current = runtime.lock().expect("sound runtime");
+                    current.state = TransportState::Up;
+                    current.sender = Some(outbound_tx);
+                    // A browser must explicitly arm every socket generation.
+                    // Queue contents never survive a local bridge disconnect,
+                    // but same-epoch sequence watermarks do: resetting either
+                    // would permit replay against the replacement socket.
+                    current.browser_ready = false;
+                    current.last_error = None;
+                }
+                let disconnected = loop {
+                    tokio::select! {
+                        _ = &mut stop_rx => break false,
+                        outbound = outbound_rx.recv() => match outbound {
+                            Some(frame) => {
+                                outbound_bytes.fetch_sub(frame.bytes.len(), Ordering::AcqRel);
+                                if outbound_expired(frame.enqueued_at, queue_max_age) {
+                                    reject(&runtime, "sound_queue_item_expired");
+                                } else if writer.send(Message::Binary(frame.bytes.into())).await.is_err() {
+                                    break true;
                                 }
                             }
-                        }
-                        Some(Ok(_)) => reject(&runtime, "sound_binary_frame_required"),
-                        Some(Err(_)) | None => {
-                            let mut current = runtime.lock().expect("sound runtime");
-                            current.counters.disconnects += 1;
-                            current.last_error = Some("sound_bridge_disconnected");
-                            current.browser_ready = false;
-                            break;
-                        }
-                    },
+                            None => break true,
+                        },
+                        inbound = reader.next() => match inbound {
+                            Some(Ok(Message::Binary(bytes))) => {
+                                let prior_epoch = runtime.lock().expect("sound runtime").epoch;
+                                let accepted = inject_inbound(&runtime, &packet_tx, transport_id, &peer, mtu, &bytes).await;
+                                if accepted.is_ok() && runtime.lock().expect("sound runtime").epoch != prior_epoch {
+                                    while let Ok(expired) = outbound_rx.try_recv() {
+                                        outbound_bytes.fetch_sub(expired.bytes.len(), Ordering::AcqRel);
+                                    }
+                                }
+                            }
+                            Some(Ok(_)) => reject(&runtime, "sound_binary_frame_required"),
+                            Some(Err(_)) | None => break true,
+                        },
+                    }
+                };
+                if !disconnected { break 'supervisor; }
+                {
+                    let mut current = runtime.lock().expect("sound runtime");
+                    current.counters.disconnects += 1;
+                    current.sender = None;
+                    current.browser_ready = false;
+                    current.state = TransportState::Starting;
+                    current.last_error = Some("sound_bridge_disconnected");
+                }
+                // Dropping this receiver releases every unsent frame. Every
+                // reconnect starts with zero reserved bytes and a fresh queue.
+                drop(outbound_rx);
+                outbound_bytes.store(0, Ordering::Release);
+
+                let mut delay = RECONNECT_INITIAL_DELAY;
+                loop {
+                    tokio::select! {
+                        _ = &mut stop_rx => break 'supervisor,
+                        attempt = connect_bridge(&bridge_url) => match attempt {
+                            Ok(next) => { next_stream = Some(next); break; }
+                            Err(_) => {
+                                let mut current = runtime.lock().expect("sound runtime");
+                                current.last_error = Some("sound_bridge_reconnecting");
+                            }
+                        },
+                    }
+                    tokio::select! {
+                        _ = &mut stop_rx => break 'supervisor,
+                        _ = tokio::time::sleep(delay) => {},
+                    }
+                    delay = std::cmp::min(delay.saturating_mul(2), RECONNECT_MAX_DELAY);
                 }
             }
             let mut current = runtime.lock().expect("sound runtime");
@@ -319,6 +340,25 @@ impl SoundTransport {
         runtime.last_error = Some(code);
         TransportError::StartFailed(code.into())
     }
+}
+
+async fn connect_bridge(
+    bridge_url: &str,
+) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, &'static str> {
+    let mut request = bridge_url
+        .into_client_request()
+        .map_err(|_| "sound_bridge_request_invalid")?;
+    let authority = request
+        .uri()
+        .authority()
+        .ok_or("sound_bridge_request_invalid")?;
+    let origin = HeaderValue::from_str(&format!("http://{authority}"))
+        .map_err(|_| "sound_bridge_request_invalid")?;
+    request.headers_mut().insert(ORIGIN, origin);
+    connect_async(request)
+        .await
+        .map(|(stream, _)| stream)
+        .map_err(|_| "sound_bridge_connect_failed")
 }
 
 fn reserve_bytes(counter: &AtomicUsize, limit: usize, amount: usize) -> bool {
@@ -792,6 +832,72 @@ mod tests {
         );
         assert_eq!(packet_rx.recv().await.unwrap().data, returned);
         fixture.await.unwrap();
+        sound.stop_async().await.unwrap();
+        assert_eq!(sound.state(), TransportState::Down);
+    }
+
+    #[tokio::test]
+    async fn sound_worker_reconnects_after_bridge_loss_without_replaying_or_restart() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let first_payload = vec![0x6d; 1357];
+        let second_payload = vec![0x6e; 1357];
+        let expected_first = first_payload.clone();
+        let expected_second = second_payload.clone();
+        let fixture = tokio::spawn(async move {
+            let (first, _) = listener.accept().await.unwrap();
+            let first = tokio_tungstenite::accept_async(first).await.unwrap();
+            let (mut first_writer, mut first_reader) = first.split();
+            let first_outbound = first_reader.next().await.unwrap().unwrap().into_data();
+            assert_eq!(&first_outbound[FWAV_HEADER_BYTES..], expected_first.as_slice());
+            assert_eq!(u64::from_le_bytes(first_outbound[16..24].try_into().unwrap()), 1);
+            first_writer.send(Message::Binary(encode_packet(1, 9, &[0x41]).into())).await.unwrap();
+            drop(first_writer);
+            drop(first_reader);
+
+            let (second, _) = listener.accept().await.unwrap();
+            let second = tokio_tungstenite::accept_async(second).await.unwrap();
+            let (mut second_writer, mut second_reader) = second.split();
+            // Same-epoch sequence 9 was accepted before the disconnect and
+            // must remain a replay after the replacement socket is live.
+            second_writer.send(Message::Binary(encode_packet(1, 9, &[0x41]).into())).await.unwrap();
+            let second_outbound = second_reader.next().await.unwrap().unwrap().into_data();
+            assert_eq!(&second_outbound[FWAV_HEADER_BYTES..], expected_second.as_slice());
+            assert_eq!(u64::from_le_bytes(second_outbound[16..24].try_into().unwrap()), 2);
+        });
+        let config = SoundConfig {
+            bridge_url: format!("ws://127.0.0.1:{}/bridge/fips", address.port()),
+            peer_addr: "sound-a".into(),
+            mtu: 1357,
+            queue_items: 2,
+            queue_bytes: 4096,
+            queue_max_age_ms: 5_000,
+        };
+        let (packet_tx, mut packet_rx) = packet_channel(2);
+        let mut sound = SoundTransport::new(TransportId::new(10), None, config, packet_tx).unwrap();
+        sound.start_async().await.unwrap();
+        for _ in 0..100 {
+            if sound.state() == TransportState::Up { break; }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        sound.arm_browser(1).unwrap();
+        assert_eq!(sound.send_async(&sound.configured_peer(), &first_payload).await.unwrap(), 1357);
+        assert_eq!(packet_rx.recv().await.unwrap().data, vec![0x41]);
+        for _ in 0..100 {
+            if sound.transport_stats()["disconnects"] == 1 && sound.state() == TransportState::Up {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(sound.transport_stats()["disconnects"], 1);
+        assert_eq!(sound.outbound_bytes.load(Ordering::Acquire), 0);
+        sound.arm_browser(1).unwrap();
+        assert_eq!(sound.send_async(&sound.configured_peer(), &second_payload).await.unwrap(), 1357);
+        fixture.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(packet_rx.try_recv().is_err());
+        assert_eq!(sound.transport_stats()["tx_packets"], 2);
+        assert!(sound.transport_stats()["rejected"].as_u64().unwrap_or(0) >= 1);
         sound.stop_async().await.unwrap();
         assert_eq!(sound.state(), TransportState::Down);
     }
