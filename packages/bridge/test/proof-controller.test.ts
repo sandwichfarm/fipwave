@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { resolveDemoConfig } from '../src/demo-config.js';
-import { createProofController } from '../src/proof-controller.js';
+import { createProofController, projectPublicProofExecution } from '../src/proof-controller.js';
 
 const now = 1_700_000_000_000;
 const peer = { npub: resolveDemoConfig('a').peer.publicKey, connectivity: 'connected', link_id: 1, transport_type: 'sound', authenticated_at_ms: now, last_seen_ms: now };
@@ -26,5 +26,14 @@ describe('proof controller', () => {
     const controller = createProofController({ config: resolveDemoConfig('a'), targetIpv6: 'fd00::2', control: { query: async (kind: 'peers' | 'links' | 'transports') => kind === 'peers' ? { peers: [peer] } : kind === 'links' ? { links: [link] } : { transports: [transport] } }, acousticStatus: () => acousticStatus, isolation: async () => isolation, now: () => now, execFile });
     await expect(controller.ping()).resolves.toMatchObject({ pingReady: false, reason: expect.any(String), evidenceClass: 'human_needed' });
     expect(execFile).not.toHaveBeenCalled();
+  });
+
+  it('keeps raw process output out of the browser-facing proof projection', async () => {
+    const controller = createProofController({ config: resolveDemoConfig('a'), targetIpv6: 'fd00::2', control: { query: async (kind: 'peers' | 'links' | 'transports') => kind === 'peers' ? { peers: [peer] } : kind === 'links' ? { links: [link] } : { transports: [transport] } }, acousticStatus: () => ({ epoch: 7, ready: true, observedAtMs: now }), isolation: async () => ({ accepted: true, epoch: 7, observedAtMs: now, targetIpv6: 'fd00::2' }), now: () => now, execFile: async () => ({ exitCode: 1, stdout: 'private network detail', stderr: 'private command error' }) });
+
+    const projected = projectPublicProofExecution(await controller.ping());
+
+    expect(projected).not.toHaveProperty('raw');
+    expect(JSON.stringify(projected)).not.toContain('private');
   });
 });

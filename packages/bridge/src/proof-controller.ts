@@ -5,6 +5,7 @@ import { joinSoundProof, projectSoundProofResult, type AcousticProofStatus, type
 export interface ProofExecFile { (file: string, args: readonly string[], options: Readonly<{ timeout: number; maxBuffer: number; windowsHide: boolean }>): Promise<RawPingResult>; }
 export interface ProofControllerOptions { readonly config: DemoConfig; readonly targetIpv6: string; readonly control: Pick<FipsControlClient, 'query'>; readonly acousticStatus: () => AcousticProofStatus; readonly isolation: () => Promise<IsolationProofStatus>; readonly now: () => number; readonly execFile: ProofExecFile; }
 export interface ProofExecution { readonly pingReady: boolean; readonly reason: string; readonly evidenceClass: 'Fixture' | 'human_needed'; readonly result?: PublicPingResult; readonly raw?: RawPingResult; readonly join: SoundProofJoin; }
+export type PublicProofExecution = Omit<ProofExecution, 'raw'>;
 
 export class ProofController {
   constructor(private readonly options: ProofControllerOptions) {}
@@ -31,3 +32,9 @@ export class ProofController {
 }
 
 export function createProofController(options: ProofControllerOptions): ProofController { return new ProofController(options); }
+
+/** Deliberate public boundary: command output is retained only for local artifacts. */
+export function projectPublicProofExecution(execution: ProofExecution): PublicProofExecution {
+  const { raw: _raw, ...publicExecution } = execution;
+  return Object.freeze(publicExecution);
+}

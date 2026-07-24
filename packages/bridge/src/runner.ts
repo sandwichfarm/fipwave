@@ -12,6 +12,9 @@ import { NativeCommandCodecAdapter } from './codecs/command.js';
 import { CyrinxBatchWorker } from './cyrinx-worker.js';
 import { cyrinxDigitalCases } from './qualification-session.js';
 import { CYRINX_DEADLINE_MS, QUIET_CODEC, TUN_EVIDENCE_CHECKS, validateTunEvidence, type MachineReport, type TunEvidence } from './report.js';
+import { createFipsControlClient } from './fips-control-client.js';
+import { createProofController, projectPublicProofExecution } from './proof-controller.js';
+import { createIsolationResponder } from './isolation-attestation.js';
 
 const execFileAsync = promisify(execFile);
 function findProjectRoot(from: string): string {
@@ -197,7 +200,7 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
       ) fail('Cyrinx digital encode/decode gate failed');
     }
   });
-  const bridgeOptions = {
+  const bridgeOptions: BridgeServerOptions = {
     host: options.host ?? LOOPBACK_HOST, port: runtimePort, artifactDir: path.join(PROJECT_ROOT, '.artifacts', 'qualification'),
     uiDir: options.uiDir ?? path.join(PROJECT_ROOT, 'dist', 'modem-ui'), qualificationConfig: config,
     reportAuthority: { tunEvidence, build: { commit: build.commit, os: build.os, architecture: build.architecture } },
@@ -209,10 +212,38 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
     cyrinxWorker,
     ...(options.cyrinxTimerForTests ? { cyrinxTimer: options.cyrinxTimerForTests } : {}),
     ...(options.cyrinxSettleForTests ? { cyrinxSettle: options.cyrinxSettleForTests } : {}),
-  } satisfies BridgeServerOptions;
+  };
   const owner = new ResourceOwner();
   try {
-    const bridge = await (options.createBridgeServerForTests ?? createBridgeServer)(bridgeOptions);
+    const control = createFipsControlClient({ socketPath: demoConfig.fips.controlSocketPath });
+    owner.register('fips-control', control.close);
+    let bridge: Awaited<ReturnType<typeof createBridgeServer>> | undefined;
+    const proof = createProofController({
+      config: demoConfig, targetIpv6: demoConfig.fips.targetIpv6, control,
+      // The bridge's browser-facing state is deliberately not enough to infer
+      // peer truth. Until the runner receives the current acoustic projection,
+      // this fails closed and routes refreshes to a bounded blocked state.
+      acousticStatus: () => {
+        const state = bridge?.state();
+        return { epoch: state?.epoch ?? 0, ready: state?.acousticReady ?? false, observedAtMs: Date.now() };
+      },
+      isolation: async () => ({ accepted: false, epoch: 0, observedAtMs: Date.now(), targetIpv6: demoConfig.fips.targetIpv6 }),
+      now: () => Date.now(),
+      execFile: async (file, args, commandOptions) => {
+        try { const result = await execFileAsync(file, [...args], { timeout: commandOptions.timeout, maxBuffer: commandOptions.maxBuffer, windowsHide: commandOptions.windowsHide }); return { exitCode: 0, stdout: result.stdout, stderr: result.stderr }; }
+        catch (error) { const failed = error as { code?: unknown; stdout?: unknown; stderr?: unknown }; return { exitCode: typeof failed.code === 'number' ? failed.code : 2, stdout: typeof failed.stdout === 'string' ? failed.stdout : '', stderr: typeof failed.stderr === 'string' ? failed.stderr : '' }; }
+      },
+    });
+    if (demoConfig.role === 'B') {
+      const responder = createIsolationResponder({ now: () => Date.now(), snapshot: async () => { throw new Error('snapshot_invalid'); }, host: demoConfig.fips.ipv6Address, port: demoConfig.proof.port });
+      owner.register('isolation-responder', responder.close);
+    }
+    bridgeOptions.proofController = {
+      role: demoConfig.role,
+      status: async () => projectPublicProofExecution(await proof.status()),
+      ping: async () => projectPublicProofExecution(await proof.ping()),
+    };
+    bridge = await (options.createBridgeServerForTests ?? createBridgeServer)(bridgeOptions);
     owner.register('bridge', bridge.close);
     if (options.fipsConfigOutput && fipsConfig) await publishFipsConfig(options.fipsConfigOutput, fipsConfig);
     await options.afterBridgeStartedForTests?.();
