@@ -22,6 +22,10 @@ export enum MessageType {
   RESET = 8,
   /** One complete opaque FIPS transport packet; codec and waveform-neutral. */
   FIPS_PACKET = 9,
+  /** Bridge-only current-epoch browser state for the local FIPS worker. */
+  BROWSER_ARM = 10,
+  /** Bridge-only disarm event; emitted on browser disconnect/reset. */
+  BROWSER_DISARM = 11,
 }
 
 export enum PcmEncoding {
@@ -79,7 +83,7 @@ function fail(message: string): never {
 }
 
 function isMessageType(value: number): value is MessageType {
-  return value >= MessageType.HELLO && value <= MessageType.FIPS_PACKET;
+  return value >= MessageType.HELLO && value <= MessageType.BROWSER_DISARM;
 }
 
 function validateInteger(value: number, name: string, maximum: number): void {

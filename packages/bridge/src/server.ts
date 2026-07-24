@@ -357,7 +357,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     evidenceClass: 'Loopback', acousticReady: false, peerConnected: false, pingReady: false,
   };
   let audio: BrowserAudio | undefined; let generation = 1; let writeTail: Promise<unknown> = Promise.resolve();
-  let results = new Map<string, BrowserResult>(); let failureReasons = new Set<string>();
+  let results = new Map<string, BrowserResult>(); let failureReasons = new Set<string>(); let browserArmed = false;
   let owner: WebSocket | undefined; let fipsOwner: WebSocket | undefined; let epochClaimed = false; let reconnectAllowed = false; let reconnectRequiresReset = false;
   let operationGeneration = 1; let operationAbort = new AbortController(); let settleAbort: AbortController | undefined; let shuttingDown = false;
   let cyrinxExpiryTimer: unknown;
@@ -434,6 +434,15 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   const packetDestinationReady = (direction: PacketDirection): boolean => {
     const target = direction === 'browser-to-fips' ? fipsOwner : owner;
     return Boolean(target && target.readyState === target.OPEN);
+  };
+  const notifyFipsBrowserState = (armed: boolean): void => {
+    if (!fipsOwner || fipsOwner.readyState !== fipsOwner.OPEN) return;
+    fipsOwner.send(encodeFrame({
+      type: armed ? MessageType.BROWSER_ARM : MessageType.BROWSER_DISARM,
+      epoch: state.epoch,
+      sequence: 0n,
+      payload: Buffer.alloc(0),
+    }));
   };
   const rejectSocket = (socket: WebSocket, error: unknown): void => {
     const safe = safeBridgeError(error);
@@ -721,7 +730,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     if (!alreadyPreempted) abortCyrinxOperation();
     generation += 1; state.epoch += 1; audio = undefined; results = new Map(); failureReasons = new Set(cyrinxSession?.fallbackReason ? [cyrinxSession.fallbackReason] : []);
     state.stampedResults = []; state.overflowedQueues = []; state.discontinuities = 0; state.rejectedFrames = 0;
-    state.packetCounters = { browserToFips: 0, fipsToBrowser: 0 }; state.packetReadiness = { browser: false, fips: false }; state.lastError = null;
+    state.packetCounters = { browserToFips: 0, fipsToBrowser: 0 }; state.packetReadiness = { browser: false, fips: false }; state.lastError = null; browserArmed = false;
     state.lastAcceptedAtMs = null;
     state.packetQueues.browserToFips.health = 'not-connected'; state.packetQueues.fipsToBrowser.health = 'not-connected';
     for (const tracker of sequenceTrackers) tracker.value = -1n;
@@ -1084,8 +1093,9 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       if (frame.type === MessageType.AUDIO_SETTINGS) {
         if (config) {
           const payload = parseJsonPayload(frame); if (hasForbiddenAuthority(payload)) fail('browser_authority_forbidden');
-          audio = parseBrowserAudio(payload); await persist();
+          audio = parseBrowserAudio(payload); browserArmed = true; await persist();
         }
+        notifyFipsBrowserState(true);
         const reportPath = path.join(options.artifactDir, 'loopback-qualification.json');
         await writeQualificationReport({ schemaVersion: 1, evidencePath: 'Loopback', physicalQualification: false, qualificationStatus: 'not-physical', capturedAt: new Date().toISOString(), reportPath, frame: { messageType: 'AUDIO_SETTINGS', epoch: frame.epoch, sequence: frame.sequence.toString(), payloadBytes: frame.payload.byteLength } });
         socket.send(JSON.stringify({ reportPath, physicalQualification: false })); return;
@@ -1114,6 +1124,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       fipsOwner = socket; clients.add(socket); state.packetEndpoints.fips = 'ready';
       const lastSequence = { value: -1n }; sequenceTrackers.add(lastSequence); let processing = Promise.resolve();
       flushPacketQueue('browser-to-fips');
+      if (browserArmed) notifyFipsBrowserState(true);
       socket.once('close', () => { clients.delete(socket); sequenceTrackers.delete(lastSequence); if (fipsOwner === socket) { fipsOwner = undefined; state.packetEndpoints.fips = 'disconnected'; } });
       socket.on('message', (rawData, isBinary) => {
         processing = processing.then(() => {
@@ -1155,7 +1166,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       sequenceTrackers.delete(lastSequence);
       browserConnections.delete(connection);
       if (owner !== socket) return;
-      owner = undefined; state.packetEndpoints.browser = 'disconnected';
+      owner = undefined; state.packetEndpoints.browser = 'disconnected'; browserArmed = false; notifyFipsBrowserState(false);
       if (shuttingDown) return;
       if (connection.mustResetBeforeUse) {
         reconnectAllowed = true;

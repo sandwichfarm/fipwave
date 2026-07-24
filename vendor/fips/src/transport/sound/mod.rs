@@ -25,6 +25,8 @@ use crate::transport::{
 const FWAV_HEADER_BYTES: usize = 32;
 const FWAV_TYPE_FIPS_PACKET: u8 = 9;
 const FWAV_TYPE_RESET: u8 = 8;
+const FWAV_TYPE_BROWSER_ARM: u8 = 10;
+const FWAV_TYPE_BROWSER_DISARM: u8 = 11;
 
 #[derive(Clone, Debug, Default)]
 struct SoundCounters {
@@ -322,6 +324,16 @@ async fn inject_inbound(
         current.last_error = None;
         return Ok(());
     }
+    if kind == FWAV_TYPE_BROWSER_ARM || kind == FWAV_TYPE_BROWSER_DISARM {
+        let mut current = runtime.lock().expect("sound runtime");
+        if payload_len != 0 || current.state != TransportState::Up || current.epoch != epoch {
+            current.counters.rejected += 1;
+            current.last_error = Some("sound_browser_control_invalid");
+            return Err(());
+        }
+        current.browser_ready = kind == FWAV_TYPE_BROWSER_ARM;
+        return Ok(());
+    }
     if kind != FWAV_TYPE_FIPS_PACKET || payload_len > mtu as usize {
         reject(runtime, "sound_packet_invalid");
         return Err(());
@@ -502,6 +514,56 @@ mod tests {
             .is_err()
         );
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn bridge_browser_control_arms_and_disarms_only_the_current_epoch() {
+        let (tx, _rx) = packet_channel(2);
+        let sound = SoundTransport::new(TransportId::new(7), None, config(), tx).unwrap();
+        sound.runtime.lock().unwrap().state = TransportState::Up;
+        let mut arm = vec![0; FWAV_HEADER_BYTES];
+        arm[0..4].copy_from_slice(b"FWAV");
+        arm[4] = 1;
+        arm[5] = FWAV_TYPE_BROWSER_ARM;
+        arm[12..16].copy_from_slice(&1u32.to_le_bytes());
+        inject_inbound(
+            &sound.runtime,
+            &sound.packet_tx,
+            sound.transport_id,
+            &sound.configured_peer(),
+            sound.mtu(),
+            &arm,
+        )
+        .await
+        .unwrap();
+        assert!(sound.browser_ready());
+
+        let mut disarm = arm.clone();
+        disarm[5] = FWAV_TYPE_BROWSER_DISARM;
+        inject_inbound(
+            &sound.runtime,
+            &sound.packet_tx,
+            sound.transport_id,
+            &sound.configured_peer(),
+            sound.mtu(),
+            &disarm,
+        )
+        .await
+        .unwrap();
+        assert!(!sound.browser_ready());
+
+        arm[12..16].copy_from_slice(&2u32.to_le_bytes());
+        assert!(inject_inbound(
+            &sound.runtime,
+            &sound.packet_tx,
+            sound.transport_id,
+            &sound.configured_peer(),
+            sound.mtu(),
+            &arm,
+        )
+        .await
+        .is_err());
+        assert!(!sound.browser_ready());
     }
 
     #[test]
