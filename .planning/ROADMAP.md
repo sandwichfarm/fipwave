@@ -71,7 +71,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. The browser and its local container exchange complete packets or timestamped PCM chunks in binary WebSocket messages, never base64 or JSON bulk payloads; the bridge rejects invalid type or size, bounds its queues, and visibly reports ready, disconnected, overflow, and last-error states.
   5. One recovery action resets and reconnects browser, modem state, bridge queues, session, and acoustic epoch, while the FIPS-facing contract remains independent of Cyrinx, Quiet, Hush, or any other codec.
 
-**Plans**: 5/7 plans executed
+**Plans**: 6/7 plans executed
 
 Plans:
 **Wave 1**
@@ -87,7 +87,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 02-05-PLAN.md — Prove shared-namespace, loopback-only FIPS/bridge topology on the executing Docker engine.
+- [x] 02-05-PLAN.md — Prove shared-namespace, loopback-only FIPS/bridge topology on the executing Docker engine.
 - [ ] 02-06-PLAN.md — Wire the armed browser packet adapter and render truthful recovery/transport state.
 
 **UI hint**: yes
@@ -149,7 +149,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Qualify the Demo Substrate | 9/10 | In Progress|  |
-| 2. Configure and Establish the Codec-Neutral FIPS Bridge | 5/7 | In Progress|  |
+| 2. Configure and Establish the Codec-Neutral FIPS Bridge | 6/7 | In Progress|  |
 | 3. Negotiate and Deliver Reliable Acoustic Packets | 0/TBD | Not started | - |
 | 4. Prove the Sound-Only FIPS Ping | 0/TBD | Not started | - |
 | 5. Present, Freeze, and Rehearse the Demo | 0/TBD | Not started | - |

@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: Qualify the Demo Substrate
 status: executing
-stopped_at: Completed 02-07-PLAN.md
-last_updated: "2026-07-24T01:55:21.840Z"
+stopped_at: Completed 02-05-PLAN.md
+last_updated: "2026-07-24T02:20:10.585Z"
 last_activity: 2026-07-23
 last_activity_desc: Plan 01-10 physical checkpoint reached
 progress:
   total_phases: 2
   completed_phases: 0
   total_plans: 17
-  completed_plans: 14
+  completed_plans: 15
 ---
 
 # Project State
@@ -32,7 +32,7 @@ Plan: 10 of 10
 Status: Awaiting blocking-human physical qualification
 Last activity: 2026-07-23 — Plan 01-10 physical checkpoint reached
 
-Progress: [████████░░] 82%
+Progress: [█████████░] 88%
 
 ## Performance Metrics
 
@@ -71,6 +71,7 @@ Progress: [████████░░] 82%
 | Phase 02 P03 | 6min | 2 tasks | 6 files |
 | Phase 02 P04 | 8min | 2 tasks | 3 files |
 | Phase 02 P07 | 11min | 2 tasks | 5 files |
+| Phase 02 P05 | 22min | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -103,6 +104,8 @@ Recent decisions affecting current work:
 - [Phase ?]: Treat RESET acknowledgements as bridge-originated frames so they cannot be echoed back as reset requests.
 - [Phase ?]: Sound configuration exposes only loopback bridge endpoint, static peer identity, MTU, and queue bounds.
 - [Phase ?]: A local sound worker being Up never authorizes packet traffic until the current browser epoch is armed.
+- [Phase ?]: FIPS shares only the bridge service network namespace and never publishes its packet endpoint.
+- [Phase ?]: The browser runner stays bound to container loopback; an in-container forwarder makes its loopback-only host publication reachable on Docker Desktop.
 
 ### Pending Todos
 
@@ -142,6 +145,6 @@ hardware checkpoint remains explicit.
 
 ## Session Continuity
 
-Last session: 2026-07-24T01:55:21.832Z
-Stopped at: Completed 02-07-PLAN.md
+Last session: 2026-07-24T02:20:10.576Z
+Stopped at: Completed 02-05-PLAN.md
 Resume file: None
