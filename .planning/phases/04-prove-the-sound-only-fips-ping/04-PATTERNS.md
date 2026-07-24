@@ -45,7 +45,7 @@ export function parseAcousticPublicStatus(input: unknown): AcousticPublicStatus 
 }
 ```
 
-**Related public-snapshot pattern** — `apps/modem-ui/src/bridge-state.ts:33-42`: validate full key cardinality, minimum MTU, ISO timestamp, and allowlisted error before `Object.freeze` projection. Apply the same method to control-socket documents; raw `fipsctl` JSON must never reach the browser.
+**Related public-snapshot pattern** — `apps/modem-ui/src/bridge-state.ts:33-42`: validate full key cardinality, minimum MTU, ISO timestamp, and allowlisted error before `Object.freeze` projection. Apply the same method to control-socket documents; raw control JSON must never reach the browser.
 
 **Control snapshot fields to join:** `vendor/fips/src/control/queries.rs:265-323`, `568-593`, and `1362-1400` establish `npub`, `connectivity`, `link_id`, `transport_type`, peer/link counters, link `transport_id`, transport `type/state/mtu/stats`. Require the expected npub, `connected`, `sound`, the same link/transport ID, exactly one B transport, `worker_up`, `acoustic_ready`, matching acoustic epoch, configured B target, and fresh timestamps before `pingReady: true`.
 
@@ -153,7 +153,7 @@ For the new ping runner, use `ping` directly in the `docker exec` argument list 
 
 **Analog:** `scripts/fips-compose-smoke.mjs:26-58`
 
-Add role-B isolation assertions beside existing live inspect/TUN assertions. Assert runtime facts—not just rendered YAML: exactly one FIPS transport of type Sound from `fipsctl show transports`, no FIPS published ports, shared bridge namespace, exact `NET_ADMIN`, `/dev/net/tun`, and loopback browser publication.
+Add role-B isolation assertions beside existing live inspect/TUN assertions. Assert runtime facts—not just rendered YAML: exactly one FIPS transport of type Sound from the bounded Node control client, no FIPS published ports, shared bridge namespace, exact `NET_ADMIN`, `/dev/net/tun`, and loopback browser publication.
 
 ```js
 if (Object.keys(fips.NetworkSettings?.Ports ?? {}).length !== 0) throw new Error('fips must not publish ports');
@@ -169,7 +169,7 @@ Retain the current bounded polling pattern (`scripts/fips-compose-smoke.mjs:94-1
 
 **Analog:** the existing multi-stage final-image conventions in `vendor/fips/Dockerfile`.
 
-Install `iputils-ping` in the runtime layer and copy/build the already-vendored `fipsctl` binary alongside `fips`; retain pinned base packages and current non-privileged image posture. Tests should inspect the final image for `/usr/local/bin/fipsctl` and `/usr/bin/ping`, not assume a build-stage binary is available.
+Install `iputils-ping` in the bridge runtime layer; retain pinned base packages and the current non-privileged image posture. Do not copy/build `fipsctl`; use a bounded Node client against the private shared Unix socket. Tests should inspect the final bridge image for `/usr/bin/ping` and verify that the client can issue only the three allowlisted queries.
 
 ### `vendor/fips/src/control/queries.rs` and `vendor/fips/src/bin/fipsctl.rs` (service/model, transform)
 
@@ -197,7 +197,7 @@ peer_json["transport_type"] = json!(handle.transport_type().name);
 t_json["stats"] = handle.transport_stats();
 ```
 
-`vendor/fips/src/bin/fipsctl.rs:144-160` maps the commands directly to `show_peers`, `show_links`, and `show_transports`; the proof runner must call those command names, parse their bounded JSON, and join them by IDs.
+`vendor/fips/src/bin/fipsctl.rs:144-160` documents the reference mapping to `show_peers`, `show_links`, and `show_transports`; the proof runner's bounded Node client must call only those command names, parse their bounded JSON, and join them by IDs.
 
 ### `vendor/fips/src/transport/sound/mod.rs` (service, event-driven)
 
@@ -304,7 +304,7 @@ Each bridge replacement starts disarmed. Reducers reject older snapshots; reset 
 
 **Sources:** `scripts/fips-compose-smoke.mjs:73-120`; `packages/bridge/src/runner.ts:198`; `tests/production-runner.test.ts:201-230`
 
-Use `execFile`/argument arrays, explicit timeout + buffer, no shell interpolation, and structured process results. Live `docker inspect`, `fipsctl`, and in-namespace system `ping -6` are proof sources; logs remain diagnostics only.
+Use `execFile`/argument arrays, explicit timeout + buffer, no shell interpolation, and structured process results. Live `docker inspect`, bounded control-socket snapshots, and in-namespace system `ping -6` are proof sources; logs remain diagnostics only.
 
 ### Local-only topology
 

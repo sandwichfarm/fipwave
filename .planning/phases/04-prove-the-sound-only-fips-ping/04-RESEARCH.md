@@ -39,7 +39,7 @@
 ### the agent's Discretion
 
 - Choose the smallest existing FIPS control/snapshot seam that can expose authenticated peer identity, link/transport, and counters without parsing logs as the primary contract.
-- Choose whether the role-A kernel ping is invoked by a small Node orchestrator, a Compose health/proof service, or a direct bounded `docker exec`, provided the system binary and namespace remain authoritative.
+- Run the role-A kernel ping from the bridge runner's proof controller, which shares the FIPS service network namespace under Compose; invoke the fixed system binary directly with bounded arguments so no host route or separate proof service becomes authoritative.
 - Choose the existing FIPS upstream transport for optional wider-mesh access on role A after researching Docker Desktop/macOS and Linux compatibility.
 
 ### Deferred Ideas (OUT OF SCOPE)
@@ -62,12 +62,12 @@
 
 | ID | Description | Research Support |
 |---|---|---|
-| FIPS-04 | Static Sound peers perform normal authenticated encrypted handshake. | Gate normal FIPS dialing on existing `SoundTransport::connection_state`; prove through `fipsctl show peers` that expected npub is authenticated and `transport_type` is `sound`. [VERIFIED: repository source] |
+| FIPS-04 | Static Sound peers perform normal authenticated encrypted handshake. | Gate normal FIPS dialing on existing `SoundTransport::connection_state`; prove through the bounded `show_peers` control snapshot that expected npub is authenticated and `transport_type` is `sound`. [VERIFIED: repository source] |
 | FIPS-05 | Normal heartbeat and bounded reconnect after acoustic/browser interruption. | Keep existing FIPS peer `auto_reconnect`; prove disarm → peer loss/retry → fresh authenticated Sound link, without restarting either daemon. [VERIFIED: repository source] |
 | DEPLOY-03 | B has no usable FIPS transport except Sound. | Generated B YAML must contain only `transports.sound`; live `show_transports` must have exactly one Sound instance. [VERIFIED: repository source] |
 | DEPLOY-04 | A connects Sound peer to wider mesh/participant side. | Make Role A's Wi-Fi UDP client posture optional and non-required; its configured B peer remains Sound-only. [VERIFIED: repository source] |
 | DEPLOY-05 | Browser bridge cannot be another laptop-to-laptop path. | Keep Compose publish on `127.0.0.1`, FIPS un-published, shared service namespace; inspect this live. [VERIFIED: repository source] |
-| DEMO-01 | Real `ping -6` originates from participant side. | A proof runner executes the system `ping -6` with `docker exec` in A's FIPS container and records exact stdout/stderr/exit status. [CITED: https://man7.org/linux/man-pages/man8/ping.8%40%40iputils.html] |
+| DEMO-01 | Real `ping -6` originates from participant side. | A's bridge runner executes the system `ping -6` directly inside its Compose-shared FIPS network namespace and records exact stdout/stderr/exit status. [CITED: https://man7.org/linux/man-pages/man8/ping.8%40%40iputils.html] |
 | DEMO-02 | B returns real kernel echo reply via Sound. | Require ICMPv6 success only after the Sound-authenticated FIPS peer/link evidence passes; correlate before/after counters. [VERIFIED: repository source] |
 | DEMO-03 | Show peer/transport/link/isolation before ping. | Use FIPS control socket `show_peers`, `show_links`, and `show_transports`, not daemon logs. [VERIFIED: repository source] |
 | DEMO-04 | Correlate acoustic, packet, integrity/retry, and ICMP counters. | Combine observed browser acoustic snapshot, bridge packet counters, FIPS control snapshots, and process result in a timestamped proof object. [VERIFIED: repository source] |
@@ -77,11 +77,11 @@
 
 Phase 3 already establishes the necessary admission boundary. `AcousticSessionAdapter.refresh()` arms the FIPS packet adapter only from a current ready session, while degradation/reset first sends `ACOUSTIC_DISARM`; the bridge and vendored `SoundTransport` then reject packets until a valid current-epoch arm proof arrives. Phase 4 must leave that boundary intact and let ordinary FIPS handshake traffic flow only after it is armed. [VERIFIED: repository source]
 
-The vendored FIPS control socket is the smallest trustworthy observability seam. `fipsctl show peers` reports authenticated npub, connectivity, link ID, transport type, and link counters; `show_links` reports the active link and counters; `show_transports` reports every instantiated transport and Sound's worker/readiness/counter projection. This is a live snapshot rather than a log-derived inference. [VERIFIED: repository source]
+The vendored FIPS control socket is the smallest trustworthy observability seam. Its `show_peers` query reports authenticated npub, connectivity, link ID, transport type, and link counters; `show_links` reports the active link and counters; `show_transports` reports every instantiated transport and Sound's worker/readiness/counter projection. This is a live snapshot rather than a log-derived inference. [VERIFIED: repository source]
 
-The current runtime image is missing two required executables: it builds only `fips`, and installs `iproute2` but not `fipsctl` or `iputils-ping`. Phase 4 must build the vendored `fipsctl` binary and install `iputils-ping`; then a small Node proof runner can use argument-array `docker exec` calls to obtain control snapshots and run `ping -6` inside role A's real FIPS namespace. [VERIFIED: repository source]
+The current bridge runtime image is missing `iputils-ping`. Phase 4 installs that Debian package there and adds a bounded Node client for the vendored FIPS Unix control socket; it does not build or copy `fipsctl`. The Compose bridge and FIPS services already share one network namespace, and a private Compose volume exposes `/run/fips/control.sock` to the bridge without publishing it to the host. The runner-owned proof controller can therefore read current FIPS control snapshots and execute the system `ping -6` in that same live namespace without creating another host or browser path. [VERIFIED: repository source]
 
-**Primary recommendation:** Add a narrow, testable `scripts/prove-sound-ping.mjs` orchestration seam that validates live FIPS control snapshots and local acoustic status before invoking `docker exec <A-fips> ping -6 -n -c 1 -W <bounded-seconds> <B-fips0-ip>`; retain raw process output and mark it `Fixture` unless the paired physical two-laptop evidence is available. [VERIFIED: repository source] [CITED: https://man7.org/linux/man-pages/man8/ping.8%40%40iputils.html]
+**Primary recommendation:** Add a runner-owned `ProofController` injected into `createBridgeServer`. The existing listener serves exact same-origin `GET /proof-status` and `POST /proof-ping`; it owns fresh FIPS/acoustic/topology joins, the in-band B-isolation challenge, and one bounded system ping. After normal FIPS/Sound authentication, A sends a cryptographically random one-use IPv6 UDP challenge from A's `fips0` address to a fixed B `fips0` proof port. A Role B responder sharing the FIPS network namespace returns an exact-schema isolation attestation over that same authenticated/encrypted FIPS/Sound path. Only a current matching response can enable ping. [VERIFIED: repository source] [VERIFIED: locked planner resolution] [CITED: https://man7.org/linux/man-pages/man8/ping.8%40%40iputils.html]
 
 ## Architectural Responsibility Map
 
@@ -91,6 +91,7 @@ The current runtime image is missing two required executables: it builds only `f
 | Packet admission and normal FIPS authentication | API / Backend | Browser / Client | Sound transport gates opaque packets, while FIPS owns Noise handshake, encryption, heartbeat, and peer lifecycle. [VERIFIED: repository source] |
 | Authenticated peer/link/transport facts | API / Backend | — | FIPS control snapshots are the authoritative runtime source. [VERIFIED: repository source] |
 | B Sound-only proof | API / Backend | Docker runtime | FIPS snapshot proves instantiated transports; Compose inspection proves local endpoint/capability boundary. [VERIFIED: repository source] |
+| In-band B isolation attestation | API / Backend | FIPS/Sound data plane | Role B snapshots locally, then returns a nonce-bound exact-schema attestation over an IPv6 UDP exchange carried by the already-authenticated encrypted FIPS/Sound link. [VERIFIED: locked planner resolution] |
 | Kernel ICMPv6 acceptance | API / Backend | Database / Storage | System `ping` runs in A's FIPS namespace; immutable proof record retains observed result. [VERIFIED: repository source] |
 | Display of proof facts | Browser / Client | API / Backend | The browser renders structured facts supplied by the bridge; it must not derive peer/ping success itself. [VERIFIED: repository source] |
 
@@ -100,10 +101,10 @@ The current runtime image is missing two required executables: it builds only `f
 
 | Library / tool | Version | Purpose | Why Standard |
 |---|---|---|---|
-| Vendored FIPS control socket + `fipsctl` | vendored `fc8ebd5` base | Read authenticated peer, link, and transport snapshots. | Existing control queries already expose exactly the required facts; no log parser or new control protocol is needed. [VERIFIED: repository source] |
+| Vendored FIPS Unix control socket + bounded Node client | vendored `fc8ebd5` base | Read authenticated peer, link, and transport snapshots. | Existing read-only control queries already expose exactly the required facts; a strict Node client avoids shipping another control binary or listener. [VERIFIED: repository source] |
 | Vendored `SoundTransport` | vendored `fc8ebd5` base | Admission gate, local bridge worker, bounded reconnect, transport counters. | It already fails closed when not armed and publishes Sound-specific counters through `show_transports`. [VERIFIED: repository source] |
 | `iputils-ping` | Debian Bookworm package | Authoritative Linux kernel ICMPv6 request/reply process. | The existing image is Debian Bookworm; `ping -6`, `-c`, `-W`, and exit semantics are documented by iputils. [VERIFIED: repository source] [CITED: https://man7.org/linux/man-pages/man8/ping.8%40%40iputils.html] |
-| Node built-ins (`child_process.execFile`) | Node 25.2.1 host | Bounded proof orchestration. | Existing scripts already use `execFile` with argument arrays for Docker inspection. [VERIFIED: repository source] |
+| Node built-ins (`node:net`, `child_process.execFile`) | Node 22.23.1 runtime | Bounded Unix-socket observation and proof orchestration. | The pinned bridge runtime provides both APIs; strict request allowlisting and argument arrays avoid a shell or generic control surface. [VERIFIED: repository source] |
 
 ### Supporting
 
@@ -117,23 +118,23 @@ The current runtime image is missing two required executables: it builds only `f
 | Instead of | Could Use | Tradeoff |
 |---|---|---|
 | FIPS control snapshots | Daemon-log parsing | Logs are existing smoke diagnostics but cannot reliably establish current authenticated/link/transport state. Do not use as primary contract. [VERIFIED: repository source] |
-| `docker exec` proof runner | Host `ping` | Docker Desktop cannot route host traffic to Linux containers and per-container addressing is unavailable; it violates the locked namespace authority. [CITED: https://docs.docker.com/desktop/features/networking/networking-how-tos/] |
+| Runner-owned proof controller in the Compose-shared FIPS network namespace | Host `ping` or a host-side `docker exec` orchestrator | Docker Desktop cannot route host traffic to Linux containers and per-container addressing is unavailable; either host-side approach weakens the locked namespace authority and lifecycle ownership. [CITED: https://docs.docker.com/desktop/features/networking/networking-how-tos/] |
 | Default B Sound-only config | Host networking | Host mode removes normal network isolation and is platform-specific/opt-in on Docker Desktop; it is not needed for the local bridge architecture. [CITED: https://docs.docker.com/engine/network/drivers/host/] |
 
 **Installation / image change:**
 
 ```dockerfile
-# vendor/fips/Dockerfile — use existing vendored Cargo workspace
-RUN cargo build --locked --release --bin fips --bin fipsctl
-RUN apt-get install -y --no-install-recommends libdbus-1-3 iproute2 iputils-ping
-COPY --from=build /src/target/release/fipsctl /usr/local/bin/fipsctl
+# Dockerfile.bridge — final runtime stage
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends iputils-ping \
+  && rm -rf /var/lib/apt/lists/*
 ```
 
 No new npm, crates.io, or PyPI dependency is required. [VERIFIED: repository source]
 
 ## Package Legitimacy Audit
 
-No third-party application package is introduced by this phase. `fipsctl` is built from the already-vendored FIPS workspace; `iputils-ping` is an OS package from the Debian image's configured package source. [VERIFIED: repository source]
+No third-party application package is introduced by this phase. The control client uses Node built-ins, and `iputils-ping` is an OS package from the pinned Debian image's configured package source. [VERIFIED: repository source]
 
 ## Architecture Patterns
 
@@ -146,8 +147,8 @@ flowchart LR
   AF -->|normal encrypted FIPS packets over audible FAS1| BF[Role B FIPS SoundTransport]
   BF -->|loopback WebSocket| BB[Role B local bridge]
   BB -->|current epoch ARM/DISARM + opaque FWAV| BUI[Role B browser acoustic session]
-  AF --> AP[fipsctl snapshots: peers / links / transports]
-  BF --> BP[fipsctl snapshots: B isolation]
+  AF --> AP[bounded control snapshots: peers / links / transports]
+  BF --> BP[bounded control snapshots: B isolation]
   AP --> G{A proof gate}
   BP --> G
   AUI --> G
@@ -163,16 +164,22 @@ The only inter-laptop edge is the encrypted FIPS packet path carried by the brow
 ```text
 packages/bridge/src/
 ├── demo-config.ts       # Extend the one role/config authority
-├── runner.ts            # Render role-owned FIPS config and safe local facts
-└── proof.ts             # Pure snapshot validation / proof-result schema
+├── fips-control-client.ts # Bounded LF-delimited JSON client for /run/fips/control.sock
+├── runner.ts            # Instantiate/own proof controller and Role B responder
+├── server.ts            # Exact same-origin /proof-status and /proof-ping routes
+├── proof.ts             # Pure snapshot validation / proof-result schema
+├── proof-controller.ts  # Current-state admission, challenge, ping, lifecycle
+└── isolation-attestation.ts # Exact bounded UDP challenge/response contract
+packages/bridge/test/
+├── fips-control-client.test.ts
+├── proof-controller.test.ts
+└── isolation-attestation.test.ts
 scripts/
-├── prove-sound-ping.mjs # Docker-exec orchestration, no shell interpolation
 └── fips-compose-smoke.mjs # Extend live isolation/topology assertions
 tests/
-├── sound-proof.test.mjs # Fixture command-runner and fail-closed behavior
+├── production-runner.test.ts # Controller injection/ownership/routes
 └── fips-compose.test.mjs # Role B topology/config mutation assertions
-vendor/fips/
-└── Dockerfile           # Build fipsctl and install iputils-ping
+Dockerfile.bridge        # Install iputils-ping in the final bridge runtime
 ```
 
 ### Pattern 1: Snapshot join with an explicit freshness/identity gate
@@ -198,11 +205,17 @@ const ready = sound.length === 1
   && acoustic.epoch === sound[0].stats.epoch;
 ```
 
-### Pattern 2: Proof runner separates admission from the authoritative ping
+### Pattern 2: Runner-owned controller separates admission from the authoritative ping
 
-**What:** The Node runner verifies only prerequisite facts and invokes the system binary with `execFile('docker', ['exec', containerId, 'ping', ...])`; it records the unmodified output and exit result. [VERIFIED: repository source] [CITED: https://man7.org/linux/man-pages/man8/ping.8%40%40iputils.html]
+**What:** `runner.ts` instantiates one `ProofController`, injects it into `createBridgeServer`, and registers its shutdown handle with `ResourceOwner`. `GET /proof-status` is read-only; `POST /proof-ping` accepts only same-origin exact empty JSON on Role A. The controller refreshes every prerequisite, completes the in-band B-isolation challenge, then invokes the system ping with an `execFile` argument array in the Compose-shared FIPS network namespace. It records the unmodified output and exit result. There is no second HTTP listener. [VERIFIED: repository source] [VERIFIED: locked planner resolution] [CITED: https://man7.org/linux/man-pages/man8/ping.8%40%40iputils.html]
 
 **When to use:** The Phase 4 single-request acceptance path; not the Phase 5 rehearsal loop. [VERIFIED: CONTEXT.md]
+
+### Pattern 4: Nonce-bound isolation attestation over FIPS/Sound
+
+**What:** After the expected normal FIPS peer is authenticated over Sound, Role A binds an IPv6 UDP socket to its deterministic `fips0` address and sends one 32-byte cryptographically random challenge to Role B's deterministic `fips0` address and fixed proof port. Role B's runner-owned responder shares the FIPS namespace and returns an exact-schema response containing the challenge, expected B public identity, B target, run/build identity, current acoustic epoch and bounded settings-digest identifier, snapshot timestamp, usable-transport count, Sound type/state/worker/readiness, expected peer/link association, and a SHA-256 digest of the canonical bounded snapshot. The response is capped at 1024 bytes, uses a 45-second attempt timeout, at most two sends of the same one-use challenge, a 32-entry/120-second replay cache, and six requests per minute. A accepts once only from the configured B IPv6 address and fixed port, with matching peer/run/build/epoch/digest identifier and timestamp no older than 60 seconds. Timeout, mismatch, replay, unusable Sound state, extra transport, or association failure blocks ping. [VERIFIED: locked planner resolution]
+
+**Why channel integrity is sufficient:** The response traverses the already-authenticated and encrypted normal FIPS/Sound peer. The random one-use challenge provides request freshness and response binding; no browser/LAN/file-copy path or separate application signing scheme is added. [VERIFIED: CONTEXT.md] [VERIFIED: locked planner resolution]
 
 ### Pattern 3: Role-specific transport projection
 
@@ -223,7 +236,7 @@ const ready = sound.length === 1
 | Problem | Don't Build | Use Instead | Why |
 |---|---|---|---|
 | Peer authentication/encryption | Demo handshake or pre-shared peer state | Existing FIPS Noise/authenticated peer lifecycle | Existing FIPS state records authenticated identity, link, and connectivity. [VERIFIED: repository source] |
-| Peer/transport observability | Regex log parser | `fipsctl show peers/links/transports` control snapshots | Existing snapshot query schemas already contain the needed joins/counters. [VERIFIED: repository source] |
+| Peer/transport observability | Regex log parser | Bounded `show_peers`/`show_links`/`show_transports` control snapshots | Existing snapshot query schemas already contain the needed joins/counters. [VERIFIED: repository source] |
 | ICMPv6 acceptance | Browser echo or custom ICMP | System `iputils` `ping -6` inside A FIPS container | Process exit/output represent kernel ICMPv6 behavior. [CITED: https://man7.org/linux/man-pages/man8/ping.8%40%40iputils.html] |
 | Recovery state machine | New bridge reconnect loop | Existing acoustic session + SoundTransport reconnect + FIPS auto-reconnect | Existing components disarm stale state, bound bridge reconnect to 100 ms–1 s, and retain FIPS retry policy. [VERIFIED: repository source] |
 
@@ -241,13 +254,13 @@ const ready = sound.length === 1
 
 **What goes wrong:** If A must obtain B's isolation result automatically, a host HTTP/WebSocket channel would itself violate the sound-only claim. [VERIFIED: CONTEXT.md]
 
-**How to avoid:** Treat B's local control-snapshot record as a paired acceptance artifact. If automatic propagation is required, it must traverse the already authenticated FIPS/Sound path and be explicitly labelled a preflight, never an ICMP substitute. The planner must not add a B browser/bridge LAN endpoint. [VERIFIED: CONTEXT.md]
+**How to avoid:** Use the fixed IPv6 UDP challenge/attestation contract above only after normal FIPS/Sound authentication. The response traverses `fips0` over the same encrypted acoustic peer and is a pre-ping isolation gate, never an ICMP substitute. Do not add a B browser/bridge LAN endpoint, file-copy pairing, or alternate listener. [VERIFIED: CONTEXT.md] [VERIFIED: locked planner resolution]
 
 ### Pitfall 3: Docker Desktop assumptions leak into acceptance
 
 **What goes wrong:** Host/container addressing and host-network behavior differ between Linux Engine and Docker Desktop; a host ping or a `network_mode: host` workaround produces a non-portable, weaker proof. [CITED: https://docs.docker.com/desktop/features/networking/networking-how-tos/] [CITED: https://docs.docker.com/engine/network/drivers/host/]
 
-**How to avoid:** Keep existing `network_mode: service:bridge`, loopback host publication, and execute all TUN/FIPS/ping commands with `docker exec` in the FIPS service. [VERIFIED: repository source]
+**How to avoid:** Keep existing `network_mode: service:bridge`, loopback host publication, and let the bridge runner execute the fixed system ping directly in the shared FIPS network namespace. Keep FIPS control access on the shared runtime socket and do not add a host proof orchestrator. [VERIFIED: repository source] [VERIFIED: locked planner resolution]
 
 ### Pitfall 4: Counters imply a packet crossed the room
 
@@ -294,10 +307,10 @@ All other claims are verified against repository sources or cited documentation.
 
 ## Open Questions
 
-1. **How does A receive/require B's live isolation attestation automatically?**
+1. **(RESOLVED) How does A receive/require B's live isolation attestation automatically?**
    - What we know: B's FIPS control socket is local-only, and browser/bridge endpoints may not be a laptop-to-laptop channel. [VERIFIED: repository source] [VERIFIED: CONTEXT.md]
-   - What's unclear: The repository has no existing remote control-status relay over the authenticated FIPS path. [VERIFIED: repository source]
-   - Recommendation: Plan B's independently executed local isolation record as a required paired pre-ping acceptance gate first. If automatic exchange is necessary, make it a minimal fixed preflight message carried through the authenticated FIPS/Sound link, not an HTTP/WebSocket LAN service. [VERIFIED: CONTEXT.md]
+   - Resolution: After the normal expected FIPS peer authenticates over Sound, A sends the bounded one-use IPv6 UDP challenge from A `fips0` to B's fixed `fips0` proof port. B's namespace-sharing proof responder snapshots local control/Compose authority and returns the exact bounded attestation over that same FIPS/Sound data path. A validates challenge, configured source, identity, target, run/build, epoch/settings identifier, freshness, exact transport cardinality, Sound usability, peer/link association, and canonical snapshot digest before enabling ping. [VERIFIED: locked planner resolution]
+   - Boundary: The FIPS link supplies channel authentication/integrity. Timeout, mismatch, replay, rate-limit, unavailable status, or any extra/failed transport blocks ping. No browser/LAN/file-copy path exists. [VERIFIED: locked planner resolution]
 
 ## Environment Availability
 
@@ -305,10 +318,10 @@ All other claims are verified against repository sources or cited documentation.
 |---|---|---|---|---|
 | Node.js | Proof runner/tests | ✓ | 25.2.1 | — [VERIFIED: local environment] |
 | npm | Existing test/build commands | ✓ | 11.6.2 | — [VERIFIED: local environment] |
-| Docker Engine | Compose and `docker exec` proof | ✓ | 29.1.3 | — [VERIFIED: local environment] |
+| Docker Engine | Compose and shared-network-namespace proof runtime | ✓ | 29.1.3 | — [VERIFIED: local environment] |
 | Docker Compose | Role stack lifecycle | ✓ | 2.40.3-desktop.1 | — [VERIFIED: local environment] |
 | Rust Cargo | Vendored FIPS image build | ✓ | 1.92.0 host; Dockerfile pins 1.94.1 | Docker image toolchain is authoritative. [VERIFIED: repository source] |
-| `fipsctl` in runtime image | FIPS snapshot proof | ✗ | — | Build vendored binary into image. [VERIFIED: repository source] |
+| `/run/fips/control.sock` visible to bridge | FIPS snapshot proof | ✗ in current Compose | Add one private named `/run/fips` volume, writable only by FIPS and read-only from bridge. [VERIFIED: repository source] |
 | `ping` in runtime image | Kernel ICMPv6 acceptance | ✗ | — | Install Debian `iputils-ping` in image. [VERIFIED: repository source] |
 
 **Missing dependencies with no fallback:** none after the planned image additions. [VERIFIED: repository source]
@@ -330,24 +343,25 @@ All other claims are verified against repository sources or cited documentation.
 |---|---|---|---|---|
 | FIPS-04 | FIPS peer snapshot must identify expected npub and `sound` link. | Fixture unit | `npx vitest run packages/bridge/test/sound-proof.test.ts` | ❌ Wave 0 |
 | FIPS-05 | Disarm/reconnect invalidates ping gate until fresh authenticated snapshot. | Fixture unit + Rust | `npx vitest run packages/bridge/test/sound-proof.test.ts && cargo test sound_transport --locked` | ❌ / ✅ |
-| DEPLOY-03, DEPLOY-05 | B configuration and runtime topology reject alternative transport/port/capability mutations. | Node unit | `node --test tests/fips-compose.test.mjs` | ✅ extend |
+| DEPLOY-03, DEPLOY-05 | B configuration/runtime reject alternate topology; an in-band nonce-bound attestation proves current Sound usable state and peer/link association. | Node/Vitest integration | `node --test tests/fips-compose.test.mjs && npx vitest run packages/bridge/test/isolation-attestation.test.ts packages/bridge/test/proof-controller.test.ts` | ❌ Wave 0 / ✅ extend |
 | DEPLOY-04, CONFIG-04 | Role projection keeps B Sound-only and A optional upstream configuration separate. | Vitest unit | `npx vitest run packages/bridge/test/demo-config.test.ts tests/production-runner.test.ts` | ✅ extend |
-| DEMO-01, DEMO-02 | Orchestrator executes only literal in-namespace `ping -6`; raw outcome retained. | Fixture command-runner | `node --test tests/sound-proof.test.mjs` | ❌ Wave 0 |
-| DEMO-03, DEMO-04 | Structured status combines only observed control/acoustic/bridge/ping facts. | Vitest unit | `npx vitest run packages/bridge/test/sound-proof.test.ts` | ❌ Wave 0 |
+| DEMO-01, DEMO-02 | Controller executes one literal in-namespace `ping -6` only after the in-band isolation response; raw outcome retained. | Fixture controller | `npx vitest run packages/bridge/test/proof-controller.test.ts` | ❌ Wave 0 |
+| DEMO-03, DEMO-04 | Structured routes combine only observed control/acoustic/bridge/attestation/ping facts. | Vitest integration | `npx vitest run packages/bridge/test/sound-proof.test.ts packages/bridge/test/proof-controller.test.ts packages/bridge/test/fips-packet-bridge.test.ts` | ❌ Wave 0 |
 | All physical claims | Separate named laptop records with one successful request/reply and interruption/reconnect. | Human/Open air | manual two-laptop gate | ❌ human_needed |
 
 ### Sampling Rate
 
 - **Per task commit:** targeted unit tests for the modified seam. [VERIFIED: repository source]
 - **Per wave merge:** `npm run typecheck && npm run test:unit && node --test tests/fips-compose.test.mjs`. [VERIFIED: repository source]
-- **Phase gate:** built Docker image contains `/usr/local/bin/fipsctl` and `/usr/bin/ping`; physical two-laptop gate is explicitly `human_needed` if not performed. [VERIFIED: repository source]
+- **Phase gate:** built bridge image contains `/usr/bin/ping`, no copied control binary, and the bounded Node client can reach only the private shared `/run/fips/control.sock`; physical two-laptop gate is explicitly `human_needed` if not performed. [VERIFIED: repository source]
 
 ### Wave 0 Gaps
 
 - [ ] `packages/bridge/src/proof.ts` and `packages/bridge/test/sound-proof.test.ts` — strict snapshot/proof schema and stale/mismatch rejection. [VERIFIED: repository source]
-- [ ] `tests/sound-proof.test.mjs` — injected Docker command runner asserts literal `docker exec … ping -6`, no shell interpolation, bounded timeout, and raw outcome capture. [VERIFIED: repository source]
+- [ ] `packages/bridge/src/proof-controller.ts` and `packages/bridge/test/proof-controller.test.ts` — runner-owned current-state controller, exact same-origin routes, Role A authorization, in-band isolation gate, bounded ping invocation, lifecycle/shutdown, and raw outcome capture. [VERIFIED: locked planner resolution]
+- [ ] `packages/bridge/src/isolation-attestation.ts` and `packages/bridge/test/isolation-attestation.test.ts` — strict IPv6 UDP challenge/response schema, source/port/current-run validation, canonical digest, timeout/retry/rate/replay bounds, and hostile corpus. [VERIFIED: locked planner resolution]
 - [ ] Extend `tests/fips-compose.test.mjs` — role B rejects all alternate `transports` and non-loopback browser publication. [VERIFIED: repository source]
-- [ ] Extend `vendor/fips/Dockerfile` test/build assertion — `fipsctl` and `ping` exist in final image. [VERIFIED: repository source]
+- [ ] Extend bridge-image/Compose assertions — `ping` exists in the bridge image, no `fipsctl` binary is added, and only the bridge can read the private FIPS-created Unix socket. [VERIFIED: repository source]
 
 ## Security Domain
 
@@ -358,8 +372,8 @@ All other claims are verified against repository sources or cited documentation.
 | V2 Authentication | Yes | Reuse normal FIPS authenticated peer/Noise lifecycle; no bypass. [VERIFIED: CONTEXT.md] |
 | V3 Session Management | Yes | Acoustic epoch/disarm plus ordinary FIPS reconnect; reject stale callbacks. [VERIFIED: repository source] |
 | V4 Access Control | Yes | Loopback-only bridge, FIPS un-published, exact expected peer identity, and B Sound-only runtime assertion. [VERIFIED: repository source] |
-| V5 Input Validation | Yes | Strict snapshot schemas and `execFile` argument arrays; never concatenate container IDs, target, or command strings into a shell. [VERIFIED: repository source] |
-| V6 Cryptography | Yes | Reuse FIPS Noise/link encryption and its existing authenticated peer state; do not add custom signing/encryption. [VERIFIED: repository source] |
+| V5 Input Validation | Yes | Strict HTTP bodies/routes, control snapshots, UDP datagram schemas/sizes/source, and `execFile` argument arrays; never concatenate target or command strings into a shell. [VERIFIED: repository source] [VERIFIED: locked planner resolution] |
+| V6 Cryptography | Yes | Reuse FIPS Noise/link encryption for the attestation channel; use `crypto.randomBytes` for the one-use challenge and SHA-256 only to bind the canonical bounded snapshot. Do not add parallel peer authentication. [VERIFIED: CONTEXT.md] [VERIFIED: locked planner resolution] |
 
 ### Known Threat Patterns for this stack
 
@@ -377,9 +391,9 @@ All other claims are verified against repository sources or cited documentation.
 
 - `apps/modem-ui/src/acoustic-session-adapter.ts` and `packages/bridge/src/server.ts` — readiness/disarm, current epoch, local status/counter seams. [VERIFIED: repository source]
 - `vendor/fips/src/transport/sound/mod.rs` — fail-closed Sound admission, bounded bridge reconnect, transport stats. [VERIFIED: repository source]
-- `vendor/fips/src/control/queries.rs` and `vendor/fips/src/bin/fipsctl.rs` — live peer/link/transport snapshot schema and client. [VERIFIED: repository source]
+- `vendor/fips/src/control/queries.rs`, `vendor/fips/src/control/protocol.rs`, and `vendor/fips/src/bin/fipsctl.rs` — authoritative peer/link/transport schemas and reference framing behavior for the strict Node client. [VERIFIED: repository source]
 - `packages/bridge/src/demo-config.ts`, `packages/bridge/src/runner.ts`, `compose.fips.yml`, and `scripts/fips-compose-smoke.mjs` — role config, namespace, loopback, TUN, and inspection authority. [VERIFIED: repository source]
-- `vendor/fips/Dockerfile` — final image presently lacks `fipsctl` and `ping`. [VERIFIED: repository source]
+- `Dockerfile.bridge` — final bridge image presently lacks `ping`; the new control client uses Node built-ins and the shared Unix socket. [VERIFIED: repository source]
 
 ### Secondary (MEDIUM confidence)
 

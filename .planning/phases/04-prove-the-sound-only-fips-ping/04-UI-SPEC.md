@@ -21,7 +21,7 @@ The browser is a renderer of bounded structured facts. It must never infer authe
 
 | UI fact | Required source | Display rule |
 |---|---|---|
-| Authenticated peer, expected identity, connectivity, Sound transport, link ID/state | Current `fipsctl show peers`, `show_links`, and `show_transports` snapshot joined by expected peer/link/transport identifiers | Render **Verified**, **Waiting**, **Stale**, or **Failed**; do not derive it from bridge status or logs. |
+| Authenticated peer, expected identity, connectivity, Sound transport, link ID/state | Current bounded control-socket `show_peers`, `show_links`, and `show_transports` snapshot joined by expected peer/link/transport identifiers | Render **Verified**, **Waiting**, **Stale**, or **Failed**; do not derive it from bridge status or logs. |
 | Role B Sound-only isolation | Current Role B live transport snapshot plus Compose/runtime inspection; paired local acceptance record until a safe in-band attestation exists | Render **Verified only** when exactly one usable transport is Sound. Never obtain it over a LAN browser/bridge endpoint. |
 | Acoustic readiness and acoustic counters | Current-epoch, scalar-only acoustic public status and bridge counters | Label these **Local acoustic evidence**. They support correlation but cannot alone enable or pass ping. |
 | ICMPv6 outcome | Literal bounded `docker exec` invocation of `ping -6` inside Role A's live FIPS namespace | Only exit status plus parsed sequence/latency/loss summary is a ping outcome. Browser echo, host ping, fixtures, and raw logs are not outcomes. |
