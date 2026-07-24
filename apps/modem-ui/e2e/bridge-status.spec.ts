@@ -16,8 +16,9 @@ test('renders the local-only bridge transport definition list and recovery conse
 
 test('keeps long safe content and diagnostic tables inside the viewport', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 720 });
+  await page.route('**/qualification-config', (route) => route.fulfill({ json: { machineId: 'fipwave-a', role: 'A', reportTarget: '/tmp/report.json', tunEvidence: 'none', evidenceMode: 'Loopback', evidenceClass: 'Loopback' } }));
   await page.goto('http://127.0.0.1:5173/');
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
   expect(overflow).toBe(false);
-  await expect(page.getByRole('textbox', { name: 'Filter corpus cases' })).toBeVisible();
+  await expect(page.getByRole('searchbox', { name: 'Filter corpus cases' })).toBeVisible();
 });

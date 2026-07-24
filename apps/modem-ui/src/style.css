@@ -7,6 +7,7 @@ h1, h2 { color: #f8fafc; } h1 { margin-bottom: 4px; } h2 { margin-top: 0; font-s
 .status { font-weight: 700; } .status-ready { color: #22c55e; } .status-failed, .status-disconnected { color: #fb7185; } .status-requesting { color: #facc15; }
 .console-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 16px; }
 .card { background: #172554; border: 1px solid #334155; border-radius: 10px; padding: 18px; margin-top: 16px; overflow-wrap: anywhere; }
+.bridge-card { border-color: #0ea5e9; min-width: 0; } .bridge-card h3 { margin: 16px 0 4px; font-size: 1rem; } .bridge-card dd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .qualification-gate { border-color: #38bdf8; } .countdown { color: #facc15; font: 700 1.3rem ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .operator-card { position: sticky; top: 12px; align-self: start; }
 button { min-height: 44px; padding: 10px 16px; border: 1px solid #38bdf8; border-radius: 6px; background: #0ea5e9; color: #082f49; font-weight: 700; cursor: pointer; margin: 4px 8px 4px 0; }
@@ -16,5 +17,5 @@ table { width: 100%; border-collapse: collapse; } th, td { border-top: 1px solid
 input { min-height: 40px; max-width: 100%; padding: 8px; border: 1px solid #38bdf8; border-radius: 6px; color: #e2e8f0; background: #0f172a; } input:focus-visible { outline: 3px solid #38bdf8; outline-offset: 2px; }
 dl { display: grid; grid-template-columns: minmax(9rem, 1fr) minmax(0, 3fr); gap: 8px 16px; } dt { font-weight: 700; } dd { margin: 0; overflow-wrap: anywhere; }
 .corpus-card { overflow-x: auto; } .corpus-card table { min-width: 620px; } .corpus-card th:last-child, .corpus-card td:last-child { position: sticky; right: 0; background: #172554; }
-@media (max-width: 1023px) { #app { padding: 16px; } .console-grid { display: block; } .operator-card { position: static; } button { width: 100%; margin: 5px 0; } }
+@media (max-width: 1023px) { #app { padding: 16px; } .console-grid { display: block; } .operator-card { position: static; } button { width: 100%; margin: 5px 0; } dl { grid-template-columns: minmax(0, 1fr); gap: 4px; } }
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto; } }

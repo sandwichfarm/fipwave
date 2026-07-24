@@ -532,11 +532,40 @@ function render(): void {
     if (quietCorpusSendState === 'ready' && runnerConfig && cyrinxSession.snapshot.codec === 'quiet') {
       operator.append(control(`Send Quiet ${directionForRole(runnerConfig.role)} corpus`, sendQuietCorpus));
     }
-    operator.append(control('Reset / re-arm', reset, false, 'secondary'));
+    operator.append(control('Reset and reconnect', reset, false, 'secondary'));
   }
-  if (uiState === 'failed' || uiState === 'disconnected') operator.append(control('Reset / re-arm', reset, false, 'secondary'));
-  operator.append(element('p', 'This starts a new local epoch and ignores stale results.'));
+  if (uiState === 'failed' || uiState === 'disconnected') operator.append(control('Reset and reconnect', reset, false, 'secondary'));
+  if (runnerConfig && uiState === 'idle') operator.append(control('Reset and reconnect', reset, false, 'secondary'));
+  operator.append(element('p', 'Starts a new local epoch and clears unsent local bridge data.'));
   grid.append(operator);
+
+  const bridgeCard = element('section');
+  bridgeCard.className = 'card bridge-card';
+  bridgeCard.append(element('h2', 'Bridge and FIPS transport'));
+  const bridgeStatus = bridgeState;
+  const bridgeList = element('dl');
+  const bridgeRows: [string, string][] = [
+    ['Configuration', configFailure ? 'Configuration unavailable' : runnerConfig ? 'Ready' : 'Loading local configuration…'],
+    ['Browser audio', bridgeStatus?.browserAudio === 'armed' ? 'Armed' : 'Unknown'],
+    ['Local bridge', bridgeStatus?.status === 'ready' ? `Local bridge ready · epoch ${bridgeStatus.epoch}` : bridgeStatus?.status === 'resetting' ? 'Resetting local session…' : 'Local bridge: not connected'],
+    ['FIPS sound transport', bridgeStatus?.soundTransport === 'started' ? 'Started' : bridgeStatus ? 'Waiting for transport' : 'Unknown'],
+    ['Epoch', bridgeStatus ? String(bridgeStatus.epoch) : 'Unknown'],
+    ['Queue health', bridgeStatus ? `${bridgeStatus.queueHealth[0]!.toUpperCase()}${bridgeStatus.queueHealth.slice(1)} · ${bridgeStatus.queueItems} items · ${bridgeStatus.queueBytes} bytes` : 'Unknown'],
+    ['Last accepted/error', bridgeStatus?.lastError ?? bridgeStatus?.lastEventAt ?? 'Unknown'],
+    ['Complete packets TX/RX', bridgeStatus ? `TX complete packets: ${bridgeStatus.txPackets} · RX complete packets: ${bridgeStatus.rxPackets}` : 'Unknown'],
+    ['Sound MTU', bridgeStatus?.soundMtu ? `Sound MTU: ${bridgeStatus.soundMtu} bytes · effective IPv6 MTU: ${bridgeStatus.soundMtu - 77} bytes` : 'Unknown'],
+  ];
+  bridgeRows.forEach(([label, value]) => bridgeList.append(element('dt', label), element('dd', value)));
+  bridgeCard.append(bridgeList);
+  if (!bridgeStatus || bridgeStatus.txPackets + bridgeStatus.rxPackets === 0) {
+    bridgeCard.append(element('h3', 'No local bridge activity yet'));
+    bridgeCard.append(element('p', 'Arm the modem to request microphone access and establish this laptop’s local binary bridge.'));
+  }
+  const bridgeAnnouncement = element('p', uiState === 'requesting' ? 'Requesting microphone and connecting local bridge…' : bridgeStatus?.status === 'resetting' ? 'Resetting local session…' : 'Local state only; acoustic peer and ping readiness are not claimed.');
+  bridgeAnnouncement.setAttribute('aria-live', failure ? 'assertive' : 'polite');
+  if (uiState === 'requesting' || bridgeStatus?.status === 'resetting') bridgeAnnouncement.setAttribute('aria-busy', 'true');
+  bridgeCard.append(bridgeAnnouncement);
+  grid.append(bridgeCard);
 
   const evidenceCard = element('section');
   evidenceCard.className = 'card';
