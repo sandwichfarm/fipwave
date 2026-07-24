@@ -66,9 +66,12 @@ test('both Compose build contexts exclude generated build outputs', async () => 
     readFile(path.join(root, '.dockerignore'), 'utf8'),
     readFile(path.join(root, 'vendor/fips/.dockerignore'), 'utf8'),
   ]);
-  for (const pattern of ['node_modules', 'dist', 'target', 'vendor/fips/target', '.git', '.planning', '.artifacts']) {
+  for (const pattern of ['node_modules', 'dist', 'target', 'vendor/fips/target', '.git', '.planning']) {
     assert.match(bridgeIgnore, new RegExp(`^${pattern.replaceAll('/', '\\/').replaceAll('.', '\\.')}$`, 'm'));
   }
+  assert.match(bridgeIgnore, /^\.artifacts\/\*$/m);
+  assert.match(bridgeIgnore, /^!\.artifacts\/codecs\/$/m);
+  assert.match(bridgeIgnore, /^!\.artifacts\/build\/cyrinx\/cyrinx_batch$/m);
   assert.match(fipsIgnore, /^target$/m);
   assert.match(fipsIgnore, /^\.git$/m);
 });

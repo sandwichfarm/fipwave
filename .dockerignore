@@ -1,6 +1,11 @@
 .git
 .planning
-.artifacts
+.artifacts/*
+!.artifacts/codecs/
+!.artifacts/codecs/**
+!.artifacts/build/
+!.artifacts/build/cyrinx/
+!.artifacts/build/cyrinx/cyrinx_batch
 artifacts
 node_modules
 dist
