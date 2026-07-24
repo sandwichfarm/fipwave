@@ -11,6 +11,18 @@ export const CYRINX_PCM_PLAYBACK_FLAG = 0x0001;
 /** RESET acknowledgements are bridge-originated and must never be echoed back as requests. */
 export const RESET_ACK_FLAG = 0x0001;
 
+/**
+ * Source-authored scheduling metadata for complete opaque FIPS packets.
+ *
+ * These values mirror Rust `TrafficClass` exactly.  They are local FWAV
+ * metadata, never inferred from or embedded in the encrypted FIPS payload.
+ */
+export enum FipsTrafficClass {
+  Control = 1,
+  Heartbeat = 2,
+  Ordinary = 3,
+}
+
 export enum MessageType {
   HELLO = 1,
   AUDIO_SETTINGS = 2,
@@ -36,6 +48,8 @@ export enum PcmEncoding {
 export interface FwavFrame {
   type: MessageType;
   flags?: number;
+  /** Present only on FIPS_PACKET; encoded at FWAV byte 6. */
+  trafficClass?: FipsTrafficClass;
   epoch: number;
   sequence: bigint;
   sampleRate?: number;
@@ -86,6 +100,12 @@ function isMessageType(value: number): value is MessageType {
   return value >= MessageType.HELLO && value <= MessageType.BROWSER_DISARM;
 }
 
+function isFipsTrafficClass(value: number): value is FipsTrafficClass {
+  return value === FipsTrafficClass.Control
+    || value === FipsTrafficClass.Heartbeat
+    || value === FipsTrafficClass.Ordinary;
+}
+
 function validateInteger(value: number, name: string, maximum: number): void {
   if (!Number.isInteger(value) || value < 0 || value > maximum) {
     fail(`${name} is out of range`);
@@ -103,6 +123,14 @@ function validateFrame(frame: FwavFrame): Required<Pick<FwavFrame, 'flags' | 'sa
   const sampleRate = frame.sampleRate ?? 0;
   const channels = frame.channels ?? 0;
   const encoding = frame.encoding ?? PcmEncoding.NONE;
+  const isFipsPacket = frame.type === MessageType.FIPS_PACKET;
+  const trafficClass = frame.trafficClass ?? FipsTrafficClass.Ordinary;
+  if (isFipsPacket) {
+    if ((frame.flags ?? 0) !== 0) fail('FIPS packet must not declare flags');
+    if (!isFipsTrafficClass(trafficClass)) fail('traffic class is unsupported');
+  } else if (frame.trafficClass !== undefined) {
+    fail('traffic class is only valid for FIPS packets');
+  }
   validateInteger(sampleRate, 'sample rate', 0xffff_ffff);
   validateInteger(channels, 'channel count', 0xffff);
   validateInteger(encoding, 'encoding', 0xffff);
@@ -115,7 +143,14 @@ function validateFrame(frame: FwavFrame): Required<Pick<FwavFrame, 'flags' | 'sa
   } else if (sampleRate !== 0 || channels !== 0 || encoding !== PcmEncoding.NONE) {
     fail('non-PCM messages must not declare PCM format');
   }
-  return { ...frame, flags: frame.flags ?? 0, sampleRate, channels, encoding };
+  return {
+    ...frame,
+    ...(isFipsPacket ? { trafficClass } : {}),
+    flags: frame.flags ?? 0,
+    sampleRate,
+    channels,
+    encoding,
+  };
 }
 
 export function encodeFrame(frame: FwavFrame): Buffer {
@@ -124,7 +159,12 @@ export function encodeFrame(frame: FwavFrame): Buffer {
   output.write(FWAV_MAGIC, 0, 'ascii');
   output.writeUInt8(FWAV_VERSION, 4);
   output.writeUInt8(valid.type, 5);
-  output.writeUInt16LE(valid.flags, 6);
+  if (valid.type === MessageType.FIPS_PACKET) {
+    output.writeUInt8(valid.trafficClass!, 6);
+    output.writeUInt8(0, 7);
+  } else {
+    output.writeUInt16LE(valid.flags, 6);
+  }
   output.writeUInt32LE(valid.payload.byteLength, 8);
   output.writeUInt32LE(valid.epoch, 12);
   output.writeBigUInt64LE(valid.sequence, 16);
@@ -145,9 +185,12 @@ export function decodeFrame(input: Buffer): FwavFrame {
   if (!isMessageType(type)) fail('message type is unsupported');
   const payloadLength = input.readUInt32LE(8);
   if (payloadLength > MAX_PAYLOAD_BYTES || input.byteLength !== HEADER_BYTES + payloadLength) fail('declared payload length does not match message');
+  const trafficClass = type === MessageType.FIPS_PACKET ? input.readUInt8(6) : undefined;
+  const flags = type === MessageType.FIPS_PACKET ? input.readUInt8(7) << 8 : input.readUInt16LE(6);
   return validateFrame({
     type,
-    flags: input.readUInt16LE(6),
+    flags,
+    ...(trafficClass === undefined ? {} : { trafficClass }),
     epoch: input.readUInt32LE(12),
     sequence: input.readBigUInt64LE(16),
     sampleRate: input.readUInt32LE(24),

@@ -83,6 +83,13 @@ describe('FIPS packet bridge', () => {
       const decoded = decodeFrame(Buffer.from(received as Buffer));
       expect(decoded.trafficClass).toBe(trafficClass);
       expect(decoded.payload.equals(payload)).toBe(true);
+
+      const receivedByBrowser = once(browser, 'message');
+      fips.send(packet(1, BigInt(index + 1), payload, trafficClass));
+      const [returned] = await receivedByBrowser;
+      const returnedDecoded = decodeFrame(Buffer.from(returned as Buffer));
+      expect(returnedDecoded.trafficClass).toBe(trafficClass);
+      expect(returnedDecoded.payload.equals(payload)).toBe(true);
     }
 
     browser.close(); fips.close();
