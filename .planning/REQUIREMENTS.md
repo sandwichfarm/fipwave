@@ -169,24 +169,24 @@ Requirements for the Sovereign Engineering demo-day proof of concept.
 
 ### Acoustic Session Negotiation
 
-- [ ] **NEG-01**: Both peers share one conservative, versioned bootstrap
+- [x] **NEG-01**: Both peers share one conservative, versioned bootstrap
       profile used for discovery, control exchange, recovery, and
       recalibration.
 
-- [ ] **NEG-02**: The handshake exchanges protocol version, public identity,
+- [x] **NEG-02**: The handshake exchanges protocol version, public identity,
       expected role/peer, random session nonce, capabilities, and supported
       profile, payload, redundancy, gain, heartbeat, and calibration ranges
       while rejecting stale, mismatched, corrupt, or invalid transitions.
 
-- [ ] **NEG-03**: Calibration sends numbered probes in both literal directions
+- [x] **NEG-03**: Calibration sends numbered probes in both literal directions
       over a bounded candidate sweep and records successful, corrupt, missing,
       duplicate, discontinuous, and timed observations.
 
-- [ ] **NEG-04**: Selection is measurement-based, supports different A→B and
+- [x] **NEG-04**: Selection is measurement-based, supports different A→B and
       B→A transmission settings, prefers reliability over loudness or nominal
       throughput, and retains a safe bootstrap fallback.
 
-- [ ] **NEG-05**: Both peers commit and acknowledge an identical settings
+- [x] **NEG-05**: Both peers commit and acknowledge an identical settings
       digest before the acoustic adapter can report FIPS readiness.
 
 - [ ] **NEG-06**: Link heartbeat and loss thresholds expose degraded state and
@@ -321,11 +321,11 @@ Roadmap phase mapping is populated during roadmap creation.
 | CONFIG-02 | Phase 2 | Complete |
 | CONFIG-03 | Phase 5 | Pending |
 | CONFIG-04 | Phase 4 | Pending |
-| NEG-01 | Phase 3 | Pending |
-| NEG-02 | Phase 3 | Pending |
-| NEG-03 | Phase 3 | Pending |
-| NEG-04 | Phase 3 | Pending |
-| NEG-05 | Phase 3 | Pending |
+| NEG-01 | Phase 3 | Complete |
+| NEG-02 | Phase 3 | Complete |
+| NEG-03 | Phase 3 | Complete |
+| NEG-04 | Phase 3 | Complete |
+| NEG-05 | Phase 3 | Complete |
 | NEG-06 | Phase 3 | Pending |
 | NEG-07 | Phase 3 | Complete |
 | UI-01 | Phase 5 | Pending |

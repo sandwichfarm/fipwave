@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 03
 current_phase_name: negotiate-and-deliver-reliable-acoustic-packets
 status: executing
-stopped_at: Completed 03-02-PLAN.md; 03-03 already completed
-last_updated: "2026-07-24T06:06:26.817Z"
+stopped_at: Completed 03-04-PLAN.md
+last_updated: "2026-07-24T06:20:04.579Z"
 last_activity: 2026-07-24
 last_activity_desc: Phase 03 execution started
 progress:
   total_phases: 3
   completed_phases: 1
   total_plans: 24
-  completed_plans: 19
+  completed_plans: 20
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-24)
 ## Current Position
 
 Phase: 03 (negotiate-and-deliver-reliable-acoustic-packets) — EXECUTING
-Plan: 2 of 7
+Plan: 4 of 7
 Status: Ready to execute
 Last activity: 2026-07-24 — Phase 03 execution started
 
-Progress: [████████░░] 79%
+Progress: [████████░░] 83%
 
 ## Performance Metrics
 
@@ -76,6 +76,7 @@ Progress: [████████░░] 79%
 | Phase 03 P01 | 35m | 2 tasks | 9 files |
 | Phase 03 P03 | 8m | 2 tasks | 4 files |
 | Phase 03 P02 | 10m | 2 tasks | 5 files |
+| Phase 03 P04 | 11m | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -127,6 +128,7 @@ Recent decisions affecting current work:
 - [Phase ?]: FAS1 is a strict 36-byte little-endian CRC-32C envelope with a 217-byte body and 1357-byte complete-packet cap.
 - [Phase ?]: Only exact versioned executable modem profile IDs may be selected; scalar frequency-like settings reject.
 - [Phase ?]: FWAV byte 6 carries only validated source-authored FIPS class metadata; browser adapter emits copied opaque envelopes.
+- [Phase ?]: Phase 3: Acoustic readiness requires matching canonical settings digest, COMMIT_ACK, and a subsequent current-session heartbeat.
 
 ### Pending Todos
 
@@ -166,6 +168,6 @@ hardware checkpoint remains explicit.
 
 ## Session Continuity
 
-Last session: 2026-07-24T06:06:26.809Z
-Stopped at: Completed 03-02-PLAN.md; 03-03 already completed
+Last session: 2026-07-24T06:20:04.571Z
+Stopped at: Completed 03-04-PLAN.md
 Resume file: None
