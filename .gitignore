@@ -3,3 +3,4 @@ dist/
 .artifacts/
 test-results/
 .artifacts/codecs/
+.planning/research/.cache/
