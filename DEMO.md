@@ -15,6 +15,17 @@ Both laptops must be on the same Git commit. Docker Desktop must be running.
 On Linux, `/dev/net/tun` must exist. Chrome may show one unavoidable operating
 system microphone prompt on its first run; choose **Allow**.
 
+The canonical real-audio preflight/E2E is:
+
+```sh
+npm run demo:e2e
+```
+
+It must finish with `success: true`, independently received byte-perfect
+messages in both directions, and successful browser/runner/audio cleanup. It is
+single-laptop **Loopback** evidence; it validates the complete acoustic browser
+path but never substitutes for the two-laptop **Open air** run below.
+
 Place the laptops 30–60 cm apart with their speakers and microphones facing
 each other. Use a quiet room and keep each system output near 65% and input
 near 90%. Do not use Bluetooth audio, headphones, a virtual audio device, or

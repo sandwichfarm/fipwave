@@ -31,6 +31,7 @@
     "test:fips-compose:runtime": "node scripts/fips-compose-smoke.mjs",
     "demo": "node scripts/demo.mjs",
     "demo:check": "node scripts/demo.mjs --check",
+    "demo:e2e": "npm run smoke:self-loop -- --output-volume 65 --input-volume 90 --playback-gain-percent 200",
     "check": "npm run verify:dependencies && npm run lint && npm run typecheck && npm run test:unit && npm run test:browser && npm run build && npm run generate:corpus -- --check && npm run qualify:fixture && npm run qualify:verify && npm run test:compose"
   },
   "dependencies": {
