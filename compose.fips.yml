@@ -1,0 +1,28 @@
+services:
+  bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile.bridge
+    environment:
+      ROLE: ${ROLE:-a}
+      MACHINE_ID: ${MACHINE_ID:-fipwave-a}
+    command: ["node", "dist/server/packages/bridge/src/runner.js", "--machine-id", "${MACHINE_ID:-fipwave-a}", "--role", "${ROLE:-a}", "--port", "4310", "--report", "/tmp/loopback-report.json", "--tun-evidence", "none", "--evidence-mode", "Loopback"]
+    ports:
+      - "127.0.0.1:${BROWSER_PORT:-4310}:4310"
+    security_opt:
+      - no-new-privileges:true
+    privileged: false
+
+  fips:
+    build:
+      context: ./vendor/fips
+      dockerfile: Dockerfile
+    network_mode: service:bridge
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    privileged: false
+    command: ["/usr/local/bin/fips", "--help"]

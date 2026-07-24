@@ -32,17 +32,17 @@ test('the committed FIPS Compose source is a loopback-only shared namespace', as
     readFile(path.join(root, 'Dockerfile.bridge'), 'utf8'),
     readFile(path.join(root, 'vendor/fips/Dockerfile'), 'utf8'),
   ]);
-  assert.deepEqual(checkFipsComposeSource(compose, bridgeDockerfile, fipsDockerfile).publishedPorts, ['127.0.0.1:4310']);
+  assert.deepEqual(checkFipsComposeSource(compose, bridgeDockerfile, fipsDockerfile).publishedPorts, ['127.0.0.1:4310:4310']);
 });
 
 test('Compose topology rejects namespace, bind, port, and privilege widening mutations', () => {
-  assert.deepEqual(validateFipsComposeTopology(topology()).publishedPorts, ['127.0.0.1:4310']);
+  assert.deepEqual(validateFipsComposeTopology(topology()).publishedPorts, ['127.0.0.1:4310:4310']);
   const fips = topology().services.fips;
   const bridge = topology().services.bridge;
   assert.throws(() => validateFipsComposeTopology({ services: { bridge: { ...bridge, ports: ['4310:4310'] }, fips } }), /loopback/);
   assert.throws(() => validateFipsComposeTopology({ services: { bridge, fips: { ...fips, network_mode: 'host' } } }), /namespace/);
   assert.throws(() => validateFipsComposeTopology({ services: { bridge, fips: { ...fips, network_mode: 'service:other' } } }), /namespace/);
-  assert.throws(() => validateFipsComposeTopology({ services: { bridge: { ...bridge, ports: ['127.0.0.1:4310:4310', '127.0.0.1:4311:4311'] }, fips } }), /published port/);
+  assert.throws(() => validateFipsComposeTopology({ services: { bridge: { ...bridge, ports: ['127.0.0.1:4310:4310', '127.0.0.1:4311:4311'] }, fips } }), /publish exactly/);
   assert.throws(() => validateFipsComposeTopology({ services: { bridge, fips: { ...fips, cap_add: ['NET_ADMIN', 'SYS_ADMIN'] } } }), /capabilities/);
   assert.throws(() => validateFipsComposeTopology({ services: { bridge, fips: { ...fips, privileged: true } } }), /privileged/);
   assert.throws(() => validateFipsComposeTopology({ services: { bridge, fips: { ...fips, devices: [] } } }), /device/);

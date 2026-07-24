@@ -57,6 +57,53 @@ function expectedAuthorities({ devices, capabilities, securityOptions, privilege
   return { devices, capabilities, securityOptions, privileged, networkMode, publishedPorts };
 }
 
+function fipsService(rendered) {
+  const bridge = rendered?.services?.bridge;
+  const fips = rendered?.services?.fips;
+  if (!bridge || !fips || typeof bridge !== 'object' || typeof fips !== 'object') fail('bridge and fips services are required');
+  return { bridge, fips };
+}
+
+/** Validate the production shared-namespace topology without accepting defaults silently. */
+export function validateFipsComposeTopology(rendered) {
+  const { bridge, fips } = fipsService(rendered);
+  const publishedPorts = loopbackPorts(bridge.ports, 'bridge published ports');
+  if (publishedPorts.length !== 1) fail('bridge must publish exactly one browser port');
+  if (fips.ports !== undefined && fips.ports !== null && (!Array.isArray(fips.ports) || fips.ports.length !== 0)) fail('fips must not publish a packet port');
+  if (fips.network_mode !== 'service:bridge') fail('fips network namespace must target service:bridge');
+  if (bridge.network_mode === 'host' || fips.network_mode === 'host') fail('host network is forbidden');
+  if (bridge.privileged !== undefined && bridge.privileged !== false) fail('bridge privileged mode must be false');
+  if (fips.privileged !== false) fail('fips privileged mode must be false');
+  exactSet((fips.devices ?? []).map(composeDevice).filter(Boolean), ['/dev/net/tun'], 'fips device');
+  exactSet(fips.cap_add, ['NET_ADMIN'], 'fips capabilities');
+  exactSet(fips.security_opt, ['no-new-privileges:true'], 'fips security options');
+  return { publishedPorts };
+}
+
+/** Source gate keeps role authority generated at runtime rather than committed. */
+export function checkFipsComposeSource(composeSource, bridgeDockerfile, fipsDockerfile) {
+  if (!bridgeDockerfile.includes('FROM node:22.23.1-bookworm-slim')) fail('bridge image must pin Node 22.23.1');
+  if (!fipsDockerfile.includes('FROM rust:1.94.1-bookworm')) fail('fips image must pin Rust 1.94.1');
+  if (/\bnsec\b/i.test(composeSource)) fail('compose must not contain role secrets');
+  if (!/^\s+network_mode:\s+service:bridge\s*$/m.test(composeSource)) fail('fips namespace target is missing');
+  if (!/^\s+-\s+"127\.0\.0\.1:\$\{BROWSER_PORT:-4310\}:4310"\s*$/m.test(composeSource)) fail('browser port must bind host loopback explicitly');
+  return validateFipsComposeTopology({
+    services: {
+      bridge: {
+        ports: ['127.0.0.1:4310:4310'],
+        privileged: /^\s+privileged:\s+false\s*$/m.test(composeSource) ? false : true,
+      },
+      fips: {
+        network_mode: /^\s+network_mode:\s+service:bridge\s*$/m.test(composeSource) ? 'service:bridge' : undefined,
+        devices: /^\s+devices:\s*\n\s+-\s+\/dev\/net\/tun:\/dev\/net\/tun\s*$/m.test(composeSource) ? ['/dev/net/tun:/dev/net/tun'] : [],
+        cap_add: /^\s+cap_add:\s*\n\s+-\s+NET_ADMIN\s*$/m.test(composeSource) ? ['NET_ADMIN'] : [],
+        security_opt: /^\s+security_opt:\s*\n\s+-\s+no-new-privileges:true\s*$/m.test(composeSource) ? ['no-new-privileges:true'] : [],
+        privileged: (composeSource.match(/^\s+privileged:\s+false\s*$/gm) ?? []).length >= 2 ? false : true,
+      },
+    },
+  });
+}
+
 export function combineExactHostEvidence(inspected, lifecycle) {
   const authority = validateDockerInspect(inspected);
   if (!lifecycle || lifecycle.schemaVersion !== 1 || lifecycle.source !== 'lifecycle' || lifecycle.status !== 'passed') {
@@ -165,6 +212,15 @@ async function main() {
       readFile(lifecyclePath, 'utf8').then(JSON.parse),
     ]);
     console.log(JSON.stringify(combineExactHostEvidence(inspected, lifecycle)));
+    return;
+  }
+  if (args.includes('--fips-source')) {
+    const [composeSource, bridgeDockerfile, fipsDockerfile] = await Promise.all([
+      readFile(path.join(root, 'compose.fips.yml'), 'utf8'),
+      readFile(path.join(root, 'Dockerfile.bridge'), 'utf8'),
+      readFile(path.join(root, 'vendor', 'fips', 'Dockerfile'), 'utf8'),
+    ]);
+    console.log(JSON.stringify(checkFipsComposeSource(composeSource, bridgeDockerfile, fipsDockerfile)));
     return;
   }
   if (composeIndex >= 0) {
