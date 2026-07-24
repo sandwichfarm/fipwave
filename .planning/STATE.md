@@ -5,8 +5,8 @@ milestone_name: milestone
 current_phase: 04
 current_phase_name: prove-the-sound-only-fips-ping
 status: planning
-stopped_at: Phase 4 context gathered
-last_updated: "2026-07-24T08:46:17.914Z"
+stopped_at: Phase 4 UI-SPEC approved
+last_updated: "2026-07-24T09:03:49.032Z"
 last_activity: 2026-07-24
 last_activity_desc: Phase 03 software verified; physical acceptance deferred
 progress:
@@ -179,6 +179,6 @@ Open-air exchange, and an observed physical loss/recovery cycle.
 
 ## Session Continuity
 
-Last session: 2026-07-24T08:46:17.907Z
-Stopped at: Phase 4 context gathered
-Resume file: .planning/phases/04-prove-the-sound-only-fips-ping/04-CONTEXT.md
+Last session: 2026-07-24T09:03:49.025Z
+Stopped at: Phase 4 UI-SPEC approved
+Resume file: .planning/phases/04-prove-the-sound-only-fips-ping/04-UI-SPEC.md
