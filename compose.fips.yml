@@ -25,4 +25,4 @@ services:
     security_opt:
       - no-new-privileges:true
     privileged: false
-    command: ["/usr/local/bin/fips", "--help"]
+    command: ["sleep", "infinity"]
