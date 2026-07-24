@@ -71,7 +71,25 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. The browser and its local container exchange complete packets or timestamped PCM chunks in binary WebSocket messages, never base64 or JSON bulk payloads; the bridge rejects invalid type or size, bounds its queues, and visibly reports ready, disconnected, overflow, and last-error states.
   5. One recovery action resets and reconnects browser, modem state, bridge queues, session, and acoustic epoch, while the FIPS-facing contract remains independent of Cyrinx, Quiet, Hush, or any other codec.
 
-**Plans**: TBD
+**Plans**: 7 plans
+
+Plans:
+**Wave 1**
+
+- [ ] 02-01-PLAN.md — Trace one validated role-A FIPS_PACKET through the production bridge in both directions.
+- [ ] 02-02-PLAN.md — Mechanically import and provenance-lock the exact audited FIPS fork.
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 02-03-PLAN.md — Complete the A/B configuration authority and owned production runner lifecycle.
+- [ ] 02-04-PLAN.md — Bound both packet directions and make RESET preempt stale bridge work.
+- [ ] 02-07-PLAN.md — Implement the complete first-class SoundTransport and all 13 FIPS dispatch seams.
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 02-05-PLAN.md — Prove shared-namespace, loopback-only FIPS/bridge topology on the executing Docker engine.
+- [ ] 02-06-PLAN.md — Wire the armed browser packet adapter and render truthful recovery/transport state.
+
 **UI hint**: yes
 
 ### Phase 3: Negotiate and Deliver Reliable Acoustic Packets

@@ -321,17 +321,17 @@ Use a separate `MessageType.FIPS_PACKET` value rather than reusing PCM or qualif
 | A3 | `SoundConfig` field names and a `FIPS_PACKET` FWAV value can follow the recommended names. | Project Structure / Code Examples | Low — naming only; protocol versioning and tests protect compatibility. |
 | A4 | A local sound worker can be considered operational before browser arming while its send path fail-closes. | Pitfall 2 | Medium — decide exact FIPS status semantics and test TUN MTU at startup. |
 
-## Open Questions
+## Open Questions — RESOLVED
 
-1. **Does the shared network namespace pass the browser-to-bridge same-origin integration test on both target Docker engines?**
-   - What we know: Compose documents `network_mode: service:{name}` and explicit `127.0.0.1` host publication. [CITED: https://docs.docker.com/compose/how-tos/networking/]
-   - What's unclear: Exact Docker Desktop/macOS and native Linux behavior with this project's bridge server and port mapping. [ASSUMED]
-   - Recommendation: Make this a Wave 0 compose smoke before implementation tasks that depend on it; do not substitute a LAN bind. [ASSUMED]
+1. **RESOLVED — Shared network namespace across target Docker engines**
+   - Decision: Accept `network_mode: service:bridge` with explicit loopback publication provisionally as the Phase 2 topology. Compose documents the mechanism, and 02-05 owns source, rendered-config and live engine smoke coverage. [CITED: https://docs.docker.com/compose/how-tos/networking/]
+   - Enforcement: The automated smoke must prove one shared namespace, browser origin reachability, FIPS-to-bridge loopback reachability and absence of non-loopback host publication on the executing Docker engine. Any render, inspect, readiness or reachability mismatch fails closed; implementation must not widen the bind or add a LAN fallback. [ASSUMED]
+   - Residual verification: The second target engine/hardware pair remains a rehearsal/UAT matrix item rather than an unresolved architecture choice; the same smoke must pass unchanged there before claiming cross-engine compatibility. [ASSUMED]
 
-2. **What status should FIPS expose while its local bridge reconnect loop is alive but the browser is unarmed?**
-   - What we know: FIPS needs an operational 1357 MTU before TUN setup, while the UI contract distinguishes `Waiting for transport` from bridge-ready. [VERIFIED: github.com/jmcorgan/fips] [VERIFIED: .planning/phases/02-configure-and-establish-the-codec-neutral-fips-bridge/02-UI-SPEC.md]
-   - What's unclear: Whether upstream's current `Up` state alone is sufficiently precise for UI/control output. [ASSUMED]
-   - Recommendation: Keep FIPS lifecycle `Up` for the local worker, expose separate bridge connection/readiness telemetry, and fail sends when no browser leg is present. [ASSUMED]
+2. **RESOLVED — FIPS worker lifecycle while the browser is unarmed**
+   - Decision: FIPS may expose worker lifecycle `Up` so the configured 1357-byte transport MTU participates in normal node/TUN setup, while a separate `browserReady: false` state remains authoritative for packet service. [VERIFIED: github.com/jmcorgan/fips] [VERIFIED: .planning/phases/02-configure-and-establish-the-codec-neutral-fips-bridge/02-UI-SPEC.md]
+   - Enforcement: Until the current-epoch browser modem has completed `Arm modem`, sends fail with the safe disconnected result, inbound work is rejected and accepted counters do not advance. Plans 02-07, 02-04 and 02-06 test Rust, bridge and real-browser sides of this split state. [ASSUMED]
+   - Claim boundary: Worker `Up` never means browser ready, acoustic link ready, peer connected or ping ready. [VERIFIED: .planning/phases/02-configure-and-establish-the-codec-neutral-fips-bridge/02-CONTEXT.md]
 
 ## Environment Availability
 
