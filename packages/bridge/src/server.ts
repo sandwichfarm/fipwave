@@ -79,10 +79,13 @@ export interface PacketBridgeState {
     fipsToBrowser: PacketQueueSnapshot;
   };
   packetReadiness: { browser: boolean; fips: boolean };
+  packetEndpoints: { browser: 'not-connected' | 'ready' | 'disconnected'; fips: 'not-connected' | 'ready' | 'disconnected'; worker: 'waiting' };
+  lastAcceptedAtMs: number | null;
   lastError: { code: string; message: string } | null;
 }
 export interface PacketQueueLimits { maxItems: number; maxBytes: number; maxAgeMs: number; }
-export interface PacketQueueSnapshot extends PacketQueueLimits { items: number; bytes: number; }
+export type PacketQueueHealth = 'not-connected' | 'waiting' | 'ready' | 'overflow' | 'rejected';
+export interface PacketQueueSnapshot extends PacketQueueLimits { items: number; bytes: number; health: PacketQueueHealth; }
 export interface BridgeServer {
   port: number; sendPcmPlayback(frame: Buffer): void; startCyrinx(): Promise<{ codec: 'cyrinx' | 'quiet'; reasonCode: string | null; deadlineAtMs: number }>; reset(): Promise<number>; close(): Promise<void>; state(): BridgeState;
 }
@@ -346,10 +349,11 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     epoch: 1, rejectedFrames: 0, overflowedQueues: [], discontinuities: 0, queueCounts: {}, stampedResults: [],
     packetCounters: { browserToFips: 0, fipsToBrowser: 0 },
     packetQueues: {
-      browserToFips: { ...packetQueueLimits, items: 0, bytes: 0 },
-      fipsToBrowser: { ...packetQueueLimits, items: 0, bytes: 0 },
+      browserToFips: { ...packetQueueLimits, items: 0, bytes: 0, health: 'not-connected' },
+      fipsToBrowser: { ...packetQueueLimits, items: 0, bytes: 0, health: 'not-connected' },
     },
-    packetReadiness: { browser: false, fips: false }, lastError: null,
+    packetReadiness: { browser: false, fips: false },
+    packetEndpoints: { browser: 'not-connected', fips: 'not-connected', worker: 'waiting' }, lastAcceptedAtMs: null, lastError: null,
     evidenceClass: 'Loopback', acousticReady: false, peerConnected: false, pingReady: false,
   };
   let audio: BrowserAudio | undefined; let generation = 1; let writeTail: Promise<unknown> = Promise.resolve();
@@ -396,8 +400,10 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     if (queue.frames.length >= packetQueueLimits.maxItems || queue.bytes + frameBytes > packetQueueLimits.maxBytes) {
       queue.overflowed = true;
       state.overflowedQueues = [...new Set([...state.overflowedQueues, packetQueueName(direction)])];
+      (direction === 'browser-to-fips' ? state.packetQueues.browserToFips : state.packetQueues.fipsToBrowser).health = 'overflow';
       fail('fips_packet_queue_overflow');
     }
+    (direction === 'browser-to-fips' ? state.packetQueues.browserToFips : state.packetQueues.fipsToBrowser).health = 'waiting';
     queue.frames.push({ frame, enqueuedAt: now }); queue.bytes += frameBytes; refreshState();
   };
   const flushPacketQueue = (direction: PacketDirection): void => {
@@ -420,6 +426,8 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       if (acceptedGeneration !== generation || acceptedEpoch !== state.epoch) return;
       if (direction === 'browser-to-fips') state.packetCounters.browserToFips += 1;
       else state.packetCounters.fipsToBrowser += 1;
+      state.lastAcceptedAtMs = options.now?.() ?? Date.now();
+      (direction === 'browser-to-fips' ? state.packetQueues.browserToFips : state.packetQueues.fipsToBrowser).health = 'ready';
     }
     refreshState();
   };
@@ -714,6 +722,8 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     generation += 1; state.epoch += 1; audio = undefined; results = new Map(); failureReasons = new Set(cyrinxSession?.fallbackReason ? [cyrinxSession.fallbackReason] : []);
     state.stampedResults = []; state.overflowedQueues = []; state.discontinuities = 0; state.rejectedFrames = 0;
     state.packetCounters = { browserToFips: 0, fipsToBrowser: 0 }; state.packetReadiness = { browser: false, fips: false }; state.lastError = null;
+    state.lastAcceptedAtMs = null;
+    state.packetQueues.browserToFips.health = 'not-connected'; state.packetQueues.fipsToBrowser.health = 'not-connected';
     for (const tracker of sequenceTrackers) tracker.value = -1n;
     for (const connection of browserConnections) {
       connection.mustResetBeforeUse = false; connection.receivedEpoch = state.epoch; connection.highestReceivedSequence = -1n;
@@ -1005,7 +1015,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
         return;
       }
       if (frame.type === MessageType.FIPS_PACKET) {
-        if (!packetDestinationReady('browser-to-fips')) fail('fips_destination_unavailable');
+        if (!packetDestinationReady('browser-to-fips')) { state.packetQueues.browserToFips.health = 'not-connected'; fail('fips_destination_unavailable'); }
         enqueuePacket('browser-to-fips', frame);
         flushPacketQueue('browser-to-fips');
         state.packetReadiness.fips = true;
@@ -1101,10 +1111,10 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     const route = new URL(request.url ?? '/', `http://${LOOPBACK_HOST}`).pathname;
     if (route === '/bridge/fips') {
       if (fipsOwner?.readyState === socket.OPEN) { rejectSocket(socket, new BridgeInputError('fips_endpoint_already_owned')); return; }
-      fipsOwner = socket; clients.add(socket);
+      fipsOwner = socket; clients.add(socket); state.packetEndpoints.fips = 'ready';
       const lastSequence = { value: -1n }; sequenceTrackers.add(lastSequence); let processing = Promise.resolve();
       flushPacketQueue('browser-to-fips');
-      socket.once('close', () => { clients.delete(socket); sequenceTrackers.delete(lastSequence); if (fipsOwner === socket) fipsOwner = undefined; });
+      socket.once('close', () => { clients.delete(socket); sequenceTrackers.delete(lastSequence); if (fipsOwner === socket) { fipsOwner = undefined; state.packetEndpoints.fips = 'disconnected'; } });
       socket.on('message', (rawData, isBinary) => {
         processing = processing.then(() => {
           try {
@@ -1113,7 +1123,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
             if (frame.type !== MessageType.FIPS_PACKET) fail('fips_endpoint_requires_fips_packet');
             if (frame.epoch !== state.epoch || frame.sequence <= lastSequence.value) fail('stale_or_duplicate_frame');
             lastSequence.value = frame.sequence;
-            if (!packetDestinationReady('fips-to-browser')) fail('browser_destination_unavailable');
+            if (!packetDestinationReady('fips-to-browser')) { state.packetQueues.fipsToBrowser.health = 'not-connected'; fail('browser_destination_unavailable'); }
             enqueuePacket('fips-to-browser', frame);
             flushPacketQueue('fips-to-browser');
             state.packetReadiness.browser = true;
@@ -1132,7 +1142,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       receivedEpoch: state.epoch,
       highestReceivedSequence: -1n,
     };
-    owner = socket; epochClaimed = true; reconnectAllowed = false; clients.add(socket); browserConnections.add(connection);
+    owner = socket; epochClaimed = true; reconnectAllowed = false; clients.add(socket); browserConnections.add(connection); state.packetEndpoints.browser = 'ready';
     flushPacketQueue('fips-to-browser');
     const lastSequence = { value: -1n }; sequenceTrackers.add(lastSequence); let processing = Promise.resolve();
     void expireCyrinx().then((expired) => {
@@ -1145,7 +1155,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       sequenceTrackers.delete(lastSequence);
       browserConnections.delete(connection);
       if (owner !== socket) return;
-      owner = undefined;
+      owner = undefined; state.packetEndpoints.browser = 'disconnected';
       if (shuttingDown) return;
       if (connection.mustResetBeforeUse) {
         reconnectAllowed = true;
@@ -1183,7 +1193,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       ...state,
       packetCounters: { ...state.packetCounters },
       packetQueues: { browserToFips: { ...state.packetQueues.browserToFips }, fipsToBrowser: { ...state.packetQueues.fipsToBrowser } },
-      packetReadiness: { ...state.packetReadiness }, lastError: state.lastError ? { ...state.lastError } : null,
+      packetReadiness: { ...state.packetReadiness }, packetEndpoints: { ...state.packetEndpoints }, lastAcceptedAtMs: state.lastAcceptedAtMs, lastError: state.lastError ? { ...state.lastError } : null,
       queueCounts: { ...state.queueCounts }, overflowedQueues: [...state.overflowedQueues], stampedResults: state.stampedResults.map((result) => ({ ...result })),
     }),
   };

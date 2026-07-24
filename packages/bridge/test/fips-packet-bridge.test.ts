@@ -82,6 +82,10 @@ describe('FIPS packet bridge', () => {
     expect(decodeFrame(Buffer.from(toBrowser as Buffer)).payload.equals(payload)).toBe(true);
 
     expect(bridge.state().packetCounters).toEqual({ browserToFips: 1, fipsToBrowser: 1 });
+    expect(packetBridgeState(bridge)).toMatchObject({
+      packetEndpoints: { browser: 'ready', fips: 'ready', worker: 'waiting' },
+      lastAcceptedAtMs: expect.any(Number),
+    });
     expect(bridge.state()).toMatchObject({ evidenceClass: 'Loopback', acousticReady: false, peerConnected: false, pingReady: false });
     browser.close(); fips.close();
   });
@@ -161,6 +165,8 @@ describe('FIPS packet bridge', () => {
       rejectedFrames: 0,
       packetCounters: { browserToFips: 0, fipsToBrowser: 0 },
       packetReadiness: { browser: false, fips: false },
+      packetEndpoints: { browser: 'ready', fips: 'ready', worker: 'waiting' },
+      lastAcceptedAtMs: null,
       lastError: null,
       packetQueues: { browserToFips: { items: 0, bytes: 0 }, fipsToBrowser: { items: 0, bytes: 0 } },
     });
