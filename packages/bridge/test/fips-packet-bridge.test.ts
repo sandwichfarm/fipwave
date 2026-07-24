@@ -56,9 +56,28 @@ async function expectNoMessage(socket: WebSocket, timeoutMs = 30): Promise<void>
     }, timeoutMs);
     const onMessage = (message: WebSocket.RawData) => {
       clearTimeout(timer);
-      reject(new Error(`unexpected bridge frame: ${decodeFrame(Buffer.from(message)).type}`));
+      const binary = Buffer.isBuffer(message)
+        ? message
+        : Array.isArray(message)
+          ? Buffer.concat(message)
+          : Buffer.from(new Uint8Array(message as ArrayBuffer));
+      reject(new Error(`unexpected bridge frame: ${decodeFrame(binary).type}`));
     };
     socket.once('message', onMessage);
+  });
+}
+
+function collectMessages(socket: WebSocket, count: number): Promise<WebSocket.RawData[]> {
+  return new Promise((resolve) => {
+    const frames: WebSocket.RawData[] = [];
+    const onMessage = (frame: WebSocket.RawData) => {
+      frames.push(frame);
+      if (frames.length === count) {
+        socket.off('message', onMessage);
+        resolve(frames);
+      }
+    };
+    socket.on('message', onMessage);
   });
 }
 
@@ -181,12 +200,12 @@ describe('FIPS packet bridge', () => {
     });
 
     const armed = once(fips, 'message');
-    browser.send(encodeFrame({ type: 12 as MessageType, epoch: 1, sequence: 2n, payload: Buffer.alloc(0) }));
+    browser.send(encodeFrame({ type: MessageType.ACOUSTIC_READY, epoch: 1, sequence: 0n, payload: Buffer.alloc(0) }));
     const [armFrame] = await armed;
     expect(decodeFrame(Buffer.from(armFrame as Buffer))).toMatchObject({ type: MessageType.BROWSER_ARM, epoch: 1, payload: Buffer.alloc(0) });
 
     const disarmed = once(fips, 'message');
-    browser.send(encodeFrame({ type: 13 as MessageType, epoch: 1, sequence: 3n, payload: Buffer.alloc(0) }));
+    browser.send(encodeFrame({ type: MessageType.ACOUSTIC_DISARM, epoch: 1, sequence: 0n, payload: Buffer.alloc(0) }));
     const [disarmFrame] = await disarmed;
     expect(decodeFrame(Buffer.from(disarmFrame as Buffer))).toMatchObject({ type: MessageType.BROWSER_DISARM, epoch: 1, payload: Buffer.alloc(0) });
 
@@ -201,8 +220,8 @@ describe('FIPS packet bridge', () => {
     const response = await fetch(`http://127.0.0.1:${bridge.port}/bridge-status`);
     expect(response.ok).toBe(true);
     expect(await response.json()).toEqual(expect.objectContaining({
-      role: 'Unknown', configuration: 'unknown', browserAudio: 'not-armed', localBridge: 'disconnected',
-      soundTransport: 'waiting', epoch: 1, soundMtu: null, txPackets: 0, rxPackets: 0,
+      role: 'Unknown', configuration: 'unknown', browserAudio: 'not-ready', acousticSession: 'not-ready',
+      localBridge: 'disconnected', soundTransport: 'waiting', epoch: 1, soundMtu: null, txPackets: 0, rxPackets: 0,
     }));
   });
 
@@ -331,5 +350,45 @@ describe('FIPS packet bridge', () => {
     browser.send(encodeFrame({ type: MessageType.RESET, flags: RESET_ACK_FLAG, epoch: 2, sequence: 2n, payload: Buffer.alloc(0) }));
     await once(browser, 'close');
     expect(packetBridgeState(bridge).lastError).toMatchObject({ code: 'reset_ack_not_accepted' });
+  });
+
+  it('disarms the FIPS endpoint before reset or terminal error clears current-session state', async () => {
+    const bridge = await createBridge();
+    const browser = await openEndpoint(bridge.port, 'browser');
+    const fips = await openEndpoint(bridge.port, 'fips');
+
+    const arm = once(fips, 'message');
+    browser.send(encodeFrame({ type: MessageType.ACOUSTIC_READY, epoch: 1, sequence: 0n, payload: Buffer.alloc(0) }));
+    await arm;
+    expect(bridge.state()).toMatchObject({ acousticReady: true });
+
+    const disarmThenReset = collectMessages(fips, 2);
+    await expect(bridge.reset()).resolves.toBe(2);
+    const resetControls = (await disarmThenReset).map((raw) => decodeFrame(Buffer.from(raw as Buffer)));
+    expect(resetControls).toEqual([
+      expect.objectContaining({ type: MessageType.BROWSER_DISARM, epoch: 1, sequence: 0n }),
+      expect.objectContaining({ type: MessageType.RESET, epoch: 2, sequence: 0n, flags: RESET_ACK_FLAG }),
+    ]);
+    expect(bridge.state()).toMatchObject({ acousticReady: false });
+
+    const rearm = once(fips, 'message');
+    browser.send(encodeFrame({ type: MessageType.ACOUSTIC_READY, epoch: 2, sequence: 0n, payload: Buffer.alloc(0) }));
+    await rearm;
+    const disarm = once(fips, 'message');
+    browser.send(encodeFrame({ type: MessageType.ERROR, epoch: 2, sequence: 1n, payload: Buffer.from('{}') }));
+    expect(decodeFrame(Buffer.from((await disarm)[0] as Buffer))).toMatchObject({ type: MessageType.BROWSER_DISARM, epoch: 2 });
+    expect(bridge.state()).toMatchObject({ acousticReady: false });
+    browser.close(); fips.close();
+  });
+
+  it('rejects stale, nonzero, and nonempty acoustic controls before readiness mutation', async () => {
+    const bridge = await createBridge();
+    const browser = await openEndpoint(bridge.port, 'browser');
+    const fips = await openEndpoint(bridge.port, 'fips');
+    browser.send(encodeFrame({ type: MessageType.ACOUSTIC_READY, epoch: 0, sequence: 0n, payload: Buffer.alloc(0) }));
+    await once(browser, 'close');
+    expect(bridge.state()).toMatchObject({ acousticReady: false, rejectedFrames: 1 });
+    await expectNoMessage(fips);
+    fips.close();
   });
 });

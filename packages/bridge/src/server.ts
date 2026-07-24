@@ -70,7 +70,7 @@ export interface BridgeState {
   queueCounts: Partial<Record<keyof typeof MessageType, number>> & Record<string, number>;
   stampedResults: Array<Record<string, unknown>>;
   packetCounters: { browserToFips: number; fipsToBrowser: number };
-  evidenceClass: 'Loopback'; acousticReady: false; peerConnected: false; pingReady: false;
+  evidenceClass: 'Loopback'; acousticReady: boolean; peerConnected: false; pingReady: false;
 }
 /** Additional safe observability emitted by the FIPS packet bridge. */
 export interface PacketBridgeState {
@@ -359,7 +359,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     evidenceClass: 'Loopback', acousticReady: false, peerConnected: false, pingReady: false,
   };
   let audio: BrowserAudio | undefined; let generation = 1; let writeTail: Promise<unknown> = Promise.resolve();
-  let results = new Map<string, BrowserResult>(); let failureReasons = new Set<string>(); let browserArmed = false;
+  let results = new Map<string, BrowserResult>(); let failureReasons = new Set<string>(); let localAudioPreflight = false;
   let owner: WebSocket | undefined; let fipsOwner: WebSocket | undefined; let epochClaimed = false; let reconnectAllowed = false; let reconnectRequiresReset = false;
   let operationGeneration = 1; let operationAbort = new AbortController(); let settleAbort: AbortController | undefined; let shuttingDown = false;
   let cyrinxExpiryTimer: unknown;
@@ -380,7 +380,8 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       // IPv6 MTU authority. Keep that absence explicit for the browser rather
       // than projecting plausible defaults.
       role: config?.role ?? 'Unknown', configuration: config ? 'ready' : 'unknown',
-      browserAudio: browserArmed ? 'armed' : 'not-armed',
+      browserAudio: localAudioPreflight ? 'ready' : 'not-ready',
+      acousticSession: state.acousticReady ? 'ready' : 'not-ready',
       localBridge: state.packetEndpoints.browser === 'ready' ? 'ready' : 'disconnected',
       soundTransport: state.packetEndpoints.fips === 'ready' ? 'started' : 'waiting',
       epoch: state.epoch, queueHealth,
@@ -473,6 +474,13 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       sequence: 0n,
       payload: Buffer.alloc(0),
     }));
+  };
+  const disarmAcousticSession = (): void => {
+    if (!state.acousticReady) return;
+    state.acousticReady = false;
+    notifyFipsBrowserState(false);
+    state.packetReadiness = { browser: false, fips: false };
+    clearQueues();
   };
   const rejectSocket = (socket: WebSocket, error: unknown): void => {
     const safe = safeBridgeError(error);
@@ -753,6 +761,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   };
   const reset = async (alreadyPreempted = false): Promise<number> => {
     if (state.epoch >= 0xffff_ffff) fail('epoch_exhausted');
+    disarmAcousticSession();
     if (cyrinxSession?.operatorReset(clock()) && cyrinxSession.fallbackReason) {
       failureReasons.add(cyrinxSession.fallbackReason);
     }
@@ -760,7 +769,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     if (!alreadyPreempted) abortCyrinxOperation();
     generation += 1; state.epoch += 1; audio = undefined; results = new Map(); failureReasons = new Set(cyrinxSession?.fallbackReason ? [cyrinxSession.fallbackReason] : []);
     state.stampedResults = []; state.overflowedQueues = []; state.discontinuities = 0; state.rejectedFrames = 0;
-    state.packetCounters = { browserToFips: 0, fipsToBrowser: 0 }; state.packetReadiness = { browser: false, fips: false }; state.lastError = null; browserArmed = false;
+    state.packetCounters = { browserToFips: 0, fipsToBrowser: 0 }; state.packetReadiness = { browser: false, fips: false }; state.lastError = null; localAudioPreflight = false; state.acousticReady = false;
     state.lastAcceptedAtMs = null;
     state.packetQueues.browserToFips.health = 'not-connected'; state.packetQueues.fipsToBrowser.health = 'not-connected';
     for (const tracker of sequenceTrackers) tracker.value = -1n;
@@ -1032,8 +1041,22 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       if (!isBinary) fail('binary_frames_required');
       const encoded = asBuffer(rawData);
       const frame = decodeFrame(encoded);
-      if (frame.epoch !== state.epoch || frame.sequence <= lastSequence.value) fail('stale_or_duplicate_frame');
+      const acousticControl = frame.type === MessageType.ACOUSTIC_READY || frame.type === MessageType.ACOUSTIC_DISARM;
+      if (frame.epoch !== state.epoch) fail('stale_or_duplicate_frame');
       if (connection.mustResetBeforeUse && frame.type !== MessageType.RESET) fail('recovery_reset_required');
+      if (acousticControl) {
+        if (frame.sequence !== 0n || frame.payload.byteLength !== 0 || frame.flags !== 0) fail('acoustic_control_invalid');
+        if (frame.type === MessageType.ACOUSTIC_READY) {
+          if (!state.acousticReady) {
+            state.acousticReady = true;
+            notifyFipsBrowserState(true);
+          }
+        } else {
+          disarmAcousticSession();
+        }
+        return;
+      }
+      if (frame.sequence <= lastSequence.value) fail('stale_or_duplicate_frame');
       lastSequence.value = frame.sequence;
       await expireCyrinx();
       if (frame.type === MessageType.RESET) {
@@ -1078,6 +1101,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
           await completeCyrinxPlayback(payload); return;
         }
         if (frame.type === MessageType.ERROR) {
+          disarmAcousticSession();
           const origin = connection.errorOrigins.get(frame.sequence)
             ?? (cyrinxSession?.codec === 'cyrinx' ? 'cyrinx' : cyrinxSession?.codec === 'quiet' ? 'quiet' : 'other');
           connection.errorOrigins.delete(frame.sequence);
@@ -1125,8 +1149,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
           const payload = parseJsonPayload(frame); if (hasForbiddenAuthority(payload)) fail('browser_authority_forbidden');
           audio = parseBrowserAudio(payload); await persist();
         }
-        browserArmed = true;
-        notifyFipsBrowserState(true);
+        localAudioPreflight = true;
         const reportPath = path.join(options.artifactDir, 'loopback-qualification.json');
         await writeQualificationReport({ schemaVersion: 1, evidencePath: 'Loopback', physicalQualification: false, qualificationStatus: 'not-physical', capturedAt: new Date().toISOString(), reportPath, frame: { messageType: 'AUDIO_SETTINGS', epoch: frame.epoch, sequence: frame.sequence.toString(), payloadBytes: frame.payload.byteLength } });
         socket.send(JSON.stringify({ reportPath, physicalQualification: false })); return;
@@ -1155,7 +1178,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       fipsOwner = socket; clients.add(socket); state.packetEndpoints.fips = 'ready';
       const lastSequence = { value: -1n }; sequenceTrackers.add(lastSequence); let processing = Promise.resolve();
       flushPacketQueue('browser-to-fips');
-      if (browserArmed) notifyFipsBrowserState(true);
+      if (state.acousticReady) notifyFipsBrowserState(true);
       socket.once('close', () => { clients.delete(socket); sequenceTrackers.delete(lastSequence); if (fipsOwner === socket) { fipsOwner = undefined; state.packetEndpoints.fips = 'disconnected'; } });
       socket.on('message', (rawData, isBinary) => {
         processing = processing.then(() => {
@@ -1197,7 +1220,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       sequenceTrackers.delete(lastSequence);
       browserConnections.delete(connection);
       if (owner !== socket) return;
-      owner = undefined; state.packetEndpoints.browser = 'disconnected'; browserArmed = false; notifyFipsBrowserState(false);
+      owner = undefined; state.packetEndpoints.browser = 'disconnected'; localAudioPreflight = false; disarmAcousticSession();
       if (shuttingDown) return;
       if (connection.mustResetBeforeUse) {
         reconnectAllowed = true;

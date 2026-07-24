@@ -38,6 +38,10 @@ export enum MessageType {
   BROWSER_ARM = 10,
   /** Bridge-only disarm event; emitted on browser disconnect/reset. */
   BROWSER_DISARM = 11,
+  /** Browser projection of a current committed acoustic session plus heartbeat. */
+  ACOUSTIC_READY = 12,
+  /** Browser projection that the current acoustic session is no longer usable. */
+  ACOUSTIC_DISARM = 13,
 }
 
 export enum PcmEncoding {
@@ -97,7 +101,7 @@ function fail(message: string): never {
 }
 
 function isMessageType(value: number): value is MessageType {
-  return value >= MessageType.HELLO && value <= MessageType.BROWSER_DISARM;
+  return value >= MessageType.HELLO && value <= MessageType.ACOUSTIC_DISARM;
 }
 
 /** Runtime guard shared by the bridge and browser packet boundary. */
@@ -125,12 +129,18 @@ function validateFrame(frame: FwavFrame): Required<Pick<FwavFrame, 'flags' | 'sa
   const channels = frame.channels ?? 0;
   const encoding = frame.encoding ?? PcmEncoding.NONE;
   const isFipsPacket = frame.type === MessageType.FIPS_PACKET;
+  const isAcousticReadinessControl = frame.type === MessageType.ACOUSTIC_READY
+    || frame.type === MessageType.ACOUSTIC_DISARM;
   const trafficClass = frame.trafficClass ?? FipsTrafficClass.Ordinary;
   if (isFipsPacket) {
     if ((frame.flags ?? 0) !== 0) fail('FIPS packet must not declare flags');
     if (!isFipsTrafficClass(trafficClass)) fail('traffic class is unsupported');
   } else if (frame.trafficClass !== undefined) {
     fail('traffic class is only valid for FIPS packets');
+  }
+  if (isAcousticReadinessControl
+    && ((frame.flags ?? 0) !== 0 || frame.sequence !== 0n || frame.payload.byteLength !== 0)) {
+    fail('acoustic readiness control must have zero flags, sequence, and payload');
   }
   validateInteger(sampleRate, 'sample rate', 0xffff_ffff);
   validateInteger(channels, 'channel count', 0xffff);
