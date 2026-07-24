@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  ACOUSTIC_PROFILES,
+  canonicalizeSettings,
   FAS1_HEADER_BYTES,
   FAS1_MAX_BODY_BYTES,
   FAS1_MAX_PACKET_BYTES,
@@ -8,9 +10,11 @@ import {
   Fas1UnitType,
   crc32c,
   decodeFas1,
+  digestSettings,
   encodeFas1,
   fragmentPacket,
   reassemblePacket,
+  resolveAcousticProfile,
 } from './acoustic-protocol.js';
 
 const SESSION = 0x1020_3040_5060_7080n;
@@ -108,5 +112,31 @@ describe('FAS1 binary protocol', () => {
     expect(() => encodeFas1({ ...validUnit(Fas1UnitType.Data), fragmentIndex: 1, fragmentCount: 1 })).toThrow();
     const fragments = fragmentPacket({ packet: new Uint8Array(218), sessionId: SESSION, sequenceStart: 0, packetId: 1 });
     expect(() => reassemblePacket([fragments[0]!, fragments[0]!])).toThrow();
+  });
+
+  it('serializes directional settings in one canonical A-to-B then B-to-A order', async () => {
+    const aToB = { profileId: 'quiet-audible-7k-v1', payloadBytes: 96, repetition: 1, guardMs: 750, playbackGain: 1, ackTimeoutMs: 4_000 };
+    const bToA = { profileId: 'quiet-audible-7k-v1', payloadBytes: 217, repetition: 1, guardMs: 750, playbackGain: 2, ackTimeoutMs: 15_000 };
+    const canonical = canonicalizeSettings({ aToB, bToA });
+    expect(canonical).toEqual(canonicalizeSettings({ aToB, bToA }));
+    expect(canonical).not.toEqual(canonicalizeSettings({ aToB: bToA, bToA: aToB }));
+    const digest = await digestSettings({ aToB, bToA });
+    expect(digest).toHaveLength(32);
+    expect(digest).toEqual(await digestSettings({ aToB, bToA }));
+  });
+
+  it('uses one exact mutually executable Quiet profile and rejects synthetic frequency controls', () => {
+    const profile = resolveAcousticProfile('quiet-audible-7k-v1');
+    expect(ACOUSTIC_PROFILES).toContainEqual(profile);
+    expect(profile).toMatchObject({ codec: 'quiet', modemProfile: 'audible-7k-channel-0', transmitImplementation: 'quiet-client', receiveImplementation: 'quiet-client' });
+    expect(() => resolveAcousticProfile('quiet-audible-7k-v2')).toThrow();
+    expect(() => canonicalizeSettings({
+      aToB: { profileId: 'quiet-audible-7k-v1', payloadBytes: 96, repetition: 1, guardMs: 750, playbackGain: 1, ackTimeoutMs: 4_000, frequencyHz: 7_000 },
+      bToA: { profileId: 'quiet-audible-7k-v1', payloadBytes: 96, repetition: 1, guardMs: 750, playbackGain: 1, ackTimeoutMs: 4_000 },
+    } as never)).toThrow();
+    expect(() => canonicalizeSettings({
+      aToB: { profileId: 'quiet-audible-7k-v1', payloadBytes: 96, repetition: 1, guardMs: 750, playbackGain: 2.001, ackTimeoutMs: 4_000 },
+      bToA: { profileId: 'quiet-audible-7k-v1', payloadBytes: 96, repetition: 1, guardMs: 750, playbackGain: 1, ackTimeoutMs: 4_000 },
+    })).toThrow();
   });
 });

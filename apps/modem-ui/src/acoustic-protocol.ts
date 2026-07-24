@@ -44,6 +44,29 @@ export interface FragmentPacketInput {
   packetId: number;
 }
 
+/** A profile name is negotiable only when this exact executable modem path exists. */
+export interface AcousticProfile {
+  readonly id: 'quiet-audible-7k-v1';
+  readonly codec: 'quiet';
+  readonly modemProfile: 'audible-7k-channel-0';
+  readonly transmitImplementation: 'quiet-client';
+  readonly receiveImplementation: 'quiet-client';
+}
+
+export interface DirectionalSettings {
+  readonly profileId: string;
+  readonly payloadBytes: number;
+  readonly repetition: number;
+  readonly guardMs: number;
+  readonly playbackGain: number;
+  readonly ackTimeoutMs: number;
+}
+
+export interface AcousticSettings {
+  readonly aToB: DirectionalSettings;
+  readonly bToA: DirectionalSettings;
+}
+
 const UINT32_MAX = 0xffff_ffff;
 const UINT64_MAX = 0xffff_ffff_ffff_ffffn;
 const BODYLESS_TYPES = new Set<Fas1UnitType>([
@@ -53,6 +76,18 @@ const BODYLESS_TYPES = new Set<Fas1UnitType>([
   Fas1UnitType.Reset,
 ]);
 const CRC32C_TABLE = createCrc32cTable();
+const SETTINGS_VERSION = 1;
+const encoder = new TextEncoder();
+
+export const ACOUSTIC_PROFILES: readonly AcousticProfile[] = Object.freeze([
+  Object.freeze({
+    id: 'quiet-audible-7k-v1' as const,
+    codec: 'quiet' as const,
+    modemProfile: 'audible-7k-channel-0' as const,
+    transmitImplementation: 'quiet-client' as const,
+    receiveImplementation: 'quiet-client' as const,
+  }),
+]);
 
 function fail(message: string): never {
   throw new Error(`FAS1 ${message}`);
@@ -73,6 +108,13 @@ function assertSessionId(value: bigint): void {
 function assertBody(body: Uint8Array): void {
   if (!(body instanceof Uint8Array)) fail('body must be binary');
   if (body.byteLength > FAS1_MAX_BODY_BYTES) fail('body exceeds the 217-byte limit');
+}
+
+function exactObject(value: unknown, keys: readonly string[], name: string): Record<string, unknown> {
+  if (!value || Array.isArray(value) || typeof value !== 'object') fail(`${name} is invalid`);
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).some((key) => !keys.includes(key))) fail(`${name} has an unsupported field`);
+  return record;
 }
 
 function validateUnit(input: Fas1Unit): void {
@@ -125,6 +167,64 @@ export function crc32c(bytes: Uint8Array): number {
   let value = 0xffff_ffff;
   for (const byte of bytes) value = CRC32C_TABLE[(value ^ byte) & 0xff]! ^ (value >>> 8);
   return (value ^ 0xffff_ffff) >>> 0;
+}
+
+export function resolveAcousticProfile(profileId: string): AcousticProfile {
+  if (typeof profileId !== 'string') fail('profile ID is invalid');
+  const profile = ACOUSTIC_PROFILES.find((entry) => entry.id === profileId);
+  if (!profile || profile.transmitImplementation !== profile.receiveImplementation) fail('profile ID is unsupported');
+  return profile;
+}
+
+function canonicalizeDirection(value: unknown): Uint8Array {
+  const direction = exactObject(value, ['profileId', 'payloadBytes', 'repetition', 'guardMs', 'playbackGain', 'ackTimeoutMs'], 'directional settings');
+  const profileId = direction.profileId;
+  if (typeof profileId !== 'string') fail('profile ID is invalid');
+  resolveAcousticProfile(profileId);
+  const profileBytes = encoder.encode(profileId);
+  if (profileBytes.byteLength < 1 || profileBytes.byteLength > 63) fail('profile ID length is invalid');
+  assertInteger(direction.payloadBytes as number, FAS1_MAX_BODY_BYTES, 'payload bytes');
+  if ((direction.payloadBytes as number) < 1) fail('payload bytes are invalid');
+  assertInteger(direction.repetition as number, 3, 'repetition');
+  if ((direction.repetition as number) < 1) fail('repetition is invalid');
+  assertInteger(direction.guardMs as number, 5_000, 'guard milliseconds');
+  if ((direction.guardMs as number) < 1) fail('guard milliseconds are invalid');
+  const playbackGain = direction.playbackGain;
+  if (typeof playbackGain !== 'number' || !Number.isSafeInteger(playbackGain * 1_000) || playbackGain < 1 || playbackGain > 2) fail('playback gain is invalid');
+  assertInteger(direction.ackTimeoutMs as number, 15_000, 'ack timeout');
+  if ((direction.ackTimeoutMs as number) < 4_000) fail('ack timeout is invalid');
+  const output = new Uint8Array(1 + profileBytes.byteLength + 2 + 1 + 2 + 2 + 2);
+  const view = new DataView(output.buffer);
+  output[0] = profileBytes.byteLength;
+  output.set(profileBytes, 1);
+  let offset = 1 + profileBytes.byteLength;
+  view.setUint16(offset, direction.payloadBytes as number, true); offset += 2;
+  view.setUint8(offset, direction.repetition as number); offset += 1;
+  view.setUint16(offset, direction.guardMs as number, true); offset += 2;
+  view.setUint16(offset, Math.round(playbackGain * 1_000), true); offset += 2;
+  view.setUint16(offset, direction.ackTimeoutMs as number, true);
+  return output;
+}
+
+/** Stable binary commitment: version, A→B record, then B→A record. */
+export function canonicalizeSettings(value: AcousticSettings): Uint8Array {
+  const settings = exactObject(value, ['aToB', 'bToA'], 'settings');
+  if (!('aToB' in settings) || !('bToA' in settings)) fail('settings directions are required');
+  const aToB = canonicalizeDirection(settings.aToB);
+  const bToA = canonicalizeDirection(settings.bToA);
+  const output = new Uint8Array(1 + aToB.byteLength + bToA.byteLength);
+  output[0] = SETTINGS_VERSION;
+  output.set(aToB, 1);
+  output.set(bToA, 1 + aToB.byteLength);
+  return output;
+}
+
+/** SHA-256 detects directional settings disagreement; it is not peer authentication. */
+export async function digestSettings(value: AcousticSettings): Promise<Uint8Array> {
+  const canonical = canonicalizeSettings(value);
+  if (!globalThis.crypto?.subtle) fail('Web Crypto SHA-256 is unavailable');
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', canonical.slice().buffer);
+  return new Uint8Array(digest);
 }
 
 function crcProtectedBytes(header: Uint8Array, body: Uint8Array): Uint8Array {

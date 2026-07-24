@@ -25,7 +25,12 @@ interface BridgeConfig {
 interface RetryConfig { readonly maxAttempts: number; readonly minDelayMs: number; readonly maxDelayMs: number; }
 interface HeartbeatConfig { readonly intervalMs: number; readonly deadLinkTimeoutMs: number; }
 interface AudioDefaults { readonly sampleRate: 48_000; readonly channels: 1; readonly echoCancellation: false; readonly noiseSuppression: false; readonly autoGainControl: false; }
-interface CalibrationCandidate { readonly id: 'quiet-audible-7k-v1'; readonly codec: 'quiet'; readonly profile: 'audible-7k-channel-0'; }
+interface CalibrationCandidate { readonly id: string; readonly profileId: 'quiet-audible-7k-v1'; readonly codec: 'quiet'; readonly profile: 'audible-7k-channel-0'; readonly payloadBytes: number; readonly repetition: 1; readonly guardMs: 750; readonly playbackGain: number; }
+interface AcousticConfig {
+  readonly protocol: Readonly<{ maximumBodyBytes: 217; maximumPacketBytes: 1357; maxFragments: 16 }>;
+  readonly arq: Readonly<{ windowSize: 4; maxAttempts: 3; maxQueuedPackets: 4; deliveredIdHistory: 32 }>;
+  readonly calibration: Readonly<{ maxCandidates: 3; probesPerDirection: 4; deadlineMs: 120_000; maximumPlaybackGain: 2 }>;
+}
 
 export interface DemoConfig {
   readonly inputRole: DemoRoleInput;
@@ -37,6 +42,7 @@ export interface DemoConfig {
   readonly codecCapabilities: readonly ['quiet'];
   readonly audioDefaults: AudioDefaults;
   readonly calibrationCandidates: readonly CalibrationCandidate[];
+  readonly acoustic: AcousticConfig;
   readonly retries: RetryConfig;
   readonly heartbeat: HeartbeatConfig;
 }
@@ -50,6 +56,7 @@ export interface PublicDemoConfig {
   readonly codecCapabilities: readonly ['quiet'];
   readonly audioDefaults: AudioDefaults;
   readonly calibrationCandidates: readonly CalibrationCandidate[];
+  readonly acoustic: AcousticConfig;
   readonly retries: RetryConfig;
   readonly heartbeat: HeartbeatConfig;
 }
@@ -66,7 +73,12 @@ const DEFAULTS = Object.freeze({
   bridge: Object.freeze({ browserPort: 4_310, fipsPort: 4_310, browserPath: '/bridge/browser' as const, fipsPath: '/bridge/fips' as const }),
   codecCapabilities: Object.freeze(['quiet'] as const),
   audioDefaults: Object.freeze({ sampleRate: 48_000 as const, channels: 1 as const, echoCancellation: false as const, noiseSuppression: false as const, autoGainControl: false as const }),
-  calibrationCandidates: Object.freeze([Object.freeze({ id: 'quiet-audible-7k-v1' as const, codec: 'quiet' as const, profile: 'audible-7k-channel-0' as const })]),
+  calibrationCandidates: Object.freeze([
+    Object.freeze({ id: 'quiet-bootstrap-96-v1', profileId: 'quiet-audible-7k-v1' as const, codec: 'quiet' as const, profile: 'audible-7k-channel-0' as const, payloadBytes: 96, repetition: 1 as const, guardMs: 750 as const, playbackGain: 1 }),
+    Object.freeze({ id: 'quiet-full-frame-v1', profileId: 'quiet-audible-7k-v1' as const, codec: 'quiet' as const, profile: 'audible-7k-channel-0' as const, payloadBytes: 217, repetition: 1 as const, guardMs: 750 as const, playbackGain: 1 }),
+    Object.freeze({ id: 'quiet-bootstrap-gain-2-v1', profileId: 'quiet-audible-7k-v1' as const, codec: 'quiet' as const, profile: 'audible-7k-channel-0' as const, payloadBytes: 96, repetition: 1 as const, guardMs: 750 as const, playbackGain: 2 }),
+  ]),
+  acoustic: Object.freeze({ protocol: Object.freeze({ maximumBodyBytes: 217 as const, maximumPacketBytes: 1_357 as const, maxFragments: 16 as const }), arq: Object.freeze({ windowSize: 4 as const, maxAttempts: 3 as const, maxQueuedPackets: 4 as const, deliveredIdHistory: 32 as const }), calibration: Object.freeze({ maxCandidates: 3 as const, probesPerDirection: 4 as const, deadlineMs: 120_000 as const, maximumPlaybackGain: 2 as const }) }),
   retries: Object.freeze({ maxAttempts: 3, minDelayMs: 500, maxDelayMs: 2_000 }),
   heartbeat: Object.freeze({ intervalMs: 5_000, deadLinkTimeoutMs: 30_000 }),
   fips: Object.freeze({ linkMtu: 1_357 }),
@@ -107,11 +119,12 @@ function bridgeOverride(value: unknown): { browserPort?: number; fipsPort?: numb
 function retryOverride(value: unknown): { maxAttempts?: number; minDelayMs?: number; maxDelayMs?: number } {
   const override = record(value, 'retries_override_invalid'); exactKeys(override, ['maxAttempts', 'minDelayMs', 'maxDelayMs'], 'retries_override_unknown_key');
   const result: { maxAttempts?: number; minDelayMs?: number; maxDelayMs?: number } = {};
-  if ('maxAttempts' in override) result.maxAttempts = integer(override.maxAttempts, 'retry_attempts_invalid', 1, 10);
+  if ('maxAttempts' in override) result.maxAttempts = integer(override.maxAttempts, 'retry_attempts_invalid', 1, 3);
   if ('minDelayMs' in override) result.minDelayMs = integer(override.minDelayMs, 'retry_min_delay_invalid', 1, 60_000);
   if ('maxDelayMs' in override) result.maxDelayMs = integer(override.maxDelayMs, 'retry_max_delay_invalid', 1, 60_000);
   return result;
 }
+function acousticOverride(value: unknown): void { exactKeys(record(value, 'acoustic_override_invalid'), [], 'acoustic_override_unknown_key'); }
 function heartbeatOverride(value: unknown): { intervalMs?: number; deadLinkTimeoutMs?: number } {
   const override = record(value, 'heartbeat_override_invalid'); exactKeys(override, ['intervalMs', 'deadLinkTimeoutMs'], 'heartbeat_override_unknown_key');
   const result: { intervalMs?: number; deadLinkTimeoutMs?: number } = {};
@@ -124,8 +137,9 @@ function heartbeatOverride(value: unknown): { intervalMs?: number; deadLinkTimeo
 export function resolveDemoConfig(input?: string, overrides?: unknown): DemoConfig {
   if (input !== 'a' && input !== 'b') throw new Error('demo config role must be literal a or b');
   const raw = overrides === undefined ? {} : record(overrides, 'override_invalid');
-  exactKeys(raw, ['bridge', 'fips', 'retries', 'heartbeat', 'peerPublicKey'], 'override_unknown_key');
+  exactKeys(raw, ['bridge', 'fips', 'retries', 'heartbeat', 'peerPublicKey', 'acoustic'], 'override_unknown_key');
   if ('peerPublicKey' in raw) fail('peer_mapping_is_fixed');
+  if ('acoustic' in raw) acousticOverride(raw.acoustic);
 
   const bridgePatch = 'bridge' in raw ? bridgeOverride(raw.bridge) : {};
   const browserPort = bridgePatch.browserPort ?? DEFAULTS.bridge.browserPort;
@@ -157,6 +171,7 @@ export function resolveDemoConfig(input?: string, overrides?: unknown): DemoConf
     codecCapabilities: [...DEFAULTS.codecCapabilities] as ['quiet'],
     audioDefaults: { ...DEFAULTS.audioDefaults },
     calibrationCandidates: DEFAULTS.calibrationCandidates.map((candidate) => ({ ...candidate })),
+    acoustic: { protocol: { ...DEFAULTS.acoustic.protocol }, arq: { ...DEFAULTS.acoustic.arq }, calibration: { ...DEFAULTS.acoustic.calibration } },
     retries,
     heartbeat,
   });
@@ -173,6 +188,7 @@ export function toPublicDemoConfig(config: DemoConfig): PublicDemoConfig {
     codecCapabilities: [...config.codecCapabilities] as ['quiet'],
     audioDefaults: { ...config.audioDefaults },
     calibrationCandidates: config.calibrationCandidates.map((candidate) => ({ ...candidate })),
+    acoustic: { protocol: { ...config.acoustic.protocol }, arq: { ...config.acoustic.arq }, calibration: { ...config.acoustic.calibration } },
     retries: { ...config.retries },
     heartbeat: { ...config.heartbeat },
   });

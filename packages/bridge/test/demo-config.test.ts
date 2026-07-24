@@ -36,6 +36,8 @@ describe('demo configuration authority', () => {
 
     expect(a.peer.publicKey).toBe(b.identity.publicKey);
     expect(b.peer.publicKey).toBe(a.identity.publicKey);
+    expect(a.calibrationCandidates).toEqual(b.calibrationCandidates);
+    expect(a.calibrationCandidates.map((candidate) => candidate.profileId)).toEqual(['quiet-audible-7k-v1', 'quiet-audible-7k-v1', 'quiet-audible-7k-v1']);
     expect(a.identity.publicKey).toBe('npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m');
     expect(b.identity.publicKey).toBe('npub1f49ke5fkzqev4x7j46uajq92f4zan6kcpty5yvm5c3g6wf2dqanqn7qsy2');
     expect(a).toMatchObject({
@@ -43,6 +45,11 @@ describe('demo configuration authority', () => {
       codecCapabilities: expect.arrayContaining(['quiet']),
       audioDefaults: { sampleRate: 48_000, channels: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
       calibrationCandidates: expect.any(Array),
+      acoustic: {
+        protocol: { maximumBodyBytes: 217, maximumPacketBytes: 1357, maxFragments: 16 },
+        arq: { windowSize: 4, maxAttempts: 3, maxQueuedPackets: 4, deliveredIdHistory: 32 },
+        calibration: { maxCandidates: 3, probesPerDirection: 4, deadlineMs: 120_000, maximumPlaybackGain: 2 },
+      },
       retries: { maxAttempts: expect.any(Number), minDelayMs: expect.any(Number), maxDelayMs: expect.any(Number) },
       heartbeat: { intervalMs: expect.any(Number), deadLinkTimeoutMs: expect.any(Number) },
       fips: { linkMtu: 1357 },
@@ -54,11 +61,11 @@ describe('demo configuration authority', () => {
     const before = JSON.stringify(canonical);
     const overridden = resolveDemoConfig('a', {
       bridge: { browserPort: 4_410, fipsPort: 4_410 },
-      retries: { maxAttempts: 4, minDelayMs: 600, maxDelayMs: 1_200 },
+      retries: { maxAttempts: 3, minDelayMs: 600, maxDelayMs: 1_200 },
       heartbeat: { intervalMs: 2_000, deadLinkTimeoutMs: 8_000 },
     });
 
-    expect(overridden).toMatchObject({ bridge: { browserPort: 4_410 }, retries: { maxAttempts: 4 }, heartbeat: { deadLinkTimeoutMs: 8_000 } });
+    expect(overridden).toMatchObject({ bridge: { browserPort: 4_410 }, retries: { maxAttempts: 3 }, heartbeat: { deadLinkTimeoutMs: 8_000 } });
     expect(JSON.stringify(canonical)).toBe(before);
     expect(Object.isFrozen(overridden)).toBe(true);
     expect(Object.isFrozen(overridden.bridge)).toBe(true);
@@ -72,6 +79,9 @@ describe('demo configuration authority', () => {
     ['small MTU', { fips: { linkMtu: 1356 } }],
     ['bad retry range', { retries: { maxAttempts: 0, minDelayMs: 1_000, maxDelayMs: 500 } }],
     ['inconsistent peer', { peerPublicKey: 'npub1other' }],
+    ['synthetic frequency', { acoustic: { frequencyHz: 7_000 } }],
+    ['synthetic sample rate', { acoustic: { sampleRate: 48_000 } }],
+    ['synthetic playback speed', { acoustic: { playbackSpeed: 1.1 } }],
   ])('fails closed for %s without leaking private values', (_name, override) => {
     const a = resolveDemoConfig('a');
     expect(() => resolveDemoConfig('a', override)).toThrow('demo config');
