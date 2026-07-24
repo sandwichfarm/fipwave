@@ -106,7 +106,7 @@ Plans:
   4. A complete opaque FIPS transport packet of at least 1357 bytes travels in both roles by fragmenting into integrity-protected acoustic blocks and reassembling below FIPS with exactly-once delivery and bounded memory, expiry, timeout, retry, and backpressure.
   5. Explicit half-duplex turns prioritize acknowledgements and FIPS handshake/heartbeat traffic; sustained loss exposes degraded state and triggers bounded retry, recalibration, fallback, or an actionable error.
 
-**Plans**: 6/7 plans executed
+**Plans**: 7/7 plans executed
 
 - [x] 03-01-PLAN.md
 - [x] 03-02-PLAN.md
@@ -114,7 +114,7 @@ Plans:
 - [x] 03-04-PLAN.md
 - [x] 03-05-PLAN.md
 - [x] 03-06-PLAN.md
-- [ ] 03-07-PLAN.md
+- [x] 03-07-PLAN.md
 
 ### Phase 4: Prove the Sound-Only FIPS Ping
 
@@ -158,6 +158,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 |-------|----------------|--------|-----------|
 | 1. Qualify the Demo Substrate | 9/10 | In Progress|  |
 | 2. Configure and Establish the Codec-Neutral FIPS Bridge | 7/7 | Complete    | 2026-07-24 |
-| 3. Negotiate and Deliver Reliable Acoustic Packets | 6/7 | In Progress|  |
+| 3. Negotiate and Deliver Reliable Acoustic Packets | 7/7 | In Progress|  |
 | 4. Prove the Sound-Only FIPS Ping | 0/TBD | Not started | - |
 | 5. Present, Freeze, and Rehearse the Demo | 0/TBD | Not started | - |

@@ -59,13 +59,13 @@ Requirements for the Sovereign Engineering demo-day proof of concept.
 - [x] **LINK-04**: Reassembly has explicit limits for packet size, fragment
       count, memory, and expiry and never delivers a partial packet.
 
-- [ ] **LINK-05**: Duplicate acoustic data or acknowledgement units do not cause
+- [x] **LINK-05**: Duplicate acoustic data or acknowledgement units do not cause
       duplicate FIPS packet delivery.
 
-- [ ] **LINK-06**: Lost acoustic units use bounded acknowledgement, timeout,
+- [x] **LINK-06**: Lost acoustic units use bounded acknowledgement, timeout,
       and retry behavior whose values are derived from measured frame airtime.
 
-- [ ] **LINK-07**: The acoustic channel provides deterministic half-duplex
+- [x] **LINK-07**: The acoustic channel provides deterministic half-duplex
       bidirectional service with turn control and guard intervals so peer
       transmissions do not intentionally overlap.
 
@@ -292,9 +292,9 @@ Roadmap phase mapping is populated during roadmap creation.
 | LINK-02 | Phase 3 | Complete |
 | LINK-03 | Phase 3 | Complete |
 | LINK-04 | Phase 3 | Complete |
-| LINK-05 | Phase 3 | Pending |
-| LINK-06 | Phase 3 | Pending |
-| LINK-07 | Phase 3 | Pending |
+| LINK-05 | Phase 3 | Complete |
+| LINK-06 | Phase 3 | Complete |
+| LINK-07 | Phase 3 | Complete |
 | LINK-08 | Phase 3 | Complete |
 | LINK-09 | Phase 3 | Complete |
 | WEB-01 | Phase 1 | Complete |
