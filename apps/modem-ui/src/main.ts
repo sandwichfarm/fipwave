@@ -161,7 +161,11 @@ function configureAcousticSession(config: Readonly<RunnerConfig>): void {
     nonce: () => crypto.getRandomValues(new Uint8Array(16)), profiles: ['quiet-audible-7k-v1'], ranges: { minPayloadBytes: 96, maxPayloadBytes: 217 },
     candidates: [{ id: 'quiet-audible-7k-v1', profileId: 'quiet-audible-7k-v1', payloadBytes: 96, repetition: 1, guardMs: 750, playbackGain: Math.min(2, requestedPlaybackGain()), ackTimeoutMs: 4_000 }],
     calibration: { probesPerDirection: 1, maxCandidates: 1, deadlineMs: 30_000 },
-    measureProbe: () => ({ received: true, bytePerfect: true, corrupt: false, missing: false, duplicate: false, discontinuity: false, latencyMs: 0, signalDb: 0, clipping: false, confidence: 1 }),
+    // Quiet exposes no peer-correlated probe receipt or calibrated signal
+    // meter at this composition seam.  Keep that absence fail-closed instead
+    // of manufacturing a perfect sweep; the deterministic fixture supplies
+    // its own explicitly Fixture-classified measurement callback.
+    measureProbe: () => ({ received: false, bytePerfect: false, corrupt: false, missing: true, duplicate: false, discontinuity: false, latencyMs: 0, signalDb: -200, clipping: false, confidence: 0 }),
     onPacket: (packet) => { acousticRx += 1; adapter?.deliver(packet, FipsTrafficClass.Ordinary); },
   });
   adapter = new AcousticSessionAdapter({
