@@ -575,7 +575,7 @@ impl SoundTransport {
 mod tests {
     use super::*;
     use crate::config::MIN_SOUND_MTU;
-    use crate::transport::packet_channel;
+    use crate::transport::{TrafficClass, TransportHandle, packet_channel};
 
     fn config() -> SoundConfig {
         SoundConfig {
@@ -586,6 +586,38 @@ mod tests {
             queue_bytes: 4096,
             queue_max_age_ms: 5_000,
         }
+    }
+
+    #[tokio::test]
+    async fn sound_transport_traffic_class_preserves_source_metadata_and_opaque_bytes() {
+        let (packet_tx, _packet_rx) = packet_channel(2);
+        let sound = SoundTransport::new(TransportId::new(8), None, config(), packet_tx).unwrap();
+        let peer = sound.configured_peer();
+        let (sender, mut receiver) = mpsc::channel(2);
+        {
+            let mut runtime = sound.runtime.lock().unwrap();
+            runtime.state = TransportState::Up;
+            runtime.browser_ready = true;
+            runtime.sender = Some(sender);
+        }
+        let handle = TransportHandle::Sound(sound);
+        let payload = vec![0xf1, 0x50, 0x53, 0x00, 0x7e];
+
+        assert_eq!(
+            handle
+                .send_classified(&peer, &payload, TrafficClass::Control)
+                .await
+                .unwrap(),
+            payload.len()
+        );
+        let control = receiver.recv().await.unwrap().bytes;
+        assert_eq!(control[6], TrafficClass::Control.to_wire());
+        assert_eq!(&control[FWAV_HEADER_BYTES..], payload.as_slice());
+
+        assert_eq!(handle.send(&peer, &payload).await.unwrap(), payload.len());
+        let ordinary = receiver.recv().await.unwrap().bytes;
+        assert_eq!(ordinary[6], TrafficClass::Ordinary.to_wire());
+        assert_eq!(&ordinary[FWAV_HEADER_BYTES..], payload.as_slice());
     }
 
     #[tokio::test]
