@@ -45,6 +45,14 @@ async function openEndpoint(port: number, endpoint: 'browser' | 'fips'): Promise
   return socket;
 }
 
+async function openReplacementBrowser(port: number): Promise<WebSocket> {
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/bridge/browser`, {
+    origin: `http://127.0.0.1:${port}`,
+  });
+  await once(socket, 'open');
+  return socket;
+}
+
 async function createBridge(): Promise<BridgeServer> {
   const bridge = await createBridgeServer({
     host: '127.0.0.1',
@@ -411,6 +419,43 @@ describe('FIPS packet bridge', () => {
       packetQueues: { browserToFips: { items: 0, bytes: 0 } },
     });
     browser.close(); fips.close();
+  });
+
+  it('holds pending FIPS work behind a replacement browser reset, then admits a current-epoch delivery', async () => {
+    const bridge = await createBridge();
+    const browser = await openEndpoint(bridge.port, 'browser');
+    const fips = await openEndpoint(bridge.port, 'fips');
+    const pendingDelivery = once(browser, 'message');
+    fips.send(packet(1, 1n, Buffer.of(0x41)));
+    await pendingDelivery; // Deliberately do not admit: leave the queue head pending on disconnect.
+    const closed = once(browser, 'close');
+    browser.close();
+    await closed;
+
+    const replacement = await openReplacementBrowser(bridge.port);
+    await expectNoMessage(replacement);
+    const replacementReset = once(replacement, 'message');
+    const fipsReset = once(fips, 'message');
+    replacement.send(encodeFrame({ type: MessageType.RESET, epoch: 1, sequence: 1n, payload: Buffer.alloc(0) }));
+    const [[browserReset], [transportReset]] = await Promise.all([replacementReset, fipsReset]);
+    expect(decodeFrame(Buffer.from(browserReset as Buffer))).toMatchObject({ type: MessageType.RESET, epoch: 2, flags: RESET_ACK_FLAG });
+    expect(decodeFrame(Buffer.from(transportReset as Buffer))).toMatchObject({ type: MessageType.RESET, epoch: 2, flags: RESET_ACK_FLAG });
+
+    const currentDelivery = once(replacement, 'message');
+    fips.send(packet(2, 1n, Buffer.of(0x42)));
+    const [delivered] = await currentDelivery;
+    expect(decodeFrame(Buffer.from(delivered as Buffer))).toMatchObject({ type: MessageType.FIPS_PACKET, epoch: 2, sequence: 1n });
+    const admission = once(fips, 'message');
+    admitFipsPacket(replacement, delivered);
+    const [admitted] = await admission;
+    expect(decodeFrame(Buffer.from(admitted as Buffer))).toMatchObject({ type: MessageType.FIPS_PACKET_ADMISSION, epoch: 2, sequence: 1n, payload: Buffer.of(1) });
+    await drainBridge();
+    expect(packetBridgeState(bridge)).toMatchObject({
+      packetCounters: { fipsToBrowser: 1 },
+      packetQueues: { fipsToBrowser: { items: 0, bytes: 0, health: 'ready' } },
+      lastError: null,
+    });
+    replacement.close(); fips.close();
   });
 
   it('makes reset the single epoch authority and broadcasts binary acknowledgements to both endpoint roles', async () => {

@@ -377,6 +377,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   let audio: BrowserAudio | undefined; let generation = 1; let writeTail: Promise<unknown> = Promise.resolve();
   let results = new Map<string, BrowserResult>(); let failureReasons = new Set<string>(); let localAudioPreflight = false;
   let owner: WebSocket | undefined; let fipsOwner: WebSocket | undefined; let epochClaimed = false; let reconnectAllowed = false; let reconnectRequiresReset = false;
+  let ownerConnection: BrowserConnectionState | undefined;
   let pendingBrowserAdmission: PendingBrowserAdmission | undefined;
   let acousticReadinessProof: Buffer | undefined;
   let operationGeneration = 1; let operationAbort = new AbortController(); let settleAbort: AbortController | undefined; let shuttingDown = false;
@@ -460,6 +461,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   const flushPacketQueue = (direction: PacketDirection): void => {
     const target = direction === 'browser-to-fips' ? fipsOwner : owner;
     if (!target || target.readyState !== target.OPEN) return;
+    if (direction === 'fips-to-browser' && ownerConnection?.mustResetBeforeUse) return;
     const queue = packetQueues.get(direction)!;
     if (direction === 'fips-to-browser') {
       if (pendingBrowserAdmission) return;
@@ -1199,6 +1201,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
         }
         await resetting;
         lastSequence.value = -1n;
+        if (owner === socket && ownerConnection === connection && !connection.mustResetBeforeUse && frame.epoch + 1 === state.epoch) flushPacketQueue('fips-to-browser');
         return;
       }
       if (frame.type === MessageType.FIPS_PACKET) {
@@ -1334,8 +1337,8 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       acousticCapability: Buffer.alloc(ACOUSTIC_DISARM_CAPABILITY_BYTES),
       acousticCapabilityUsed: false,
     };
-    owner = socket; epochClaimed = true; reconnectAllowed = false; clients.add(socket); browserConnections.add(connection); state.packetEndpoints.browser = 'ready';
-    flushPacketQueue('fips-to-browser');
+    owner = socket; ownerConnection = connection; epochClaimed = true; reconnectAllowed = false; clients.add(socket); browserConnections.add(connection); state.packetEndpoints.browser = 'ready';
+    if (!connection.mustResetBeforeUse) flushPacketQueue('fips-to-browser');
     const lastSequence = { value: -1n }; sequenceTrackers.add(lastSequence); let processing = Promise.resolve();
     void expireCyrinx().then((expired) => {
       if (expired) return;
@@ -1348,7 +1351,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       browserConnections.delete(connection);
       if (owner !== socket) return;
       clearPendingBrowserAdmission();
-      owner = undefined; state.packetEndpoints.browser = 'disconnected'; localAudioPreflight = false; disarmAcousticSession();
+      owner = undefined; ownerConnection = undefined; state.packetEndpoints.browser = 'disconnected'; localAudioPreflight = false; disarmAcousticSession();
       if (shuttingDown) return;
       if (connection.mustResetBeforeUse) {
         reconnectAllowed = true;
