@@ -877,6 +877,7 @@ impl NymConfig {
 pub const MIN_SOUND_MTU: u16 = 1357;
 const DEFAULT_SOUND_QUEUE_ITEMS: usize = 32;
 const DEFAULT_SOUND_QUEUE_BYTES: usize = MIN_SOUND_MTU as usize * DEFAULT_SOUND_QUEUE_ITEMS;
+const DEFAULT_SOUND_QUEUE_MAX_AGE_MS: u64 = 5_000;
 
 /// Codec-neutral local bridge transport configuration.
 ///
@@ -896,6 +897,11 @@ pub struct SoundConfig {
     pub queue_items: usize,
     #[serde(default = "default_sound_queue_bytes")]
     pub queue_bytes: usize,
+    /// Maximum time a complete packet may wait for the browser bridge before
+    /// it is dropped. This prevents stale packets from being emitted after a
+    /// reset or a delayed WebSocket writer resumes.
+    #[serde(default = "default_sound_queue_max_age_ms")]
+    pub queue_max_age_ms: u64,
 }
 
 fn default_sound_mtu() -> u16 {
@@ -907,6 +913,9 @@ fn default_sound_queue_items() -> usize {
 fn default_sound_queue_bytes() -> usize {
     DEFAULT_SOUND_QUEUE_BYTES
 }
+fn default_sound_queue_max_age_ms() -> u64 {
+    DEFAULT_SOUND_QUEUE_MAX_AGE_MS
+}
 
 impl SoundConfig {
     pub fn mtu(&self) -> u16 {
@@ -917,6 +926,9 @@ impl SoundConfig {
     }
     pub fn queue_bytes(&self) -> usize {
         self.queue_bytes
+    }
+    pub fn queue_max_age_ms(&self) -> u64 {
+        self.queue_max_age_ms
     }
 
     /// Validate the narrow, local-only configuration accepted by Sound.
@@ -948,6 +960,8 @@ impl SoundConfig {
             || self.queue_items > 256
             || self.queue_bytes < self.mtu as usize
             || self.queue_bytes > 1024 * 1024
+            || self.queue_max_age_ms == 0
+            || self.queue_max_age_ms > 60_000
         {
             return Err("sound_queue_bounds_invalid".into());
         }

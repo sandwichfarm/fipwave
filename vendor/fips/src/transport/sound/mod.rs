@@ -7,6 +7,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
 };
+use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
 use serde_json::json;
@@ -48,9 +49,14 @@ struct Runtime {
     epoch: u32,
     next_sequence: u64,
     highest_received_sequence: Option<u64>,
-    sender: Option<mpsc::Sender<Vec<u8>>>,
+    sender: Option<mpsc::Sender<OutboundFrame>>,
     last_error: Option<&'static str>,
     counters: SoundCounters,
+}
+
+struct OutboundFrame {
+    bytes: Vec<u8>,
+    enqueued_at: Instant,
 }
 
 impl Default for Runtime {
@@ -155,6 +161,7 @@ impl SoundTransport {
         let transport_id = self.transport_id;
         let peer = self.configured_peer();
         let mtu = self.config.mtu();
+        let queue_max_age = Duration::from_millis(self.config.queue_max_age_ms());
         self.worker = Some(tokio::spawn(async move {
             {
                 let mut current = runtime.lock().expect("sound runtime");
@@ -167,8 +174,12 @@ impl SoundTransport {
                     _ = &mut stop_rx => break,
                     outbound = outbound_rx.recv() => match outbound {
                         Some(frame) => {
-                            outbound_bytes.fetch_sub(frame.len(), Ordering::AcqRel);
-                            if writer.send(Message::Binary(frame.into())).await.is_err() {
+                            outbound_bytes.fetch_sub(frame.bytes.len(), Ordering::AcqRel);
+                            if outbound_expired(frame.enqueued_at, queue_max_age) {
+                                reject(&runtime, "sound_queue_item_expired");
+                                continue;
+                            }
+                            if writer.send(Message::Binary(frame.bytes.into())).await.is_err() {
                                 let mut current = runtime.lock().expect("sound runtime");
                                 current.counters.disconnects += 1;
                                 current.last_error = Some("sound_bridge_disconnected");
@@ -180,7 +191,13 @@ impl SoundTransport {
                     },
                     inbound = reader.next() => match inbound {
                         Some(Ok(Message::Binary(bytes))) => {
-                            let _ = inject_inbound(&runtime, &packet_tx, transport_id, &peer, mtu, &bytes).await;
+                            let prior_epoch = runtime.lock().expect("sound runtime").epoch;
+                            let accepted = inject_inbound(&runtime, &packet_tx, transport_id, &peer, mtu, &bytes).await;
+                            if accepted.is_ok() && runtime.lock().expect("sound runtime").epoch != prior_epoch {
+                                while let Ok(expired) = outbound_rx.try_recv() {
+                                    outbound_bytes.fetch_sub(expired.bytes.len(), Ordering::AcqRel);
+                                }
+                            }
                         }
                         Some(Ok(_)) => reject(&runtime, "sound_binary_frame_required"),
                         Some(Err(_)) | None => {
@@ -267,7 +284,7 @@ impl SoundTransport {
             runtime.last_error = Some("sound_queue_byte_budget_exceeded");
             return Err(TransportError::SendFailed("sound queue byte budget is full".into()));
         }
-        sender.try_send(frame).map_err(|_| {
+        sender.try_send(OutboundFrame { bytes: frame, enqueued_at: Instant::now() }).map_err(|_| {
             self.outbound_bytes.fetch_sub(frame_bytes, Ordering::AcqRel);
             let mut runtime = self.runtime.lock().expect("sound runtime");
             runtime.counters.overflowed += 1;
@@ -318,6 +335,10 @@ fn reserve_bytes(counter: &AtomicUsize, limit: usize, amount: usize) -> bool {
             return true;
         }
     }
+}
+
+fn outbound_expired(enqueued_at: Instant, max_age: Duration) -> bool {
+    enqueued_at.elapsed() > max_age
 }
 
 fn reject(runtime: &Arc<Mutex<Runtime>>, code: &'static str) {
@@ -499,6 +520,7 @@ mod tests {
             mtu: MIN_SOUND_MTU,
             queue_items: 2,
             queue_bytes: 4096,
+            queue_max_age_ms: 5_000,
         }
     }
 
@@ -714,6 +736,15 @@ mod tests {
         assert_eq!(sound.outbound_bytes.load(Ordering::Acquire), 1_389);
     }
 
+    #[test]
+    fn sound_outbound_queue_drops_items_older_than_its_configured_max_age() {
+        assert!(outbound_expired(
+            Instant::now() - Duration::from_millis(2),
+            Duration::from_millis(1),
+        ));
+        assert!(!outbound_expired(Instant::now(), Duration::from_secs(1)));
+    }
+
     #[tokio::test]
     async fn sound_worker_round_trips_an_opaque_1357_byte_packet_over_loopback_websocket() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -740,6 +771,7 @@ mod tests {
             mtu: 1357,
             queue_items: 2,
             queue_bytes: 4096,
+            queue_max_age_ms: 5_000,
         };
         let (packet_tx, mut packet_rx) = packet_channel(2);
         let mut sound = SoundTransport::new(TransportId::new(9), None, config, packet_tx).unwrap();

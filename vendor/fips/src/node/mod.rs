@@ -179,6 +179,7 @@ mod sound_transport_tests {
             mtu: 1357,
             queue_items: 8,
             queue_bytes: 10856,
+            queue_max_age_ms: 5_000,
         });
         let mut node = Node::new(config).expect("sound config is valid");
         assert_eq!(node.transport_mtu(), 1357);
