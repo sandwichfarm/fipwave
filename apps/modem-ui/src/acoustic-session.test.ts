@@ -151,6 +151,11 @@ describe('AcousticSession bootstrap handshake', () => {
     outOfRangeA.start();
     expect(outOfRangeB.snapshot.state).toBe('Listening');
   });
+
+  it('keeps discovery and control on the exact executable conservative profile', () => {
+    const modem = new FakeModem();
+    expect(() => new AcousticSession({ ...options('A', modem), profiles: ['synthetic-frequency-7000'] })).toThrow('FAS1 profile ID is unsupported');
+  });
 });
 
 describe('AcousticSession calibration, selection, and commitment', () => {

@@ -158,6 +158,7 @@ export class AcousticSession {
 
   constructor(private readonly options: AcousticSessionOptions) {
     if (!options.identity || !options.expectedPeer || options.identity === options.expectedPeer || !validRange(options.ranges) || options.profiles.length < 1 || options.profiles.length > MAX_PROFILES || options.candidates.length < 1 || options.candidates.length > options.calibration.maxCandidates || !validInteger(options.calibration.probesPerDirection, 1, 4) || !validInteger(options.calibration.deadlineMs, 1, 120_000) || typeof options.measureProbe !== 'function') invalid('options are invalid');
+    for (const profile of options.profiles) resolveAcousticProfile(profile);
     for (const candidate of options.candidates) {
       if (!candidate.id || candidate.playbackGain < 1 || candidate.playbackGain > 2 || !validInteger(candidate.payloadBytes, options.ranges.minPayloadBytes, options.ranges.maxPayloadBytes) || !validInteger(candidate.repetition, 1, 3) || !validInteger(candidate.guardMs, 1, 5_000) || !validInteger(candidate.ackTimeoutMs, 4_000, 15_000)) invalid('candidate is invalid');
       resolveAcousticProfile(candidate.profileId);
