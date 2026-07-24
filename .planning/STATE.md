@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 04
 current_phase_name: prove-the-sound-only-fips-ping
 status: planning
-stopped_at: Completed 04-01-PLAN.md
-last_updated: "2026-07-24T10:28:36.201Z"
+stopped_at: Completed 04-02-PLAN.md
+last_updated: "2026-07-24T10:39:57.475Z"
 last_activity: 2026-07-24
 last_activity_desc: Phase 03 software verified; physical acceptance deferred
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 29
-  completed_plans: 24
+  completed_plans: 25
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-24)
 ## Current Position
 
 Phase: 04 (prove-the-sound-only-fips-ping) — IN PROGRESS
-Plan: 1 of 5
+Plan: 2 of 5
 Status: Executing remaining plans
 Last activity: 2026-07-24 — Phase 03 software verified; physical acceptance deferred
 
-Progress: [████████░░] 83%
+Progress: [█████████░] 86%
 
 ## Performance Metrics
 
@@ -81,6 +81,7 @@ Progress: [████████░░] 83%
 | Phase 03 P06 | 18m | 2 tasks | 4 files |
 | Phase 03 P07 | 18m | 2 tasks | 8 files |
 | Phase 04 P01 | 36min | 2 tasks | 6 files |
+| Phase 04 P02 | 10min | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -138,6 +139,7 @@ Recent decisions affecting current work:
 - [Phase ?]: Phase 3: Session readiness requires matching settings commitment and current heartbeat; microphone preflight cannot arm FIPS.
 - [Phase ?]: Phase 3: The built browser's two-role FAS1 seam is Fixture-only evidence and cannot claim Loopback or Open air.
 - [Phase ?]: Phase 4 Plan 1: FIPS proof observation permits only fixed peers/links/transports Unix-socket queries, and the controller requires an explicit configured B target before process launch.
+- [Phase ?]: Phase 4 Plan 2: Role B is strictly Sound-only; FIPS control remains a private Unix socket over an internal named volume, and remote Sound proof stays human_needed until the two-laptop gate.
 
 ### Pending Todos
 
@@ -181,6 +183,6 @@ Open-air exchange, and an observed physical loss/recovery cycle.
 
 ## Session Continuity
 
-Last session: 2026-07-24T10:28:36.194Z
-Stopped at: Completed 04-01-PLAN.md
+Last session: 2026-07-24T10:39:57.467Z
+Stopped at: Completed 04-02-PLAN.md
 Resume file: None

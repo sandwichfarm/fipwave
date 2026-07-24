@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 2
+open_count: 3
 waived_count: 0
 fixed_count: 1
-total_count: 3
-last_updated: 2026-07-24T10:28:35.904Z
+total_count: 4
+last_updated: 2026-07-24T10:39:57.137Z
 ---
 
 # Broken Windows Ledger
@@ -18,6 +18,7 @@ last_updated: 2026-07-24T10:28:35.904Z
 | 1 | 01 | deviation | scripts/audit-dependencies.mjs |  | Temporary official Node 22.23.1 runtime was required because the host ran Node 25.2.1. | open |  | 2026-07-23T14:50:10.558Z |  |
 | 2 | 01 | stub | packages/bridge/src/server.ts |  | Runner stamps qualification results in memory but does not persist a complete MachineReport from Quiet receiver evidence. | fixed |  | 2026-07-23T17:42:43.795Z | 2026-07-23T17:57:33.247Z |
 | 3 | 04 | deviation | packages/bridge/src/proof-controller.ts |  | Controller now requires an explicit configured Role B IPv6 target; no fallback target is allowed. | open |  | 2026-07-24T10:28:35.904Z |  |
+| 4 | 04 | deviation | compose.fips.yml |  | Pulled forward the private FIPS control-socket volume prerequisite so the bounded bridge probe can use only /run/fips/control.sock. | open |  | 2026-07-24T10:39:57.137Z |  |
 
 ````json
 [
@@ -55,6 +56,18 @@ last_updated: 2026-07-24T10:28:35.904Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-07-24T10:28:35.904Z",
+    "resolved_at": null
+  },
+  {
+    "id": 4,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "compose.fips.yml",
+    "line": null,
+    "description": "Pulled forward the private FIPS control-socket volume prerequisite so the bounded bridge probe can use only /run/fips/control.sock.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-07-24T10:39:57.137Z",
     "resolved_at": null
   }
 ]

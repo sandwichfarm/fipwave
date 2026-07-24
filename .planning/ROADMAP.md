@@ -129,10 +129,10 @@ Plans:
   3. A participant FIPS node or dedicated mesh-client container issues a real kernel `ping -6` to the acoustically isolated node through the sending node, and the isolated node returns the real ICMPv6 echo reply over that acoustic FIPS link.
   4. Before and during the ping, an operator can visibly show the authenticated peer, sound transport, active link state, absence of another receiving-node transport, and correlated acoustic TX/RX, complete-packet, fragment, integrity-failure, retry, and ICMPv6 counters.
 
-**Plans**: 1/5 plans executed
+**Plans**: 2/5 plans executed
 
 - [x] 04-01-PLAN.md
-- [ ] 04-02-PLAN.md
+- [x] 04-02-PLAN.md
 - [ ] 04-03-PLAN.md
 - [ ] 04-04-PLAN.md
 - [ ] 04-05-PLAN.md
@@ -166,5 +166,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 1. Qualify the Demo Substrate | 9/10 | In Progress|  |
 | 2. Configure and Establish the Codec-Neutral FIPS Bridge | 7/7 | Complete    | 2026-07-24 |
 | 3. Negotiate and Deliver Reliable Acoustic Packets | 7/7 | In Progress|  |
-| 4. Prove the Sound-Only FIPS Ping | 1/5 | In Progress|  |
+| 4. Prove the Sound-Only FIPS Ping | 2/5 | In Progress|  |
 | 5. Present, Freeze, and Rehearse the Demo | 0/TBD | Not started | - |
