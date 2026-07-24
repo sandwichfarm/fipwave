@@ -6,10 +6,12 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { createBridgeServer, LOOPBACK_HOST, type BridgeServer, type BridgeServerOptions, type CodecAsset, type RunnerQualificationConfig } from './server.js';
+import { resolveDemoConfig, toPublicDemoConfig, type DemoConfig, type PublicDemoConfig } from './demo-config.js';
+import { ResourceOwner } from './resource-owner.js';
 import { NativeCommandCodecAdapter } from './codecs/command.js';
 import { CyrinxBatchWorker } from './cyrinx-worker.js';
 import { cyrinxDigitalCases } from './qualification-session.js';
-import { CYRINX_DEADLINE_MS, QUALIFICATION_DEAD_LINK_TIMEOUT_MS, QUIET_CODEC, TUN_EVIDENCE_CHECKS, validateTunEvidence, type MachineReport, type TunEvidence } from './report.js';
+import { CYRINX_DEADLINE_MS, QUIET_CODEC, TUN_EVIDENCE_CHECKS, validateTunEvidence, type MachineReport, type TunEvidence } from './report.js';
 
 const execFileAsync = promisify(execFile);
 function findProjectRoot(from: string): string {
@@ -23,7 +25,8 @@ function findProjectRoot(from: string): string {
 const PROJECT_ROOT = findProjectRoot(path.dirname(fileURLToPath(import.meta.url)));
 interface BuildIdentity { commit: string; os: string; architecture: string; dirty: boolean; }
 export interface ProductionRunnerOptions {
-  machineId: string; role: 'A' | 'B'; port: number; report: string; tunEvidence: string;
+  machineId: string; role?: 'A' | 'B'; port?: number; report: string; tunEvidence: string;
+  demoConfig?: DemoConfig;
   evidenceMode?: 'Fixture' | 'Loopback'; physicalOpenAir?: boolean; uiDir?: string; codecAssetDir?: string; codecAssets?: readonly CodecAsset[];
   buildIdentityForTests?: BuildIdentity;
   qualificationTrace?: Pick<NonNullable<MachineReport['qualification']>, 'deadline' | 'fallback'>;
@@ -34,8 +37,11 @@ export interface ProductionRunnerOptions {
   cyrinxWorkerForTests?: BridgeServerOptions['cyrinxWorker'];
   cyrinxTimerForTests?: BridgeServerOptions['cyrinxTimer'];
   cyrinxSettleForTests?: BridgeServerOptions['cyrinxSettle'];
+  createBridgeServerForTests?: typeof createBridgeServer;
+  afterBridgeStartedForTests?: () => Promise<void>;
 }
-export interface ProductionRunner extends BridgeServer { config: Readonly<RunnerQualificationConfig>; }
+export interface PublicRunnerConfig extends PublicDemoConfig { readonly reportTarget: string; }
+export interface ProductionRunner extends BridgeServer { config: Readonly<PublicRunnerConfig>; }
 function fail(message: string): never { throw new Error(`runner ${message}`); }
 function assertText(value: string, label: string): void { if (!/^[A-Za-z0-9._/-]+$/.test(value) || value.includes('..')) fail(`${label} is invalid`); }
 function assertCodecAsset(value: unknown): CodecAsset {
@@ -77,8 +83,11 @@ async function resolveBuildIdentity(injected?: BuildIdentity): Promise<BuildIden
 }
 
 export async function startProductionRunner(options: ProductionRunnerOptions): Promise<ProductionRunner> {
-  assertText(options.machineId, 'machine ID'); if (options.role !== 'A' && options.role !== 'B') fail('role must be literal A or B'); assertText(options.report, 'report target');
-  if (!Number.isInteger(options.port) || options.port < 0 || options.port > 65_535) fail('port is invalid');
+  assertText(options.machineId, 'machine ID'); assertText(options.report, 'report target');
+  const demoConfig = options.demoConfig ?? (options.role === 'A' ? resolveDemoConfig('a') : options.role === 'B' ? resolveDemoConfig('b') : fail('role must be literal A or B'));
+  if (options.role && options.role !== demoConfig.role) fail('role does not match resolved config');
+  const runtimePort = options.demoConfig ? demoConfig.bridge.browserPort : options.port;
+  if (typeof runtimePort !== 'number' || !Number.isInteger(runtimePort) || runtimePort < 0 || runtimePort > 65_535) fail('port is invalid');
   let evidenceMode: RunnerQualificationConfig['evidenceMode'] = options.evidenceMode ?? 'Loopback'; let tunEvidence = unavailableTunEvidence();
   if (options.physicalOpenAir) {
     let raw: unknown; try { raw = JSON.parse(await readFile(options.tunEvidence, 'utf8')); } catch { fail('physical open-air requires a readable exact_host TUN evidence record'); }
@@ -89,14 +98,14 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
   const build = await resolveBuildIdentity(options.buildIdentityForTests);
   if (options.physicalOpenAir && (build.dirty || !/^[a-f0-9]{40}$/.test(build.commit))) fail('physical open-air requires a clean resolved git HEAD build identity');
   const qualification: NonNullable<MachineReport['qualification']> = {
-    deadLinkTimeoutMs: QUALIFICATION_DEAD_LINK_TIMEOUT_MS,
+    deadLinkTimeoutMs: demoConfig.heartbeat.deadLinkTimeoutMs,
     cyrinxDeadlineMs: CYRINX_DEADLINE_MS,
     deadline: options.qualificationTrace?.deadline ?? { startedAtMs: null, deadlineAtMs: null, elapsedMs: null },
     physicalGate: evidenceMode === 'Open air' ? 'pending' : 'not_physical',
     fallback: options.qualificationTrace?.fallback ?? { codecId: 'quiet', state: 'available', reasonCode: null },
     cyrinx: { stage: 'idle', coldReceivePassed: false },
   };
-  const config = Object.freeze({ machineId: options.machineId, role: options.role, reportTarget: options.report, tunEvidence: options.tunEvidence, tunEvidenceSource: tunEvidence.source, evidenceMode, evidenceClass: evidenceMode, buildCommit: build.commit, codec: { ...QUIET_CODEC }, qualification } satisfies RunnerQualificationConfig);
+  const config = Object.freeze({ machineId: options.machineId, role: demoConfig.role, reportTarget: options.report, tunEvidence: options.tunEvidence, tunEvidenceSource: tunEvidence.source, evidenceMode, evidenceClass: evidenceMode, buildCommit: build.commit, codec: { ...QUIET_CODEC }, qualification } satisfies RunnerQualificationConfig);
   const codecAssetDir = options.codecAssetDir ?? path.join(PROJECT_ROOT, '.artifacts', 'codecs');
   const codecAssets = await verifiedCodecAssets(codecAssetDir, options.codecAssets ?? await loadCodecAssets());
   const cyrinxExecutable = path.join(PROJECT_ROOT, '.artifacts', 'build', 'cyrinx', 'cyrinx_batch');
@@ -122,7 +131,7 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
     }
   });
   const bridgeOptions = {
-    host: LOOPBACK_HOST, port: options.port, artifactDir: path.join(PROJECT_ROOT, '.artifacts', 'qualification'),
+    host: LOOPBACK_HOST, port: runtimePort, artifactDir: path.join(PROJECT_ROOT, '.artifacts', 'qualification'),
     uiDir: options.uiDir ?? path.join(PROJECT_ROOT, 'dist', 'modem-ui'), qualificationConfig: config,
     reportAuthority: { tunEvidence, build: { commit: build.commit, os: build.os, architecture: build.architecture } },
     codecAssetDir, codecAssets,
@@ -134,8 +143,17 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
     ...(options.cyrinxTimerForTests ? { cyrinxTimer: options.cyrinxTimerForTests } : {}),
     ...(options.cyrinxSettleForTests ? { cyrinxSettle: options.cyrinxSettleForTests } : {}),
   } satisfies BridgeServerOptions;
-  const bridge = await createBridgeServer(bridgeOptions);
-  return { ...bridge, config };
+  const owner = new ResourceOwner();
+  try {
+    const bridge = await (options.createBridgeServerForTests ?? createBridgeServer)(bridgeOptions);
+    owner.register('bridge', bridge.close);
+    await options.afterBridgeStartedForTests?.();
+    const publicConfig = Object.freeze({ ...toPublicDemoConfig(demoConfig), reportTarget: config.reportTarget });
+    return { ...bridge, close: () => owner.close(), config: publicConfig };
+  } catch {
+    await owner.close().catch(() => undefined);
+    fail('startup failed');
+  }
 }
 
 function parseCli(argv: string[]): ProductionRunnerOptions {
