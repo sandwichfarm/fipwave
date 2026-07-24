@@ -72,7 +72,7 @@ Requirements for the Sovereign Engineering demo-day proof of concept.
 - [x] **LINK-08**: Acoustic acknowledgements and FIPS handshake or heartbeat
       traffic take priority over ordinary queued data.
 
-- [ ] **LINK-09**: Slow or failed acoustic delivery produces bounded
+- [x] **LINK-09**: Slow or failed acoustic delivery produces bounded
       backpressure and a visible error rather than unbounded packet growth.
 
 ### Browser and Bridge
@@ -189,7 +189,7 @@ Requirements for the Sovereign Engineering demo-day proof of concept.
 - [x] **NEG-05**: Both peers commit and acknowledge an identical settings
       digest before the acoustic adapter can report FIPS readiness.
 
-- [ ] **NEG-06**: Link heartbeat and loss thresholds expose degraded state and
+- [x] **NEG-06**: Link heartbeat and loss thresholds expose degraded state and
       trigger bounded retry, recalibration, fallback, or an actionable terminal
       error without an infinite invisible loop.
 
@@ -296,7 +296,7 @@ Roadmap phase mapping is populated during roadmap creation.
 | LINK-06 | Phase 3 | Pending |
 | LINK-07 | Phase 3 | Pending |
 | LINK-08 | Phase 3 | Complete |
-| LINK-09 | Phase 3 | Pending |
+| LINK-09 | Phase 3 | Complete |
 | WEB-01 | Phase 1 | Complete |
 | WEB-02 | Phase 1 | Complete |
 | WEB-03 | Phase 1 | Complete |
@@ -326,7 +326,7 @@ Roadmap phase mapping is populated during roadmap creation.
 | NEG-03 | Phase 3 | Complete |
 | NEG-04 | Phase 3 | Complete |
 | NEG-05 | Phase 3 | Complete |
-| NEG-06 | Phase 3 | Pending |
+| NEG-06 | Phase 3 | Complete |
 | NEG-07 | Phase 3 | Complete |
 | UI-01 | Phase 5 | Pending |
 | UI-02 | Phase 5 | Pending |
