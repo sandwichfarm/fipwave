@@ -512,4 +512,54 @@ mod tests {
         assert_eq!(handle.transport_stats()["browser_ready"], false);
         assert_eq!(handle.congestion().recv_drops, Some(0));
     }
+
+    #[tokio::test]
+    async fn sound_worker_round_trips_an_opaque_1357_byte_packet_over_loopback_websocket() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let expected = vec![0x3c; 1357];
+        let returned = expected.clone();
+        let fixture_returned = returned.clone();
+        let fixture = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (mut writer, mut reader) = socket.split();
+            let outbound = reader.next().await.unwrap().unwrap().into_data();
+            assert_eq!(&outbound[FWAV_HEADER_BYTES..], expected.as_slice());
+            writer
+                .send(Message::Binary(
+                    encode_packet(1, 1, &fixture_returned).into(),
+                ))
+                .await
+                .unwrap();
+        });
+        let config = SoundConfig {
+            bridge_url: format!("ws://127.0.0.1:{}/bridge/fips", address.port()),
+            peer_addr: "sound-a".into(),
+            mtu: 1357,
+            queue_items: 2,
+            queue_bytes: 4096,
+        };
+        let (packet_tx, mut packet_rx) = packet_channel(2);
+        let mut sound = SoundTransport::new(TransportId::new(9), None, config, packet_tx).unwrap();
+        sound.start_async().await.unwrap();
+        for _ in 0..20 {
+            if sound.state() == TransportState::Up {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        sound.arm_browser(1).unwrap();
+        assert_eq!(
+            sound
+                .send_async(&sound.configured_peer(), &returned)
+                .await
+                .unwrap(),
+            1357
+        );
+        assert_eq!(packet_rx.recv().await.unwrap().data, returned);
+        fixture.await.unwrap();
+        sound.stop_async().await.unwrap();
+        assert_eq!(sound.state(), TransportState::Down);
+    }
 }
