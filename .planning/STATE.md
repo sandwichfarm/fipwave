@@ -102,7 +102,21 @@ None yet.
 
 ### Blockers/Concerns
 
-- Phase 1 must empirically qualify codec, browser capture/playback, Docker/TUN, and MTU viability on the exact demo laptops before further integration.
+None for continued implementation. Final physical qualification remains
+explicitly deferred below and still gates the final Open air claim.
+
+## Deferred Verification
+
+| Phase | State | Resume |
+|-------|-------|--------|
+| 1 | verification_deferred_human | `$gsd-verify-work 1` |
+
+The exact two-laptop Open air and exact-host TUN gate remains mandatory before
+making the final physical demo claim. The 2026-07-23 single-laptop physical
+self-loop proved real speaker-to-microphone feasibility in both directions but
+is intentionally `Loopback`, not qualifying `Open air`, evidence. Per the
+overnight execution brief, implementation phases continue while this external
+hardware checkpoint remains explicit.
 
 ## Deferred Items
 
