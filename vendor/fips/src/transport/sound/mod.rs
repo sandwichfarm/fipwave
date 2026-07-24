@@ -120,19 +120,15 @@ impl SoundTransport {
         TransportAddr::from(self.config.peer_addr.clone())
     }
 
-    /// Arms only the current bridge epoch. This is deliberately separate from
-    /// the worker lifecycle: a local WebSocket being Up is not a peer claim.
-    pub fn arm_browser(&self, epoch: u32) -> Result<(), TransportError> {
+    /// Direct arming is forbidden: only a validated bridge control can project
+    /// a committed acoustic session into this codec-neutral transport.
+    pub fn arm_browser(&self, _epoch: u32) -> Result<(), TransportError> {
         let mut runtime = self.runtime.lock().expect("sound runtime");
-        if runtime.state != TransportState::Up || runtime.epoch != epoch {
-            runtime.counters.rejected += 1;
-            runtime.last_error = Some("sound_browser_epoch_invalid");
-            return Err(TransportError::SendFailed(
-                "sound browser is not armed".into(),
-            ));
-        }
-        runtime.browser_ready = true;
-        Ok(())
+        runtime.counters.rejected += 1;
+        runtime.last_error = Some("sound_bridge_projection_required");
+        Err(TransportError::SendFailed(
+            "sound readiness requires bridge projection".into(),
+        ))
     }
 
     pub async fn start_async(&mut self) -> Result<(), TransportError> {
@@ -364,6 +360,8 @@ impl SoundTransport {
     pub fn transport_stats(&self) -> serde_json::Value {
         let runtime = self.runtime.lock().expect("sound runtime");
         json!({
+            "worker_up": runtime.state == TransportState::Up,
+            "acoustic_ready": runtime.browser_ready,
             "browser_ready": runtime.browser_ready,
             "epoch": runtime.epoch,
             "tx_packets": runtime.counters.tx_packets,
@@ -675,7 +673,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sound_transport_fails_closed_until_current_epoch_is_armed() {
+    async fn sound_transport_readiness_fails_closed_until_current_epoch_is_armed() {
         let (tx, _rx) = packet_channel(2);
         let sound = SoundTransport::new(TransportId::new(7), None, config(), tx).unwrap();
         assert_eq!(sound.mtu(), 1357);
@@ -780,10 +778,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bridge_browser_control_arms_and_disarms_only_the_current_epoch() {
-        let (tx, _rx) = packet_channel(2);
+    async fn sound_transport_readiness_requires_bridge_acoustic_projection() {
+        let (tx, mut rx) = packet_channel(2);
         let sound = SoundTransport::new(TransportId::new(7), None, config(), tx).unwrap();
-        sound.runtime.lock().unwrap().state = TransportState::Up;
+        let (sender, mut outbound) = mpsc::channel(2);
+        {
+            let mut runtime = sound.runtime.lock().unwrap();
+            runtime.state = TransportState::Up;
+            runtime.sender = Some(sender);
+        }
+        // A direct/local call is not an acoustic proof. Only the validated
+        // bridge control received by the worker may change packet authority.
+        assert!(sound.arm_browser(1).is_err());
+        assert!(!sound.browser_ready());
+        assert_eq!(sound.transport_stats()["worker_up"], true);
+        assert_eq!(sound.transport_stats()["acoustic_ready"], false);
+
+        let mut audio_settings = vec![0; FWAV_HEADER_BYTES];
+        audio_settings[0..4].copy_from_slice(b"FWAV");
+        audio_settings[4] = 1;
+        audio_settings[5] = 2;
+        audio_settings[12..16].copy_from_slice(&1u32.to_le_bytes());
+        assert!(
+            inject_inbound(
+                &sound.runtime,
+                &sound.packet_tx,
+                sound.transport_id,
+                &sound.configured_peer(),
+                sound.mtu(),
+                &audio_settings,
+            )
+            .await
+            .is_err()
+        );
+        assert!(!sound.browser_ready());
+
         let mut arm = vec![0; FWAV_HEADER_BYTES];
         arm[0..4].copy_from_slice(b"FWAV");
         arm[4] = 1;
@@ -800,6 +829,30 @@ mod tests {
         .await
         .unwrap();
         assert!(sound.browser_ready());
+        assert_eq!(
+            sound
+                .send_async(&sound.configured_peer(), &[0xa5])
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            &outbound.recv().await.unwrap().bytes[FWAV_HEADER_BYTES..],
+            &[0xa5]
+        );
+
+        let packet = encode_packet(1, 1, TrafficClass::Ordinary, &[0x5a]);
+        inject_inbound(
+            &sound.runtime,
+            &sound.packet_tx,
+            sound.transport_id,
+            &sound.configured_peer(),
+            sound.mtu(),
+            &packet,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rx.recv().await.unwrap().data, vec![0x5a]);
 
         let mut disarm = arm.clone();
         disarm[5] = FWAV_TYPE_BROWSER_DISARM;
@@ -814,6 +867,24 @@ mod tests {
         .await
         .unwrap();
         assert!(!sound.browser_ready());
+        assert!(
+            sound
+                .send_async(&sound.configured_peer(), &[0xa5])
+                .await
+                .is_err()
+        );
+        assert!(
+            inject_inbound(
+                &sound.runtime,
+                &sound.packet_tx,
+                sound.transport_id,
+                &sound.configured_peer(),
+                sound.mtu(),
+                &encode_packet(1, 2, TrafficClass::Ordinary, &[0x5a]),
+            )
+            .await
+            .is_err()
+        );
 
         arm[12..16].copy_from_slice(&2u32.to_le_bytes());
         assert!(
@@ -1052,7 +1123,7 @@ mod tests {
             }
             tokio::task::yield_now().await;
         }
-        sound.arm_browser(1).unwrap();
+        sound.runtime.lock().unwrap().browser_ready = true;
         assert_eq!(
             sound
                 .send_async(&sound.configured_peer(), &returned)
@@ -1145,7 +1216,7 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
-        sound.arm_browser(1).unwrap();
+        sound.runtime.lock().unwrap().browser_ready = true;
         assert_eq!(
             sound
                 .send_async(&sound.configured_peer(), &first_payload)
@@ -1169,7 +1240,7 @@ mod tests {
         }
         assert_eq!(sound.transport_stats()["disconnects"], 1);
         assert_eq!(sound.runtime.lock().unwrap().outbound_bytes, 0);
-        sound.arm_browser(1).unwrap();
+        sound.runtime.lock().unwrap().browser_ready = true;
         assert_eq!(
             sound
                 .send_async(&sound.configured_peer(), &second_payload)
