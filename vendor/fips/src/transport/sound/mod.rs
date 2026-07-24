@@ -75,9 +75,7 @@ impl SoundTransport {
         config: SoundConfig,
         packet_tx: PacketTx,
     ) -> Result<Self, TransportError> {
-        config
-            .validate()
-            .map_err(TransportError::InvalidAddress)?;
+        config.validate().map_err(TransportError::InvalidAddress)?;
         Ok(Self {
             transport_id,
             name,
@@ -89,9 +87,15 @@ impl SoundTransport {
         })
     }
 
-    pub fn name(&self) -> Option<&str> { self.name.as_deref() }
-    pub fn browser_ready(&self) -> bool { self.runtime.lock().expect("sound runtime").browser_ready }
-    pub fn configured_peer(&self) -> TransportAddr { TransportAddr::from(self.config.peer_addr.clone()) }
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+    pub fn browser_ready(&self) -> bool {
+        self.runtime.lock().expect("sound runtime").browser_ready
+    }
+    pub fn configured_peer(&self) -> TransportAddr {
+        TransportAddr::from(self.config.peer_addr.clone())
+    }
 
     /// Arms only the current bridge epoch. This is deliberately separate from
     /// the worker lifecycle: a local WebSocket being Up is not a peer claim.
@@ -100,14 +104,18 @@ impl SoundTransport {
         if runtime.state != TransportState::Up || runtime.epoch != epoch {
             runtime.counters.rejected += 1;
             runtime.last_error = Some("sound_browser_epoch_invalid");
-            return Err(TransportError::SendFailed("sound browser is not armed".into()));
+            return Err(TransportError::SendFailed(
+                "sound browser is not armed".into(),
+            ));
         }
         runtime.browser_ready = true;
         Ok(())
     }
 
     pub async fn start_async(&mut self) -> Result<(), TransportError> {
-        if !self.state().can_start() { return Err(TransportError::AlreadyStarted); }
+        if !self.state().can_start() {
+            return Err(TransportError::AlreadyStarted);
+        }
         self.runtime.lock().expect("sound runtime").state = TransportState::Starting;
         let (stream, _) = connect_async(&self.config.bridge_url)
             .await
@@ -159,15 +167,21 @@ impl SoundTransport {
             }
             let mut current = runtime.lock().expect("sound runtime");
             current.sender = None;
-            if current.state == TransportState::Up { current.state = TransportState::Down; }
+            if current.state == TransportState::Up {
+                current.state = TransportState::Down;
+            }
         }));
         self.stop = Some(stop_tx);
         Ok(())
     }
 
     pub async fn stop_async(&mut self) -> Result<(), TransportError> {
-        if let Some(stop) = self.stop.take() { let _ = stop.send(()); }
-        if let Some(worker) = self.worker.take() { let _ = worker.await; }
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.await;
+        }
         let mut runtime = self.runtime.lock().expect("sound runtime");
         runtime.sender = None;
         runtime.browser_ready = false;
@@ -175,24 +189,46 @@ impl SoundTransport {
         Ok(())
     }
 
-    pub async fn send_async(&self, addr: &TransportAddr, data: &[u8]) -> Result<usize, TransportError> {
-        if addr != &self.configured_peer() { return Err(TransportError::InvalidAddress("sound peer is not configured".into())); }
-        if data.len() > self.config.mtu() as usize { return Err(TransportError::MtuExceeded { packet_size: data.len(), mtu: self.config.mtu() }); }
+    pub async fn send_async(
+        &self,
+        addr: &TransportAddr,
+        data: &[u8],
+    ) -> Result<usize, TransportError> {
+        if addr != &self.configured_peer() {
+            return Err(TransportError::InvalidAddress(
+                "sound peer is not configured".into(),
+            ));
+        }
+        if data.len() > self.config.mtu() as usize {
+            return Err(TransportError::MtuExceeded {
+                packet_size: data.len(),
+                mtu: self.config.mtu(),
+            });
+        }
         let (sender, frame) = {
             let mut runtime = self.runtime.lock().expect("sound runtime");
-            if runtime.state != TransportState::Up { return Err(TransportError::NotStarted); }
+            if runtime.state != TransportState::Up {
+                return Err(TransportError::NotStarted);
+            }
             if !runtime.browser_ready {
                 runtime.counters.rejected += 1;
                 runtime.last_error = Some("sound_browser_not_armed");
-                return Err(TransportError::SendFailed("sound browser is not armed".into()));
+                return Err(TransportError::SendFailed(
+                    "sound browser is not armed".into(),
+                ));
             }
             let Some(sender) = runtime.sender.clone() else {
                 runtime.counters.rejected += 1;
                 runtime.last_error = Some("sound_bridge_disconnected");
-                return Err(TransportError::SendFailed("sound bridge is disconnected".into()));
+                return Err(TransportError::SendFailed(
+                    "sound bridge is disconnected".into(),
+                ));
             };
             runtime.next_sequence = runtime.next_sequence.wrapping_add(1);
-            (sender, encode_packet(runtime.epoch, runtime.next_sequence, data))
+            (
+                sender,
+                encode_packet(runtime.epoch, runtime.next_sequence, data),
+            )
         };
         sender.try_send(frame).map_err(|_| {
             let mut runtime = self.runtime.lock().expect("sound runtime");
@@ -244,24 +280,55 @@ async fn inject_inbound(
     mtu: u16,
     encoded: &[u8],
 ) -> Result<(), ()> {
-    if encoded.len() < FWAV_HEADER_BYTES || &encoded[0..4] != b"FWAV" || encoded[4] != 1 { reject(runtime, "sound_frame_invalid"); return Err(()); }
+    if encoded.len() < FWAV_HEADER_BYTES || &encoded[0..4] != b"FWAV" || encoded[4] != 1 {
+        reject(runtime, "sound_frame_invalid");
+        return Err(());
+    }
     let kind = encoded[5];
     let payload_len = u32::from_le_bytes(encoded[8..12].try_into().expect("header")) as usize;
     let epoch = u32::from_le_bytes(encoded[12..16].try_into().expect("header"));
-    if encoded.len() != FWAV_HEADER_BYTES + payload_len { reject(runtime, "sound_frame_length_invalid"); return Err(()); }
+    if encoded.len() != FWAV_HEADER_BYTES + payload_len {
+        reject(runtime, "sound_frame_length_invalid");
+        return Err(());
+    }
     if kind == FWAV_TYPE_RESET {
         let mut current = runtime.lock().expect("sound runtime");
-        if payload_len != 0 || epoch <= current.epoch { current.counters.rejected += 1; current.last_error = Some("sound_reset_invalid"); return Err(()); }
-        current.epoch = epoch; current.next_sequence = 0; current.browser_ready = false; current.counters = SoundCounters::default(); current.last_error = None;
+        if payload_len != 0 || epoch <= current.epoch {
+            current.counters.rejected += 1;
+            current.last_error = Some("sound_reset_invalid");
+            return Err(());
+        }
+        current.epoch = epoch;
+        current.next_sequence = 0;
+        current.browser_ready = false;
+        current.counters = SoundCounters::default();
+        current.last_error = None;
         return Ok(());
     }
-    if kind != FWAV_TYPE_FIPS_PACKET || payload_len > mtu as usize { reject(runtime, "sound_packet_invalid"); return Err(()); }
+    if kind != FWAV_TYPE_FIPS_PACKET || payload_len > mtu as usize {
+        reject(runtime, "sound_packet_invalid");
+        return Err(());
+    }
     {
         let current = runtime.lock().expect("sound runtime");
-        if current.state != TransportState::Up || !current.browser_ready || current.epoch != epoch { drop(current); reject(runtime, "sound_packet_not_armed"); return Err(()); }
+        if current.state != TransportState::Up || !current.browser_ready || current.epoch != epoch {
+            drop(current);
+            reject(runtime, "sound_packet_not_armed");
+            return Err(());
+        }
     }
     let data = encoded[FWAV_HEADER_BYTES..].to_vec();
-    if packet_tx.try_send(ReceivedPacket::new(transport_id, peer.clone(), data.clone())).is_err() { reject(runtime, "sound_packet_channel_full"); return Err(()); }
+    if packet_tx
+        .try_send(ReceivedPacket::new(
+            transport_id,
+            peer.clone(),
+            data.clone(),
+        ))
+        .is_err()
+    {
+        reject(runtime, "sound_packet_channel_full");
+        return Err(());
+    }
     let mut current = runtime.lock().expect("sound runtime");
     current.counters.rx_packets += 1;
     current.counters.rx_bytes += data.len() as u64;
@@ -270,29 +337,62 @@ async fn inject_inbound(
 
 fn encode_packet(epoch: u32, sequence: u64, payload: &[u8]) -> Vec<u8> {
     let mut frame = vec![0; FWAV_HEADER_BYTES + payload.len()];
-    frame[0..4].copy_from_slice(b"FWAV"); frame[4] = 1; frame[5] = FWAV_TYPE_FIPS_PACKET;
+    frame[0..4].copy_from_slice(b"FWAV");
+    frame[4] = 1;
+    frame[5] = FWAV_TYPE_FIPS_PACKET;
     frame[8..12].copy_from_slice(&(payload.len() as u32).to_le_bytes());
-    frame[12..16].copy_from_slice(&epoch.to_le_bytes()); frame[16..24].copy_from_slice(&sequence.to_le_bytes());
+    frame[12..16].copy_from_slice(&epoch.to_le_bytes());
+    frame[16..24].copy_from_slice(&sequence.to_le_bytes());
     frame[FWAV_HEADER_BYTES..].copy_from_slice(payload);
     frame
 }
 
 impl Transport for SoundTransport {
-    fn transport_id(&self) -> TransportId { self.transport_id }
-    fn transport_type(&self) -> &TransportType { &TransportType::SOUND }
-    fn state(&self) -> TransportState { self.runtime.lock().expect("sound runtime").state }
-    fn mtu(&self) -> u16 { self.config.mtu() }
-    fn start(&mut self) -> Result<(), TransportError> { Err(TransportError::NotSupported("use start_async for sound".into())) }
-    fn stop(&mut self) -> Result<(), TransportError> { Err(TransportError::NotSupported("use stop_async for sound".into())) }
-    fn send(&self, _addr: &TransportAddr, _data: &[u8]) -> Result<(), TransportError> { Err(TransportError::NotSupported("use send_async for sound".into())) }
-    fn discover(&self) -> Result<Vec<DiscoveredPeer>, TransportError> { Ok(Vec::new()) }
-    fn auto_connect(&self) -> bool { false }
-    fn accept_connections(&self) -> bool { false }
+    fn transport_id(&self) -> TransportId {
+        self.transport_id
+    }
+    fn transport_type(&self) -> &TransportType {
+        &TransportType::SOUND
+    }
+    fn state(&self) -> TransportState {
+        self.runtime.lock().expect("sound runtime").state
+    }
+    fn mtu(&self) -> u16 {
+        self.config.mtu()
+    }
+    fn start(&mut self) -> Result<(), TransportError> {
+        Err(TransportError::NotSupported(
+            "use start_async for sound".into(),
+        ))
+    }
+    fn stop(&mut self) -> Result<(), TransportError> {
+        Err(TransportError::NotSupported(
+            "use stop_async for sound".into(),
+        ))
+    }
+    fn send(&self, _addr: &TransportAddr, _data: &[u8]) -> Result<(), TransportError> {
+        Err(TransportError::NotSupported(
+            "use send_async for sound".into(),
+        ))
+    }
+    fn discover(&self) -> Result<Vec<DiscoveredPeer>, TransportError> {
+        Ok(Vec::new())
+    }
+    fn auto_connect(&self) -> bool {
+        false
+    }
+    fn accept_connections(&self) -> bool {
+        false
+    }
 }
 
 impl SoundTransport {
     pub fn connection_state(&self, addr: &TransportAddr) -> ConnectionState {
-        if addr == &self.configured_peer() { ConnectionState::None } else { ConnectionState::Failed("sound peer is not configured".into()) }
+        if addr == &self.configured_peer() {
+            ConnectionState::None
+        } else {
+            ConnectionState::Failed("sound peer is not configured".into())
+        }
     }
 }
 
@@ -303,7 +403,13 @@ mod tests {
     use crate::transport::packet_channel;
 
     fn config() -> SoundConfig {
-        SoundConfig { bridge_url: "ws://127.0.0.1:4310/bridge/fips".into(), peer_addr: "sound-a".into(), mtu: MIN_SOUND_MTU, queue_items: 2, queue_bytes: 4096 }
+        SoundConfig {
+            bridge_url: "ws://127.0.0.1:4310/bridge/fips".into(),
+            peer_addr: "sound-a".into(),
+            mtu: MIN_SOUND_MTU,
+            queue_items: 2,
+            queue_bytes: 4096,
+        }
     }
 
     #[tokio::test]
@@ -312,8 +418,98 @@ mod tests {
         let sound = SoundTransport::new(TransportId::new(7), None, config(), tx).unwrap();
         assert_eq!(sound.mtu(), 1357);
         assert!(!sound.browser_ready());
-        assert!(sound.send_async(&sound.configured_peer(), &[1; 1357]).await.is_err());
-        assert!(sound.send_async(&sound.configured_peer(), &[1; 1358]).await.is_err());
+        assert!(
+            sound
+                .send_async(&sound.configured_peer(), &[1; 1357])
+                .await
+                .is_err()
+        );
+        assert!(
+            sound
+                .send_async(&sound.configured_peer(), &[1; 1358])
+                .await
+                .is_err()
+        );
         assert_eq!(sound.transport_stats()["browser_ready"], false);
+    }
+
+    #[tokio::test]
+    async fn sound_injects_only_current_epoch_armed_packets_and_reset_invalidates_old_work() {
+        let (tx, mut rx) = packet_channel(2);
+        let sound = SoundTransport::new(TransportId::new(7), None, config(), tx).unwrap();
+        {
+            let mut runtime = sound.runtime.lock().unwrap();
+            runtime.state = TransportState::Up;
+            runtime.browser_ready = true;
+        }
+        let payload = vec![0x5a; 1357];
+        let packet = encode_packet(1, 1, &payload);
+        inject_inbound(
+            &sound.runtime,
+            &sound.packet_tx,
+            sound.transport_id,
+            &sound.configured_peer(),
+            sound.mtu(),
+            &packet,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rx.recv().await.unwrap().data, payload);
+
+        let mut reset = vec![0; FWAV_HEADER_BYTES];
+        reset[0..4].copy_from_slice(b"FWAV");
+        reset[4] = 1;
+        reset[5] = FWAV_TYPE_RESET;
+        reset[12..16].copy_from_slice(&2u32.to_le_bytes());
+        inject_inbound(
+            &sound.runtime,
+            &sound.packet_tx,
+            sound.transport_id,
+            &sound.configured_peer(),
+            sound.mtu(),
+            &reset,
+        )
+        .await
+        .unwrap();
+        assert!(!sound.browser_ready());
+        assert!(
+            inject_inbound(
+                &sound.runtime,
+                &sound.packet_tx,
+                sound.transport_id,
+                &sound.configured_peer(),
+                sound.mtu(),
+                &packet
+            )
+            .await
+            .is_err()
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn sound_handle_exposes_all_connectionless_capabilities() {
+        let (tx, _rx) = packet_channel(2);
+        let handle = crate::transport::TransportHandle::Sound(
+            SoundTransport::new(TransportId::new(8), Some("desk".into()), config(), tx).unwrap(),
+        );
+        let peer = TransportAddr::from("sound-a");
+        assert_eq!(handle.transport_type().name, "sound");
+        assert_eq!(handle.name(), Some("desk"));
+        assert_eq!(handle.mtu(), 1357);
+        assert_eq!(handle.link_mtu(&peer), 1357);
+        assert!(handle.discover().unwrap().is_empty());
+        assert!(!handle.auto_connect());
+        assert!(!handle.accept_connections());
+        assert!(matches!(
+            handle.connection_state(&peer),
+            ConnectionState::None
+        ));
+        assert!(matches!(
+            handle.connection_state(&TransportAddr::from("sound-other")),
+            ConnectionState::Failed(_)
+        ));
+        assert_eq!(handle.transport_stats()["browser_ready"], false);
+        assert_eq!(handle.congestion().recv_drops, Some(0));
     }
 }

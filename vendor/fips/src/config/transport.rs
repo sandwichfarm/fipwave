@@ -898,14 +898,26 @@ pub struct SoundConfig {
     pub queue_bytes: usize,
 }
 
-fn default_sound_mtu() -> u16 { MIN_SOUND_MTU }
-fn default_sound_queue_items() -> usize { DEFAULT_SOUND_QUEUE_ITEMS }
-fn default_sound_queue_bytes() -> usize { DEFAULT_SOUND_QUEUE_BYTES }
+fn default_sound_mtu() -> u16 {
+    MIN_SOUND_MTU
+}
+fn default_sound_queue_items() -> usize {
+    DEFAULT_SOUND_QUEUE_ITEMS
+}
+fn default_sound_queue_bytes() -> usize {
+    DEFAULT_SOUND_QUEUE_BYTES
+}
 
 impl SoundConfig {
-    pub fn mtu(&self) -> u16 { self.mtu }
-    pub fn queue_items(&self) -> usize { self.queue_items }
-    pub fn queue_bytes(&self) -> usize { self.queue_bytes }
+    pub fn mtu(&self) -> u16 {
+        self.mtu
+    }
+    pub fn queue_items(&self) -> usize {
+        self.queue_items
+    }
+    pub fn queue_bytes(&self) -> usize {
+        self.queue_bytes
+    }
 
     /// Validate the narrow, local-only configuration accepted by Sound.
     pub fn validate(&self) -> Result<(), String> {
@@ -921,7 +933,11 @@ impl SoundConfig {
         if self.mtu < MIN_SOUND_MTU {
             return Err("sound_mtu_below_1357".into());
         }
-        if self.queue_items == 0 || self.queue_items > 256 || self.queue_bytes < self.mtu as usize || self.queue_bytes > 1024 * 1024 {
+        if self.queue_items == 0
+            || self.queue_items > 256
+            || self.queue_bytes < self.mtu as usize
+            || self.queue_bytes > 1024 * 1024
+        {
             return Err("sound_queue_bounds_invalid".into());
         }
         Ok(())
@@ -1031,8 +1047,10 @@ mod tests {
             "bridge_url: ws://127.0.0.1:4310/bridge/fips\npeer_addr: sound-a\nmtu: 1356\n",
             "bridge_url: ws://127.0.0.1:4310/bridge/fips\npeer_addr: sound-a\ncodec: cyrinx\n",
         ] {
-            assert!(serde_yaml::from_str::<SoundConfig>(invalid)
-                .map_or(true, |config| config.validate().is_err()));
+            assert!(
+                serde_yaml::from_str::<SoundConfig>(invalid)
+                    .map_or(true, |config| config.validate().is_err())
+            );
         }
     }
 

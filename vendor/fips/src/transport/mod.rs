@@ -26,8 +26,8 @@ use ethernet::EthernetTransport;
 #[cfg(test)]
 use loopback::LoopbackTransport;
 use nym::NymTransport;
-use sound::SoundTransport;
 use secp256k1::XOnlyPublicKey;
+use sound::SoundTransport;
 use std::fmt;
 use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1039,7 +1039,9 @@ impl TransportHandle {
             TransportHandle::Tcp(_) => TransportCongestion::default(),
             TransportHandle::Tor(_) => TransportCongestion::default(),
             TransportHandle::Nym(_) => TransportCongestion::default(),
-            TransportHandle::Sound(t) => TransportCongestion { recv_drops: t.transport_stats()["overflowed"].as_u64() },
+            TransportHandle::Sound(t) => TransportCongestion {
+                recv_drops: t.transport_stats()["overflowed"].as_u64(),
+            },
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(_) => TransportCongestion::default(),
             #[cfg(test)]

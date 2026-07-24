@@ -53,6 +53,7 @@ use crate::proto::stp::TreeState;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::transport::ethernet::EthernetTransport;
 use crate::transport::nym::NymTransport;
+use crate::transport::sound::SoundTransport;
 use crate::transport::tcp::TcpTransport;
 use crate::transport::tor::TorTransport;
 use crate::transport::udp::UdpTransport;
@@ -184,9 +185,21 @@ mod sound_transport_tests {
         assert_eq!(node.effective_ipv6_mtu(), 1280);
 
         let (packet_tx, _packet_rx) = packet_channel(8);
-        let transports = node.create_transports(&packet_tx).await;
+        let mut transports = node.create_transports(&packet_tx).await;
         assert_eq!(transports.len(), 1);
-        assert!(matches!(transports.first(), Some(TransportHandle::Sound(_))));
+        assert!(matches!(
+            transports.first(),
+            Some(TransportHandle::Sound(_))
+        ));
+        let handle = transports.pop().unwrap();
+        let id = handle.transport_id();
+        node.transports.insert(id, handle);
+        let output = crate::control::queries::show_transports(&node);
+        let sound = &output["transports"][0];
+        assert_eq!(sound["type"], "sound");
+        assert_eq!(sound["state"], "configured");
+        assert_eq!(sound["stats"]["browser_ready"], false);
+        assert!(sound.get("bridge_url").is_none());
     }
 }
 
@@ -970,6 +983,22 @@ impl Node {
             transports.push(TransportHandle::Nym(nym));
         }
 
+        // Create local codec-neutral sound bridge instances.
+        let sound_instances: Vec<_> = self
+            .config()
+            .transports
+            .sound
+            .iter()
+            .map(|(name, config)| (name.map(|s| s.to_string()), config.clone()))
+            .collect();
+        for (name, sound_config) in sound_instances {
+            let transport_id = self.allocate_transport_id();
+            match SoundTransport::new(transport_id, name, sound_config, packet_tx.clone()) {
+                Ok(sound) => transports.push(TransportHandle::Sound(sound)),
+                Err(error) => tracing::warn!(%error, "sound transport configuration rejected"),
+            }
+        }
+
         // Create BLE transport instances
         #[cfg(bluer_available)]
         {
@@ -1205,7 +1234,7 @@ impl Node {
     /// Returning the smallest (rather than the first-iterated, which used
     /// to vary across HashMap iteration order + async-startup race) makes
     /// the clamp deterministic across daemon restarts.
-pub fn transport_mtu(&self) -> u16 {
+    pub fn transport_mtu(&self) -> u16 {
         let min_operational = self
             .transports
             .values()
@@ -1214,6 +1243,10 @@ pub fn transport_mtu(&self) -> u16 {
             .min();
         if let Some(mtu) = min_operational {
             return mtu;
+        }
+        // Fallback to configured transports before local workers start.
+        if let Some((_, cfg)) = self.config().transports.sound.iter().next() {
+            return cfg.mtu();
         }
         // Fallback to config: try UDP first, then Ethernet
         if let Some((_, cfg)) = self.config().transports.udp.iter().next() {

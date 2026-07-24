@@ -38,11 +38,11 @@ pub use node::{
     RendezvousConfig, RetryConfig, SessionConfig, SessionMmpConfig, TreeConfig,
 };
 pub use peer::{ConnectPolicy, PeerAddress, PeerConfig};
-pub use transport::{
-    BleConfig, DirectoryServiceConfig, EthernetConfig, NymConfig, SoundConfig, TcpConfig, TorConfig,
-    TransportInstances, TransportsConfig, UdpConfig,
-};
 pub use transport::MIN_SOUND_MTU;
+pub use transport::{
+    BleConfig, DirectoryServiceConfig, EthernetConfig, NymConfig, SoundConfig, TcpConfig,
+    TorConfig, TransportInstances, TransportsConfig, UdpConfig,
+};
 
 /// Default config filename.
 const CONFIG_FILENAME: &str = "fips.yaml";
@@ -734,6 +734,15 @@ impl Config {
                     )));
                 }
             }
+        }
+
+        for (name, cfg) in self.transports.sound.iter() {
+            cfg.validate().map_err(|reason| {
+                ConfigError::Validation(format!(
+                    "transports.sound[{}]: {reason}",
+                    name.unwrap_or("(unnamed)")
+                ))
+            })?;
         }
 
         Ok(())
