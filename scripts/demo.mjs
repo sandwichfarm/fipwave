@@ -33,7 +33,10 @@ export function createDemoPlan(role, now = new Date()) {
     machineId: `fipwave-${role}`,
     browserPort: BROWSER_PORT,
     artifactDirectory,
-    origin: `http://127.0.0.1:${BROWSER_PORT}/#playbackGain=2`,
+    // The owned Playwright browser exposes navigator.webdriver; the explicit
+    // hash keeps the shipped audience view selected without using a query
+    // string (the static runner intentionally rejects query-bearing paths).
+    origin: `http://127.0.0.1:${BROWSER_PORT}/#demo=1&playbackGain=2`,
     environment: Object.freeze({
       ROLE: role.toUpperCase(),
       MACHINE_ID: `fipwave-${role}`,

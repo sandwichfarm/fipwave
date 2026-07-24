@@ -27,7 +27,7 @@ test('demo plans derive every runtime input from the role', () => {
     DEMO_ARTIFACT_DIR: a.artifactDirectory,
   });
   assert.match(a.artifactDirectory, /\/\.artifacts\/demo\/20260724T100000000Z-a$/);
-  assert.equal(a.origin, 'http://127.0.0.1:4310/#playbackGain=2');
+  assert.equal(a.origin, 'http://127.0.0.1:4310/#demo=1&playbackGain=2');
   assert.throws(() => createDemoPlan('A', now), /exactly a or b/);
 });
 
