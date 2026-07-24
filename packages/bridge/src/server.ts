@@ -330,6 +330,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     const url = new URL(request.url ?? '/', `http://${LOOPBACK_HOST}`);
     if (request.method !== 'GET' && request.method !== 'HEAD') { response.writeHead(405).end(); return; }
     if (url.pathname === '/qualification-config' && config) { response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); response.end(JSON.stringify(config)); return; }
+    if (url.pathname === '/bridge-status' && !url.search) { response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); response.end(JSON.stringify(safeStatus())); return; }
     if (url.pathname.startsWith('/codec-assets/')) {
       const filename = url.pathname.slice('/codec-assets/'.length); const asset = !url.search && assets.get(filename);
       if (!asset || !assetRoot || filename !== encodeURIComponent(filename)) { response.writeHead(404).end(); return; }
@@ -363,6 +364,29 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   let cyrinxExpiryTimer: unknown;
   const sequenceTrackers = new Set<{ value: bigint }>();
   const browserConnections = new Set<BrowserConnectionState>();
+  const safeStatus = () => {
+    const queue = state.packetQueues.browserToFips;
+    const reverseQueue = state.packetQueues.fipsToBrowser;
+    const queueHealth = [queue.health, reverseQueue.health].includes('overflow')
+      ? 'overflow'
+      : [queue.health, reverseQueue.health].includes('rejected')
+        ? 'rejected'
+        : queue.health === 'ready' || reverseQueue.health === 'ready'
+          ? 'clear'
+          : 'unknown';
+    return {
+      role: config?.role ?? 'A', configuration: 'ready',
+      browserAudio: browserArmed ? 'armed' : 'not-armed',
+      localBridge: state.packetEndpoints.browser === 'ready' ? 'ready' : 'disconnected',
+      soundTransport: state.packetEndpoints.fips === 'ready' ? 'started' : 'waiting',
+      epoch: state.epoch, queueHealth,
+      queueItems: queue.items + reverseQueue.items, queueBytes: queue.bytes + reverseQueue.bytes,
+      txPackets: state.packetCounters.browserToFips, rxPackets: state.packetCounters.fipsToBrowser,
+      soundMtu: 1357,
+      lastEventAt: new Date(state.lastAcceptedAtMs ?? 0).toISOString(),
+      lastError: state.lastError?.message ?? null,
+    };
+  };
   for (const type of [MessageType.PCM_CAPTURE, MessageType.PCM_PLAYBACK, MessageType.QUALIFICATION_CASE, MessageType.QUALIFICATION_RESULT, MessageType.ERROR, MessageType.RESET]) queues.set(type, { frames: [], bytes: 0, overflowed: false });
   for (const direction of ['browser-to-fips', 'fips-to-browser'] as const) packetQueues.set(direction, { frames: [], bytes: 0, overflowed: false });
   const refreshState = () => {
@@ -1093,8 +1117,9 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       if (frame.type === MessageType.AUDIO_SETTINGS) {
         if (config) {
           const payload = parseJsonPayload(frame); if (hasForbiddenAuthority(payload)) fail('browser_authority_forbidden');
-          audio = parseBrowserAudio(payload); browserArmed = true; await persist();
+          audio = parseBrowserAudio(payload); await persist();
         }
+        browserArmed = true;
         notifyFipsBrowserState(true);
         const reportPath = path.join(options.artifactDir, 'loopback-qualification.json');
         await writeQualificationReport({ schemaVersion: 1, evidencePath: 'Loopback', physicalQualification: false, qualificationStatus: 'not-physical', capturedAt: new Date().toISOString(), reportPath, frame: { messageType: 'AUDIO_SETTINGS', epoch: frame.epoch, sequence: frame.sequence.toString(), payloadBytes: frame.payload.byteLength } });

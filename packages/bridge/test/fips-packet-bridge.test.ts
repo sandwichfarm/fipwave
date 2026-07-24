@@ -90,6 +90,32 @@ describe('FIPS packet bridge', () => {
     browser.close(); fips.close();
   });
 
+  it('relays current-epoch browser arm and disconnect control to the local FIPS endpoint', async () => {
+    const bridge = await createBridge();
+    const browser = await openEndpoint(bridge.port, 'browser');
+    const fips = await openEndpoint(bridge.port, 'fips');
+    const armed = once(fips, 'message');
+    browser.send(encodeFrame({ type: MessageType.AUDIO_SETTINGS, epoch: 1, sequence: 1n, payload: Buffer.alloc(0) }));
+    const [armFrame] = await armed;
+    expect(decodeFrame(Buffer.from(armFrame as Buffer))).toMatchObject({ type: MessageType.BROWSER_ARM, epoch: 1, payload: Buffer.alloc(0) });
+
+    const disarmed = once(fips, 'message');
+    browser.close();
+    const [disarmFrame] = await disarmed;
+    expect(decodeFrame(Buffer.from(disarmFrame as Buffer))).toMatchObject({ type: MessageType.BROWSER_DISARM, epoch: 1, payload: Buffer.alloc(0) });
+    fips.close();
+  });
+
+  it('serves allowlisted bridge facts instead of browser-local transport estimates', async () => {
+    const bridge = await createBridge();
+    const response = await fetch(`http://127.0.0.1:${bridge.port}/bridge-status`);
+    expect(response.ok).toBe(true);
+    expect(await response.json()).toEqual(expect.objectContaining({
+      role: 'A', configuration: 'ready', browserAudio: 'not-armed', localBridge: 'disconnected',
+      soundTransport: 'waiting', epoch: 1, soundMtu: 1357, txPackets: 0, rxPackets: 0,
+    }));
+  });
+
   it('rejects text, wrong-role, stale, and unavailable-destination input before accepted delivery counters change', async () => {
     const bridge = await createBridge();
     const browser = await openEndpoint(bridge.port, 'browser');

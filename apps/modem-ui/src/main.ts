@@ -154,14 +154,25 @@ function frameForSettings(value: AppliedAudioEvidence): ArrayBuffer {
 }
 
 function asError(reason: unknown, fallback: string): Error { return reason instanceof Error ? reason : new Error(fallback); }
+let bridgeStatusFetch: Promise<void> | undefined;
+async function refreshBridgeState(): Promise<void> {
+  if (developmentDiagnostic || bridgeStatusFetch) return bridgeStatusFetch;
+  bridgeStatusFetch = fetch('/bridge-status', { cache: 'no-store' })
+    .then(async (response) => {
+      if (!response.ok) throw new Error('Bridge status is unavailable');
+      const snapshot = validateBridgeSnapshot(await response.json());
+      if (!snapshot) throw new Error('Bridge status was invalid');
+      bridgeState = reduceBridgeState(bridgeState, { type: 'snapshot', snapshot });
+    })
+    .catch((error: unknown) => {
+      const reason = error instanceof Error ? error.message : 'Bridge status is unavailable';
+      bridgeState = reduceBridgeState(bridgeState, { type: 'reset-failed', reason });
+    })
+    .finally(() => { bridgeStatusFetch = undefined; render(); });
+  return bridgeStatusFetch;
+}
 function syncBridgeState(): void {
-  const snapshot = validateBridgeSnapshot({
-    role: runnerConfig?.role, configuration: 'ready', browserAudio: browserPacketReady ? 'armed' : 'not-armed',
-    localBridge: bridge?.readyState === WebSocket.OPEN ? 'ready' : 'disconnected', soundTransport: 'waiting', epoch,
-    queueHealth: 'clear', queueItems: 0, queueBytes: 0, txPackets: packetTx, rxPackets: packetRx, soundMtu: 1357,
-    lastEventAt: new Date().toISOString(), lastError: failure ? failure.replace(/[\r\n]+/g, ' ').slice(0, 240) : null,
-  });
-  if (snapshot) bridgeState = reduceBridgeState(bridgeState, { type: 'snapshot', snapshot });
+  void refreshBridgeState();
 }
 function resultKey(caseId: string, resultEpoch: number): string { return `${resultEpoch}\u0000${caseId}`; }
 function reportCyrinxRuntimeFailure(value: CyrinxBrowserCase): void {
