@@ -40,6 +40,16 @@ function mutate(frame: Uint8Array, offset: number, value: number): Uint8Array {
   return copy;
 }
 
+function resign(frame: Uint8Array): Uint8Array {
+  const copy = frame.slice();
+  const body = copy.subarray(FAS1_HEADER_BYTES);
+  const protectedBytes = new Uint8Array(32 + body.byteLength);
+  protectedBytes.set(copy.subarray(0, 32));
+  protectedBytes.set(body, 32);
+  new DataView(copy.buffer, copy.byteOffset, copy.byteLength).setUint32(32, crc32c(protectedBytes), true);
+  return copy;
+}
+
 describe('FAS1 binary protocol', () => {
   it('uses the exact Quiet-safe geometry and CRC-32C implementation', () => {
     expect(FAS1_HEADER_BYTES).toBe(36);
@@ -61,18 +71,18 @@ describe('FAS1 binary protocol', () => {
   });
 
   it('rejects hostile header mutations without exposing partial data', () => {
-    const encoded = encodeFas1(validUnit(Fas1UnitType.Data));
+    const encoded = encodeFas1({ ...validUnit(Fas1UnitType.Data), sessionId: 1n });
     const malformed = [
-      mutate(encoded, 0, 0),
-      mutate(encoded, 4, 2),
-      mutate(encoded, 5, 0xff),
-      mutate(encoded, 6, 1),
-      mutate(encoded, 16, 0),
-      mutate(encoded, 20, 0),
-      mutate(encoded, 24, 1),
-      mutate(encoded, 26, 0),
-      mutate(encoded, 28, 0),
-      mutate(encoded, 30, 2),
+      resign(mutate(encoded, 0, 0)),
+      resign(mutate(encoded, 4, 2)),
+      resign(mutate(encoded, 5, 0xff)),
+      resign(mutate(encoded, 6, 1)),
+      resign(mutate(encoded, 8, 0)),
+      resign(mutate(encoded, 20, 0)),
+      resign(mutate(encoded, 24, 1)),
+      resign(mutate(encoded, 26, 0)),
+      resign(mutate(encoded, 28, 0)),
+      resign(mutate(encoded, 30, 2)),
       mutate(encoded, 32, encoded[32]! ^ 0xff),
     ];
     for (const frame of malformed) expect(() => decodeFas1(frame)).toThrow();
