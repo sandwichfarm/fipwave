@@ -24,7 +24,9 @@ export function assertFipsRuntimeInspect(inspected) {
   const bridge = inspected.find((item) => item.Name?.includes('bridge'));
   const fips = inspected.find((item) => item.Name?.includes('fips'));
   if (!bridge || !fips) throw new Error('inspect must name bridge and fips');
-  const bindings = bridge.NetworkSettings?.Ports?.['4310/tcp'];
+  // Docker Desktop may expose a published port in HostConfig while omitting it
+  // from NetworkSettings when another service shares this namespace.
+  const bindings = bridge.NetworkSettings?.Ports?.['4310/tcp'] ?? bridge.HostConfig?.PortBindings?.['4310/tcp'];
   if (!Array.isArray(bindings) || bindings.length !== 1 || bindings[0].HostIp !== '127.0.0.1') throw new Error('bridge browser publication must bind 127.0.0.1 only');
   if (Object.keys(fips.NetworkSettings?.Ports ?? {}).length !== 0) throw new Error('fips must not publish ports');
   if (!String(fips.HostConfig?.NetworkMode ?? '').startsWith('container:')) throw new Error('fips namespace must target bridge container');
