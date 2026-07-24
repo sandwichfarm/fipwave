@@ -1,0 +1,10 @@
+.git
+.planning
+.artifacts
+artifacts
+node_modules
+dist
+target
+vendor/fips/target
+*.log
+.DS_Store

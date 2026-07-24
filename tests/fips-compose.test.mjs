@@ -60,3 +60,15 @@ test('owned runtime smoke accepts one role and rejects unsafe inspected topology
   inspected[1].HostConfig.CapAdd = ['NET_ADMIN', 'SYS_ADMIN'];
   assert.throws(() => assertFipsRuntimeInspect(inspected), /capabilities/);
 });
+
+test('both Compose build contexts exclude generated build outputs', async () => {
+  const [bridgeIgnore, fipsIgnore] = await Promise.all([
+    readFile(path.join(root, '.dockerignore'), 'utf8'),
+    readFile(path.join(root, 'vendor/fips/.dockerignore'), 'utf8'),
+  ]);
+  for (const pattern of ['node_modules', 'dist', 'target', 'vendor/fips/target', '.git', '.planning', '.artifacts']) {
+    assert.match(bridgeIgnore, new RegExp(`^${pattern.replaceAll('/', '\\/').replaceAll('.', '\\.')}$`, 'm'));
+  }
+  assert.match(fipsIgnore, /^target$/m);
+  assert.match(fipsIgnore, /^\.git$/m);
+});
