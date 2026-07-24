@@ -103,6 +103,12 @@ export function renderFipsConfig(config: DemoConfig): string {
     `    mtu: ${config.fips.linkMtu}`,
     '    queue_items: 32',
     `    queue_bytes: ${config.fips.linkMtu * 32}`,
+    ...(config.fips.transports.some((transport) => transport.kind === 'udp') ? [
+      '  udp:',
+      '    outbound_only: true',
+      '    accept_connections: false',
+      '    advertise_on_nostr: false',
+    ] : []),
     'peers:',
     `  - npub: "${config.peer.publicKey}"`,
     `    alias: "sound-${config.inputRole === 'a' ? 'b' : 'a'}"`,

@@ -31,6 +31,8 @@ interface AcousticConfig {
   readonly arq: Readonly<{ windowSize: 4; maxAttempts: 3; maxQueuedPackets: 4; deliveredIdHistory: 32 }>;
   readonly calibration: Readonly<{ maxCandidates: 3; probesPerDirection: 4; deadlineMs: 120_000; maximumPlaybackGain: 2 }>;
 }
+type TransportPolicy = Readonly<{ readonly kind: 'sound' }> | Readonly<{ readonly kind: 'udp'; readonly outboundOnly: true; readonly acceptConnections: false; readonly advertise: false }>;
+interface ProofConfig { readonly port: 45_900; readonly challengeBytes: 32; readonly timeoutMs: 45_000; readonly maxAttempts: 2; readonly maxRequestsPerMinute: 6; readonly replayCacheEntries: 32; readonly replayTtlMs: 120_000; readonly freshnessMs: 60_000; }
 
 export interface DemoConfig {
   readonly inputRole: DemoRoleInput;
@@ -38,7 +40,8 @@ export interface DemoConfig {
   readonly identity: PrivateDemoIdentity;
   readonly peer: PrivateDemoIdentity;
   readonly bridge: BridgeConfig;
-  readonly fips: Readonly<{ linkMtu: number; expectedPeerPublicKey: string }>;
+  readonly fips: Readonly<{ linkMtu: number; expectedPeerPublicKey: string; ipv6Address: string; targetIpv6: string; transports: readonly TransportPolicy[] }>;
+  readonly proof: ProofConfig;
   readonly codecCapabilities: readonly ['quiet'];
   readonly audioDefaults: AudioDefaults;
   readonly calibrationCandidates: readonly CalibrationCandidate[];
@@ -52,7 +55,8 @@ export interface PublicDemoConfig {
   readonly identityPublicKey: string;
   readonly peerPublicKey: string;
   readonly bridge: Readonly<{ host: typeof LOOPBACK_HOST; browserPort: number; fipsPort: number; browserPath: '/bridge/browser'; fipsPath: '/bridge/fips' }>;
-  readonly fips: Readonly<{ linkMtu: number; expectedPeerPublicKey: string }>;
+  readonly fips: Readonly<{ linkMtu: number; expectedPeerPublicKey: string; ipv6Address: string; targetIpv6: string; transportKinds: readonly ('sound' | 'udp')[] }>;
+  readonly proof: ProofConfig;
   readonly codecCapabilities: readonly ['quiet'];
   readonly audioDefaults: AudioDefaults;
   readonly calibrationCandidates: readonly CalibrationCandidate[];
@@ -68,6 +72,7 @@ const IDENTITIES: DemoIdentityTable = Object.freeze({
   a: Object.freeze({ publicKey: 'npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m', nsec: '0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20' }),
   b: Object.freeze({ publicKey: 'npub1f49ke5fkzqev4x7j46uajq92f4zan6kcpty5yvm5c3g6wf2dqanqn7qsy2', nsec: '0202020202020202020202020202020202020202020202020202020202020202' }),
 });
+const FIPS_IPV6 = Object.freeze({ a: 'fd69:e08d:65cc:3a6b:9c2c:2ac4:bd40:5e4b', b: 'fd46:f688:3bb:f389:e1df:f3e:3af3:9c30' });
 
 const DEFAULTS = Object.freeze({
   bridge: Object.freeze({ browserPort: 4_310, fipsPort: 4_310, browserPath: '/bridge/browser' as const, fipsPath: '/bridge/fips' as const }),
@@ -82,6 +87,7 @@ const DEFAULTS = Object.freeze({
   retries: Object.freeze({ maxAttempts: 3, minDelayMs: 500, maxDelayMs: 2_000 }),
   heartbeat: Object.freeze({ intervalMs: 5_000, deadLinkTimeoutMs: 30_000 }),
   fips: Object.freeze({ linkMtu: 1_357 }),
+  proof: Object.freeze({ port: 45_900 as const, challengeBytes: 32 as const, timeoutMs: 45_000 as const, maxAttempts: 2 as const, maxRequestsPerMinute: 6 as const, replayCacheEntries: 32 as const, replayTtlMs: 120_000 as const, freshnessMs: 60_000 as const }),
 });
 
 type UnknownRecord = Record<string, unknown>;
@@ -161,13 +167,17 @@ export function resolveDemoConfig(input?: string, overrides?: unknown): DemoConf
   const role: DemoRole = input === 'a' ? 'A' : 'B';
   const identity = IDENTITIES[input];
   const peer = IDENTITIES[input === 'a' ? 'b' : 'a'];
+  const transports: readonly TransportPolicy[] = input === 'a'
+    ? [Object.freeze({ kind: 'sound' as const }), Object.freeze({ kind: 'udp' as const, outboundOnly: true as const, acceptConnections: false as const, advertise: false as const })]
+    : [Object.freeze({ kind: 'sound' as const })];
   return freeze({
     inputRole: input,
     role,
     identity,
     peer,
     bridge,
-    fips: { linkMtu, expectedPeerPublicKey: peer.publicKey },
+    fips: { linkMtu, expectedPeerPublicKey: peer.publicKey, ipv6Address: FIPS_IPV6[input], targetIpv6: FIPS_IPV6.b, transports },
+    proof: { ...DEFAULTS.proof },
     codecCapabilities: [...DEFAULTS.codecCapabilities] as ['quiet'],
     audioDefaults: { ...DEFAULTS.audioDefaults },
     calibrationCandidates: DEFAULTS.calibrationCandidates.map((candidate) => ({ ...candidate })),
@@ -184,7 +194,8 @@ export function toPublicDemoConfig(config: DemoConfig): PublicDemoConfig {
     identityPublicKey: config.identity.publicKey,
     peerPublicKey: config.peer.publicKey,
     bridge: { host: config.bridge.host, browserPort: config.bridge.browserPort, fipsPort: config.bridge.fipsPort, browserPath: config.bridge.browserPath, fipsPath: config.bridge.fipsPath },
-    fips: { linkMtu: config.fips.linkMtu, expectedPeerPublicKey: config.fips.expectedPeerPublicKey },
+    fips: { linkMtu: config.fips.linkMtu, expectedPeerPublicKey: config.fips.expectedPeerPublicKey, ipv6Address: config.fips.ipv6Address, targetIpv6: config.fips.targetIpv6, transportKinds: config.fips.transports.map((transport) => transport.kind) },
+    proof: { ...config.proof },
     codecCapabilities: [...config.codecCapabilities] as ['quiet'],
     audioDefaults: { ...config.audioDefaults },
     calibrationCandidates: config.calibrationCandidates.map((candidate) => ({ ...candidate })),
