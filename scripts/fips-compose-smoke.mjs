@@ -54,10 +54,18 @@ async function main() {
     const inspected = JSON.parse((await execFileAsync('docker', ['inspect', ...ids], { maxBuffer: 1024 * 1024 })).stdout);
     const evidence = assertFipsRuntimeInspect(inspected);
     const deadline = Date.now() + timeoutMs;
+    let bridgeReady = false;
     while (Date.now() < deadline) {
-      try { const response = await fetch(`http://127.0.0.1:${environment.BROWSER_PORT}/`); if (response.ok) break; } catch {}
+      try {
+        const response = await fetch(`http://127.0.0.1:${environment.BROWSER_PORT}/`);
+        if (response.ok) {
+          bridgeReady = true;
+          break;
+        }
+      } catch {}
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
+    if (!bridgeReady) throw new Error(`bridge did not become ready on loopback port ${environment.BROWSER_PORT}`);
     console.log(JSON.stringify({ schemaVersion: 1, project, role, ...evidence, note: 'Local container topology only; no Open air, acoustic peer, or ping claim.' }));
   } finally {
     try { await compose(project, ['down', '--volumes', '--remove-orphans'], environment); } catch (error) { cleanupError = error; }
