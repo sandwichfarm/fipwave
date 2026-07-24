@@ -10,7 +10,7 @@ Requirements for the Sovereign Engineering demo-day proof of concept.
 
 ### FIPS Integration
 
-- [ ] **FIPS-01**: Operator can run a pinned fork of `jmcorgan/fips` containing
+- [x] **FIPS-01**: Operator can run a pinned fork of `jmcorgan/fips` containing
       a first-class, configurable sound transport.
 
 - [ ] **FIPS-02**: FIPS can start, stop, inspect, send through, and receive
@@ -279,7 +279,7 @@ Roadmap phase mapping is populated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| FIPS-01 | Phase 2 | Pending |
+| FIPS-01 | Phase 2 | Complete |
 | FIPS-02 | Phase 2 | Pending |
 | FIPS-03 | Phase 2 | Complete |
 | FIPS-04 | Phase 4 | Pending |

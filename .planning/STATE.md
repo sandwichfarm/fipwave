@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: Qualify the Demo Substrate
 status: executing
-stopped_at: Completed 02-01-PLAN.md
-last_updated: "2026-07-24T01:19:25.044Z"
+stopped_at: Completed 02-02-PLAN.md
+last_updated: "2026-07-24T01:26:17.784Z"
 last_activity: 2026-07-23
 last_activity_desc: Plan 01-10 physical checkpoint reached
 progress:
   total_phases: 2
   completed_phases: 0
   total_plans: 17
-  completed_plans: 10
+  completed_plans: 11
 ---
 
 # Project State
@@ -32,7 +32,7 @@ Plan: 10 of 10
 Status: Awaiting blocking-human physical qualification
 Last activity: 2026-07-23 — Plan 01-10 physical checkpoint reached
 
-Progress: [██████░░░░] 59%
+Progress: [███████░░░] 65%
 
 ## Performance Metrics
 
@@ -67,6 +67,7 @@ Progress: [██████░░░░] 59%
 | Phase 01 P08 | 35min | 3 tasks | 10 files |
 | Phase 01 P09 | 114min | 3 tasks | 32 files |
 | Phase 02 P01 | 5min | 1 tasks | 5 files |
+| Phase 02 P02 | 4min | 1 tasks | 674 files |
 
 ## Accumulated Context
 
@@ -91,6 +92,8 @@ Recent decisions affecting current work:
 - [Phase ?]: Quiet uses fixed audible-7k-channel-0 with local onFinish plus guard scheduling only; canonical selection requires runner-stamped exact-host Open-air evidence.
 - [Phase ?]: Phase 2: The existing loopback bridge owns separate browser/FIPS packet roles and one epoch authority.
 - [Phase ?]: Phase 2: FIPS_PACKET is opaque binary FWAV with no codec or PCM metadata, and counters advance only after forwarding.
+- [Phase ?]: Phase 2: FIPS is vendored at immutable commit fc8ebd5 with MIT license, Rust 1.94.1, pre-patch checksums, and no mutable build fetch.
+- [Phase ?]: Phase 2: The sound transport may use only direct tokio-tungstenite =0.30.0 while reusing upstream Tokio and futures.
 
 ### Pending Todos
 
@@ -130,6 +133,6 @@ hardware checkpoint remains explicit.
 
 ## Session Continuity
 
-Last session: 2026-07-24T01:19:25.036Z
-Stopped at: Completed 02-01-PLAN.md
+Last session: 2026-07-24T01:26:17.776Z
+Stopped at: Completed 02-02-PLAN.md
 Resume file: None
