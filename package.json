@@ -29,6 +29,8 @@
     "qualify:verify": "node scripts/qualify.mjs verify",
     "test:compose": "node --test tests/fips-compose.test.mjs && node scripts/check-compose.mjs && node scripts/check-compose.mjs --fips-source",
     "test:fips-compose:runtime": "node scripts/fips-compose-smoke.mjs",
+    "demo": "node scripts/demo.mjs",
+    "demo:check": "node scripts/demo.mjs --check",
     "check": "npm run verify:dependencies && npm run lint && npm run typecheck && npm run test:unit && npm run test:browser && npm run build && npm run generate:corpus -- --check && npm run qualify:fixture && npm run qualify:verify && npm run test:compose"
   },
   "dependencies": {

@@ -232,5 +232,23 @@ function parseCli(argv: string[]): ProductionRunnerOptions {
   return parsed;
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  void startProductionRunner(parseCli(process.argv.slice(2))).then((runner) => process.stdout.write(`FIPS over Sound runner listening on http://${LOOPBACK_HOST}:${runner.port}\n`)).catch((error: unknown) => { process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });
+  void startProductionRunner(parseCli(process.argv.slice(2))).then((runner) => {
+    let closing: Promise<void> | undefined;
+    const close = (): Promise<void> => {
+      closing ??= runner.close().finally(() => {
+        process.off('SIGINT', stop);
+        process.off('SIGTERM', stop);
+      });
+      return closing;
+    };
+    const stop = (): void => {
+      void close().catch((error: unknown) => {
+        process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+        process.exitCode = 1;
+      });
+    };
+    process.once('SIGINT', stop);
+    process.once('SIGTERM', stop);
+    process.stdout.write(`FIPS over Sound runner listening on http://${LOOPBACK_HOST}:${runner.port}\n`);
+  }).catch((error: unknown) => { process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });
 }
