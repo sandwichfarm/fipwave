@@ -85,6 +85,8 @@ pub struct SoundTransport {
     runtime: Arc<Mutex<Runtime>>,
     stop: Option<oneshot::Sender<()>>,
     worker: Option<JoinHandle<()>>,
+    #[cfg(test)]
+    enqueue_probe: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl SoundTransport {
@@ -103,6 +105,8 @@ impl SoundTransport {
             runtime: Arc::new(Mutex::new(Runtime::default())),
             stop: None,
             worker: None,
+            #[cfg(test)]
+            enqueue_probe: None,
         })
     }
 
@@ -319,6 +323,10 @@ impl SoundTransport {
             ));
         }
         runtime.outbound_bytes = next_bytes;
+        #[cfg(test)]
+        if let Some(probe) = &self.enqueue_probe {
+            probe();
+        }
         if sender
             .try_send(OutboundFrame {
                 bytes: frame,
@@ -852,6 +860,64 @@ mod tests {
             FWAV_HEADER_BYTES + 1_357
         );
         assert_eq!(sound.runtime.lock().unwrap().outbound_bytes, 1_389);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sound_disconnect_cannot_reset_byte_accounting_during_enqueue() {
+        let (packet_tx, _packet_rx) = packet_channel(2);
+        let (sender, receiver) = mpsc::channel(1);
+        let reservation_reached = Arc::new(std::sync::Barrier::new(2));
+        let allow_enqueue = Arc::new(std::sync::Barrier::new(2));
+        let reached_from_send = Arc::clone(&reservation_reached);
+        let release_from_send = Arc::clone(&allow_enqueue);
+        let mut sound =
+            SoundTransport::new(TransportId::new(8), None, config(), packet_tx).unwrap();
+        sound.enqueue_probe = Some(Arc::new(move || {
+            reached_from_send.wait();
+            release_from_send.wait();
+        }));
+        {
+            let mut runtime = sound.runtime.lock().unwrap();
+            runtime.state = TransportState::Up;
+            runtime.browser_ready = true;
+            runtime.sender = Some(sender);
+        }
+        let sound = Arc::new(sound);
+        let sender_sound = Arc::clone(&sound);
+        let payload = vec![0x7f; 1_357];
+        let send = tokio::spawn(async move {
+            sender_sound
+                .send_async(&sender_sound.configured_peer(), &payload)
+                .await
+        });
+
+        reservation_reached.wait();
+        let runtime = Arc::clone(&sound.runtime);
+        let mut disconnect = tokio::task::spawn_blocking(move || {
+            let mut current = runtime.lock().unwrap();
+            current.sender = None;
+            current.browser_ready = false;
+            current.state = TransportState::Starting;
+            current.outbound_bytes = 0;
+            drop(current);
+            drop(receiver);
+        });
+        let disconnect_was_blocked =
+            tokio::time::timeout(Duration::from_millis(50), &mut disconnect)
+                .await
+                .is_err();
+
+        allow_enqueue.wait();
+        assert_eq!(send.await.unwrap().unwrap(), 1_357);
+        tokio::time::timeout(Duration::from_secs(1), disconnect)
+            .await
+            .expect("disconnect did not complete after enqueue")
+            .unwrap();
+        assert!(
+            disconnect_was_blocked,
+            "disconnect changed queue generation during enqueue transaction"
+        );
+        assert_eq!(sound.runtime.lock().unwrap().outbound_bytes, 0);
     }
 
     #[test]
