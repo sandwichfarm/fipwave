@@ -46,6 +46,18 @@ peer link whose only connection to the isolated node is sound.
       the isolated node and receive the reply over sound.
 - [ ] Provide a reproducible, rehearsable launch procedure for likely
       macOS/macOS or macOS/Linux laptop combinations.
+- [ ] Launch the complete role-specific stack with `npm run demo -- a` or
+      `npm run demo -- b`, with the role as the only required difference.
+- [ ] Keep disposable demo identities, peer mappings, ports, codec
+      capabilities, calibration candidates, and timing in one validated
+      configuration source.
+- [ ] Establish each acoustic session through a robust bootstrap handshake,
+      capability exchange, bidirectional calibration sweep, and matching
+      settings commitment before FIPS traffic is admitted.
+- [ ] Detect sustained loss through link heartbeats and automatically enter a
+      bounded degraded/recalibration path.
+- [ ] Present a stateful, audience-readable, no-scroll interface on both
+      laptops while retaining the existing diagnostic details in Debug mode.
 - [ ] Make audible modem-like signalling the default demonstration mode.
 - [ ] Support a near-ultrasonic mode if it can be added without risking the
       audible end-to-end demo.
@@ -63,7 +75,8 @@ peer link whose only connection to the isolated node is sound.
   demo is already reliable.
 - Strong resistance to deliberate acoustic interference — integrity beyond
   framing, checksums, and basic error detection is a stretch goal.
-- Polished visualization — useful only after the end-to-end ping is reliable.
+- Elaborate waveform or spectrum visualization — the stateful demo interface
+  is required, but decorative DSP visualization remains subordinate.
 - Changes to FIPS routing, identity, or encryption protocols — the fork should
   add the smallest viable transport integration.
 
@@ -123,6 +136,12 @@ peer link whose only connection to the isolated node is sound.
 - **Scope**: Duplex peering, heartbeat, and ping are mandatory; visualization,
   multiplexing, ultrasonic mode, and stronger interference resistance are
   subordinate stretch goals.
+- **Operation**: The canonical demo path is `npm run demo -- a|b`; configuration
+  must be centralized and no source editing or multi-terminal choreography may
+  be required.
+- **Negotiation**: Bootstrap uses a conservative shared profile. Frequency is
+  negotiable only through mutually supported, versioned modem profiles; Web
+  Audio playback speed is not a carrier-frequency control.
 
 ## Key Decisions
 
@@ -138,6 +157,11 @@ peer link whose only connection to the isolated node is sound.
 | Keep the modem bridge codec-neutral | The one-day implementation must be able to replace a failed PHY spike without rewriting the FIPS fork | — Pending |
 | Gate Cyrinx for 90 minutes before selection | Its measured throughput fits FIPS, but its live browser and two-laptop path is not yet qualified | — Pending |
 | Advertise a minimum 1357-byte sound MTU | FIPS subtracts 77 bytes from its transport MTU and IPv6 requires an effective 1280-byte path | — Pending |
+| Use one role argument for the complete demo | Demo-day reliability depends on eliminating manual configuration and launch choreography | — Pending |
+| Centralize disposable A/B identities and settings | Demo nsecs may be hard-coded, but must be replaceable in one place and never printed | — Pending |
+| Bootstrap before adapting | Peers need one known robust control channel before they can measure and negotiate better directional settings | — Pending |
+| Commit a settings digest before FIPS readiness | Both sides must prove they selected the same session configuration before admitting network traffic | — Pending |
+| Make the primary UI stateful and no-scroll | Two visible laptop screens must explain discovery, calibration, connection, and traffic to an audience at a glance | — Pending |
 
 ## Evolution
 

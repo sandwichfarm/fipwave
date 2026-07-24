@@ -148,6 +148,79 @@ Requirements for the Sovereign Engineering demo-day proof of concept.
 - [ ] **DEMO-08**: Operator can recover from one browser, bridge, or acoustic
       link interruption and restore a successful ping within 60 seconds.
 
+### Configuration and Launch
+
+- [ ] **CONFIG-01**: Operator launches the complete gateway or isolated-node
+      stack with `npm run demo -- a` or `npm run demo -- b`; the role is the
+      only required argument.
+
+- [ ] **CONFIG-02**: Role identities, disposable demo nsecs, peer mappings,
+      ports, codec capabilities, audio defaults, calibration candidates,
+      retries, and heartbeat thresholds have one validated configuration
+      authority and are not duplicated across the codebase.
+
+- [ ] **CONFIG-03**: The launcher performs actionable preflight, starts all
+      required local services and the browser, and restores audio settings and
+      stops owned children on success, failure, SIGINT, and SIGTERM.
+
+- [ ] **CONFIG-04**: Role A enables the Wi-Fi-side FIPS path and acoustic
+      gateway while role B enables no wider-mesh FIPS transport and exposes
+      only its local browser/container boundary plus sound.
+
+### Acoustic Session Negotiation
+
+- [ ] **NEG-01**: Both peers share one conservative, versioned bootstrap
+      profile used for discovery, control exchange, recovery, and
+      recalibration.
+
+- [ ] **NEG-02**: The handshake exchanges protocol version, public identity,
+      expected role/peer, random session nonce, capabilities, and supported
+      profile, payload, redundancy, gain, heartbeat, and calibration ranges
+      while rejecting stale, mismatched, corrupt, or invalid transitions.
+
+- [ ] **NEG-03**: Calibration sends numbered probes in both literal directions
+      over a bounded candidate sweep and records successful, corrupt, missing,
+      duplicate, discontinuous, and timed observations.
+
+- [ ] **NEG-04**: Selection is measurement-based, supports different A→B and
+      B→A transmission settings, prefers reliability over loudness or nominal
+      throughput, and retains a safe bootstrap fallback.
+
+- [ ] **NEG-05**: Both peers commit and acknowledge an identical settings
+      digest before the acoustic adapter can report FIPS readiness.
+
+- [ ] **NEG-06**: Link heartbeat and loss thresholds expose degraded state and
+      trigger bounded retry, recalibration, fallback, or an actionable terminal
+      error without an infinite invisible loop.
+
+- [ ] **NEG-07**: Frequency changes are represented only by mutually supported
+      versioned modem profiles that really encode and decode the same waveform;
+      the pinned Cyrinx profile remains the fallback.
+
+### Demo Interface and Evidence
+
+- [ ] **UI-01**: The default interface renders Idle through Error connection
+      states without vertical scrolling at 1366×768 and 1440×900.
+
+- [ ] **UI-02**: Discovery, handshake, calibration, negotiation, commitment,
+      and FIPS connection stages show the peer, current operation, progress,
+      directional result, and a concise audience-facing explanation.
+
+- [ ] **UI-03**: Connected state shows acoustic and FIPS readiness, heartbeat,
+      connection age, active profile/settings, directional quality, TX/RX,
+      loss/retry, throughput, and last traffic or ping result.
+
+- [ ] **UI-04**: The existing detailed qualification and transport diagnostics
+      remain available through a clearly separated Debug mode.
+
+- [ ] **UI-05**: After one Start action the normal path advances automatically;
+      Reset and context-appropriate Recalibrate actions remain obvious.
+
+- [ ] **OBS-01**: Every demo run preserves one timestamped structured artifact
+      directory covering preflight, startup, handshake, calibration, selected
+      settings, heartbeat, packet health, FIPS readiness, ping, and shutdown
+      without promoting fixture or loopback evidence to Open air.
+
 ## v2 Requirements
 
 Deferred until the audible demo passes every v1 reliability gate.
@@ -244,11 +317,28 @@ Roadmap phase mapping is populated during roadmap creation.
 | DEMO-06 | Phase 5 | Pending |
 | DEMO-07 | Phase 5 | Pending |
 | DEMO-08 | Phase 5 | Pending |
+| CONFIG-01 | Phase 5 | Pending |
+| CONFIG-02 | Phase 2 | Pending |
+| CONFIG-03 | Phase 5 | Pending |
+| CONFIG-04 | Phase 4 | Pending |
+| NEG-01 | Phase 3 | Pending |
+| NEG-02 | Phase 3 | Pending |
+| NEG-03 | Phase 3 | Pending |
+| NEG-04 | Phase 3 | Pending |
+| NEG-05 | Phase 3 | Pending |
+| NEG-06 | Phase 3 | Pending |
+| NEG-07 | Phase 3 | Pending |
+| UI-01 | Phase 5 | Pending |
+| UI-02 | Phase 5 | Pending |
+| UI-03 | Phase 5 | Pending |
+| UI-04 | Phase 5 | Pending |
+| UI-05 | Phase 5 | Pending |
+| OBS-01 | Phase 5 | Pending |
 
 **Coverage:**
 
-- v1 requirements: 38 total
-- Mapped to phases: 38
+- v1 requirements: 55 total
+- Mapped to phases: 55
 - Unmapped: 0
 
 ---

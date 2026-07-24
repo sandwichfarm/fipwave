@@ -93,6 +93,13 @@ Recent decisions affecting current work:
 
 None yet.
 
+### Roadmap Evolution
+
+- 2026-07-24: Expanded Phase 2 with centralized A/B configuration and launcher foundations.
+- 2026-07-24: Expanded Phase 3 with bootstrap handshake, bidirectional calibration, settings commitment, and recalibration.
+- 2026-07-24: Tightened Phase 4 FIPS readiness and isolated-role requirements around the negotiated acoustic session.
+- 2026-07-24: Expanded Phase 5 with the one-command launcher, stateful no-scroll demo UI, structured evidence, and rehearsal.
+
 ### Blockers/Concerns
 
 - Phase 1 must empirically qualify codec, browser capture/playback, Docker/TUN, and MTU viability on the exact demo laptops before further integration.
