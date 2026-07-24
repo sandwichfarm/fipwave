@@ -163,6 +163,12 @@ export interface QuietClientOptions {
   playbackGain?: number;
 }
 
+export interface QuietAcousticCandidate {
+  readonly playbackGain: number;
+  readonly repetition: number;
+  readonly guardMs: number;
+}
+
 export class QuietReceiverEvidence {
   #parts = new Map<string, PartialCase>();
   #session: ReceiverSession;
@@ -268,6 +274,9 @@ export class QuietClient {
   #runtimeFrame: HTMLIFrameElement | undefined;
   #runtimeWindow: QuietRuntimeWindow | undefined;
   #playbackGain: number;
+  #acousticRepetition = 1;
+  #acousticGuardMs = QUIET_GUARD_MS;
+  #outputGains = new Set<GainNode>();
   #generation = 0;
   #cancelTransmission: (() => void) | undefined;
   #unitHandler: ((unit: Uint8Array) => void) | undefined;
@@ -283,6 +292,19 @@ export class QuietClient {
   get metrics(): Readonly<QuietMetrics> {
     const capture = this.#receiverEvidence.metrics();
     return { ...this.#metrics, captureHighWaterBytes: capture.captureHighWaterBytes, captureHighWaterMs: capture.captureHighWaterMs, discontinuities: this.#metrics.discontinuities + capture.discontinuities };
+  }
+
+  /**
+   * Applies only actual controls exposed by the fixed Quiet profile.  Carrier
+   * frequency remains the profile identifier; no sample-rate or speed trick is
+   * represented as a frequency change.
+   */
+  configureAcousticCandidate(candidate: QuietAcousticCandidate): void {
+    if (!Number.isFinite(candidate.playbackGain) || candidate.playbackGain < 1 || candidate.playbackGain > 2 || !Number.isInteger(candidate.repetition) || candidate.repetition < 1 || candidate.repetition > 3 || !Number.isInteger(candidate.guardMs) || candidate.guardMs < 1 || candidate.guardMs > 5_000) throw new Error('Quiet acoustic candidate is invalid');
+    this.#playbackGain = candidate.playbackGain;
+    this.#acousticRepetition = candidate.repetition;
+    this.#acousticGuardMs = candidate.guardMs;
+    for (const gain of this.#outputGains) gain.gain.value = candidate.playbackGain;
   }
 
   /**
@@ -326,6 +348,7 @@ export class QuietClient {
         const outputGain = context.createGain();
         outputGain.gain.value = client.#playbackGain;
         outputGain.connect(destination);
+        client.#outputGains.add(outputGain);
         Object.defineProperty(context, 'destination', { configurable: true, value: outputGain });
       }
       return context;
@@ -367,9 +390,9 @@ export class QuietClient {
       this.#transmitter?.destroy();
       this.#transmitter = runtime.Quiet!.transmitter({ profile: QUIET_PROFILE, clampFrame: QUIET_CLAMP_FRAME, onFinish: () => {
         this.#metrics.playbackHighWaterMs = Math.max(this.#metrics.playbackHighWaterMs, performance.now() - startedAt);
-        runtime.setTimeout(() => finish(() => generation === this.#generation && epoch === this.#epoch ? resolve() : reject(new Error('Quiet transmission cancelled by reset'))), QUIET_GUARD_MS);
+        runtime.setTimeout(() => finish(() => generation === this.#generation && epoch === this.#epoch ? resolve() : reject(new Error('Quiet transmission cancelled by reset'))), this.#acousticGuardMs);
       } });
-      this.#transmitter.transmit(unit.slice().buffer);
+      for (let repetition = 0; repetition < this.#acousticRepetition; repetition += 1) this.#transmitter.transmit(unit.slice().buffer);
     });
   }
 
@@ -404,7 +427,7 @@ export class QuietClient {
     this.#generation += 1;
     this.#cancelTransmission?.();
     this.#cancelTransmission = undefined;
-    this.#transmitter?.destroy(); this.#receiver?.destroy(); this.#transmitter = undefined; this.#receiver = undefined; this.#track?.stop(); this.#track = undefined; this.#applied = undefined; this.#contextSampleRate = undefined; this.#metrics = { captureHighWaterBytes: 0, captureHighWaterMs: 0, playbackHighWaterBytes: 0, playbackHighWaterMs: 0, discontinuities: 0 };
+    this.#transmitter?.destroy(); this.#receiver?.destroy(); this.#transmitter = undefined; this.#receiver = undefined; this.#track?.stop(); this.#track = undefined; this.#applied = undefined; this.#contextSampleRate = undefined; this.#outputGains.clear(); this.#acousticRepetition = 1; this.#acousticGuardMs = QUIET_GUARD_MS; this.#metrics = { captureHighWaterBytes: 0, captureHighWaterMs: 0, playbackHighWaterBytes: 0, playbackHighWaterMs: 0, discontinuities: 0 };
     const runtime = this.#runtimeWindow;
     runtime?.Quiet?.disconnect?.();
     const nav = runtime?.navigator as (Navigator & { getUserMedia?: unknown }) | undefined;

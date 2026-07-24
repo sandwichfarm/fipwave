@@ -3,6 +3,7 @@ import { armAudio, canBufferPcmCaptureFrame, enqueuePcmPlayback, resetAudio, set
 import { acceptBridgePlaybackFrame } from '../../../packages/bridge/src/codecs/websocket.js';
 import { FipsTrafficClass, isFipsTrafficClass } from '../../../packages/bridge/src/protocol.js';
 import { createFipsPacketAdapter, type FipsPacketEnvelope } from './fips-packet-adapter.js';
+import { decodeFas1, Fas1UnitType } from './acoustic-protocol.js';
 import { AcousticSession } from './acoustic-session.js';
 import { AcousticSessionAdapter } from './acoustic-session-adapter.js';
 import { projectAcousticStatus } from './acoustic-status.js';
@@ -60,6 +61,11 @@ let quietFailureReportedEpoch: number | undefined;
 let runnerConfig: Readonly<RunnerConfig> | undefined;
 let configFailure = '';
 let resetFailure = '';
+type MeasuredProbe = Readonly<{ received: true; bytePerfect: true; corrupt: false; missing: false; duplicate: false; discontinuity: boolean; latencyMs: undefined; signalDb: undefined; clipping: undefined; confidence: 1 }>;
+const receivedProbes = new Map<string, MeasuredProbe>();
+function probeReceiptKey(sessionId: bigint, direction: number, candidateIndex: number, probeIndex: number): string {
+  return `${epoch}:${sessionId}:${direction}:${candidateIndex}:${probeIndex}`;
+}
 function requestedPlaybackGain(): number {
   const raw = new URLSearchParams(window.location.hash.replace(/^#/, '')).get('playbackGain');
   if (raw === null || raw.trim() === '') return 1;
@@ -152,8 +158,25 @@ function configureAcousticSession(config: Readonly<RunnerConfig>): void {
       });
     },
     onUnit(handler: (unit: Uint8Array) => void): () => void {
-      return quiet.onUnit((unit) => { handler(unit); adapter?.refresh(); });
+      return quiet.onUnit((unit) => {
+        // Quiet has already delivered a modem frame.  A FAS1 parse gives us an
+        // actual current-generation integrity observation; it does not invent
+        // unmeasurable RSSI, clipping, or one-way latency values.
+        try {
+          const decoded = decodeFas1(unit);
+          if (decoded.type === Fas1UnitType.Probe && decoded.body.byteLength === 3) {
+            receivedProbes.set(
+              probeReceiptKey(decoded.sessionId, decoded.body[0]!, decoded.body[1]!, decoded.body[2]!),
+              Object.freeze({ received: true, bytePerfect: true, corrupt: false, missing: false, duplicate: false, discontinuity: quiet.metrics.discontinuities > 0, latencyMs: undefined, signalDb: undefined, clipping: undefined, confidence: 1 }),
+            );
+          }
+        } catch {
+          // A corrupt codec payload never becomes a calibration observation.
+        }
+        handler(unit); adapter?.refresh();
+      });
     },
+    applyCandidate(candidate: { playbackGain: number; repetition: number; guardMs: number }): void { quiet.configureAcousticCandidate(candidate); },
   };
   const session = new AcousticSession({
     role: config.role, identity: config.machineId, expectedPeer: config.role === 'A' ? 'fipwave-b' : 'fipwave-a', modem,
@@ -161,11 +184,12 @@ function configureAcousticSession(config: Readonly<RunnerConfig>): void {
     nonce: () => crypto.getRandomValues(new Uint8Array(16)), profiles: ['quiet-audible-7k-v1'], ranges: { minPayloadBytes: 96, maxPayloadBytes: 217 },
     candidates: [{ id: 'quiet-audible-7k-v1', profileId: 'quiet-audible-7k-v1', payloadBytes: 96, repetition: 1, guardMs: 750, playbackGain: Math.min(2, requestedPlaybackGain()), ackTimeoutMs: 4_000 }],
     calibration: { probesPerDirection: 1, maxCandidates: 1, deadlineMs: 30_000 },
-    // Quiet exposes no peer-correlated probe receipt or calibrated signal
-    // meter at this composition seam.  Keep that absence fail-closed instead
-    // of manufacturing a perfect sweep; the deterministic fixture supplies
-    // its own explicitly Fixture-classified measurement callback.
-    measureProbe: () => ({ received: false, bytePerfect: false, corrupt: false, missing: true, duplicate: false, discontinuity: false, latencyMs: 0, signalDb: -200, clipping: false, confidence: 0 }),
+    measureProbe: (probe) => receivedProbes.get(probeReceiptKey(
+      acousticSession?.snapshot.sessionId ?? 0n,
+      probe.direction === 'AtoB' ? 1 : 2,
+      probe.candidateIndex,
+      probe.probeIndex,
+    )) ?? Object.freeze({ received: false, bytePerfect: false, corrupt: false, missing: true, duplicate: false, discontinuity: quiet.metrics.discontinuities > 0, latencyMs: undefined, signalDb: undefined, clipping: undefined, confidence: 0 }),
     onPacket: (packet) => { acousticRx += 1; adapter?.deliver(packet, FipsTrafficClass.Ordinary); },
   });
   adapter = new AcousticSessionAdapter({
@@ -208,10 +232,20 @@ async function runAcousticFixtureIfRequested(): Promise<void> {
     onPacket: (packet: Uint8Array) => received.push(packet.slice()),
   });
   const a = new AcousticSession(fixtureOptions('A', left, receivedA)); const b = new AcousticSession(fixtureOptions('B', right, receivedB));
-  a.start(); for (let round = 0; round < 4; round += 1) await Promise.all([a.settle(), b.settle()]); b.heartbeat();
+  a.start(); for (let round = 0; round < 4; round += 1) await Promise.all([a.settle(), b.settle()]);
   const flush = () => { const callbacks = [...timers.values()]; timers.clear(); callbacks.forEach((callback) => callback()); };
-  a.enqueuePacket(Uint8Array.from({ length: 1_357 }, (_, index) => index & 0xff)); flush(); flush(); flush(); flush();
-  b.enqueuePacket(Uint8Array.from({ length: 1_357 }, (_, index) => (255 - index) & 0xff)); flush(); flush(); flush(); flush();
+  const drainUntil = async (complete: () => boolean): Promise<void> => {
+    for (let turn = 0; turn < 128; turn += 1) {
+      await Promise.all([a.settle(), b.settle()]);
+      if (complete()) return;
+      flush();
+    }
+    throw new Error('Fixture acoustic delivery did not quiesce within the bounded turn budget');
+  };
+  a.enqueuePacket(Uint8Array.from({ length: 1_357 }, (_, index) => index & 0xff));
+  await drainUntil(() => receivedB.length === 1);
+  b.enqueuePacket(Uint8Array.from({ length: 1_357 }, (_, index) => (255 - index) & 0xff));
+  await drainUntil(() => receivedA.length === 1);
   window.__fipwaveAcousticFixture = Object.freeze({ evidenceClass: 'Fixture', aReady: a.snapshot.ready, bReady: b.snapshot.ready, aToBBytes: receivedB[0]?.byteLength ?? 0, bToABytes: receivedA[0]?.byteLength ?? 0 });
   a.dispose(); b.dispose();
 }

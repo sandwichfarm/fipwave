@@ -9,6 +9,7 @@ class FakeModem implements AcousticModem {
   readonly sent: Uint8Array[] = [];
   shouldDeliver: ((unit: Uint8Array) => boolean) | undefined;
   transform: ((unit: Uint8Array) => Uint8Array) | undefined;
+  readonly appliedCandidates: string[] = [];
 
   send(unit: Uint8Array): void {
     this.sent.push(unit.slice());
@@ -20,6 +21,8 @@ class FakeModem implements AcousticModem {
     this.#handler = handler;
     return () => { if (this.#handler === handler) this.#handler = undefined; };
   }
+
+  applyCandidate(candidate: { id: string }): void { this.appliedCandidates.push(candidate.id); }
 }
 
 class FakeTimers {
@@ -168,6 +171,16 @@ describe('AcousticSession bootstrap handshake', () => {
 });
 
 describe('AcousticSession calibration, selection, and commitment', () => {
+  it('applies the exact configured candidate before each literal-direction probe', async () => {
+    const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
+    const candidates = [{ ...candidate, id: 'quiet-safe-1' }, { ...candidate, id: 'quiet-safe-2', payloadBytes: 97 }];
+    const a = new AcousticSession({ ...options('A', aModem), candidates });
+    const b = new AcousticSession({ ...options('B', bModem), candidates });
+    a.start(); await settlePair(a, b);
+    expect(aModem.appliedCandidates).toEqual(['quiet-safe-1', 'quiet-safe-1', 'quiet-safe-1', 'quiet-safe-1', 'quiet-safe-2', 'quiet-safe-2', 'quiet-safe-2', 'quiet-safe-2']);
+    expect(bModem.appliedCandidates).toEqual(['quiet-safe-1', 'quiet-safe-1', 'quiet-safe-1', 'quiet-safe-1', 'quiet-safe-2', 'quiet-safe-2', 'quiet-safe-2', 'quiet-safe-2']);
+  });
+
   it('executes four numbered A-to-B probes before four numbered B-to-A probes and automatically reaches readiness after COMMIT_ACK', async () => {
     const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
     const a = new AcousticSession(options('A', aModem)); const b = new AcousticSession(options('B', bModem));

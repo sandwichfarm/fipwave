@@ -9,6 +9,8 @@ export interface AcousticDeliveryResult { readonly delivered: boolean; readonly 
 export interface AcousticModem {
   send(unit: Uint8Array): void | Promise<void>;
   onUnit(handler: (unit: Uint8Array) => void): () => void;
+  /** Applies the candidate before its numbered probe or subsequent transmit. */
+  applyCandidate?(candidate: AcousticCandidate): void;
 }
 
 export interface AcousticClock { now(): number; }
@@ -16,7 +18,7 @@ export interface AcousticTimers { setTimeout(callback: () => void, delayMs: numb
 export interface AcousticCapabilityRange { readonly minPayloadBytes: number; readonly maxPayloadBytes: number; }
 export interface AcousticCandidate extends DirectionalSettings { readonly id: string; }
 export interface AcousticProbe { readonly direction: 'AtoB' | 'BtoA'; readonly candidateIndex: number; readonly probeIndex: number; readonly candidate: AcousticCandidate; }
-export interface AcousticProbeObservation { readonly received: boolean; readonly bytePerfect: boolean; readonly corrupt: boolean; readonly missing: boolean; readonly duplicate: boolean; readonly discontinuity: boolean; readonly latencyMs: number; readonly signalDb: number; readonly clipping: boolean; readonly confidence: number; }
+export interface AcousticProbeObservation { readonly received: boolean; readonly bytePerfect: boolean; readonly corrupt: boolean; readonly missing: boolean; readonly duplicate: boolean; readonly discontinuity: boolean; /** Undefined means the browser cannot measure one-way latency. */ readonly latencyMs: number | undefined; /** Undefined means the codec exposes no calibrated signal meter. */ readonly signalDb: number | undefined; /** Undefined means the browser has no clipping meter. */ readonly clipping: boolean | undefined; readonly confidence: number; }
 export interface AcousticProbeLedgerEntry extends AcousticProbe { readonly observation: AcousticProbeObservation; }
 export interface AcousticSessionOptions {
   readonly role: AcousticRole;
@@ -449,14 +451,14 @@ export class AcousticSession {
     return { direction, candidateIndex, probeIndex, candidate };
   }
   private normalizeObservation(value: AcousticProbeObservation): AcousticProbeObservation {
-    if (!value || typeof value !== 'object' || typeof value.received !== 'boolean' || typeof value.bytePerfect !== 'boolean' || typeof value.corrupt !== 'boolean' || typeof value.missing !== 'boolean' || typeof value.duplicate !== 'boolean' || typeof value.discontinuity !== 'boolean' || typeof value.clipping !== 'boolean' || !validInteger(value.latencyMs, 0, 65_535) || !Number.isFinite(value.signalDb) || value.signalDb < -200 || value.signalDb > 0 || !Number.isFinite(value.confidence) || value.confidence < 0 || value.confidence > 1) invalid('probe observation is invalid');
+    if (!value || typeof value !== 'object' || typeof value.received !== 'boolean' || typeof value.bytePerfect !== 'boolean' || typeof value.corrupt !== 'boolean' || typeof value.missing !== 'boolean' || typeof value.duplicate !== 'boolean' || typeof value.discontinuity !== 'boolean' || (value.clipping !== undefined && typeof value.clipping !== 'boolean') || (value.latencyMs !== undefined && !validInteger(value.latencyMs, 0, 65_534)) || (value.signalDb !== undefined && (!Number.isFinite(value.signalDb) || value.signalDb < -200 || value.signalDb > 0)) || !Number.isFinite(value.confidence) || value.confidence < 0 || value.confidence > 1) invalid('probe observation is invalid');
     return { ...value };
   }
   private encodeReport(probe: AcousticProbe, observation: AcousticProbeObservation): Uint8Array {
     let flags = (observation.received ? OBS_RECEIVED : 0) | (observation.bytePerfect ? OBS_BYTE_PERFECT : 0) | (observation.corrupt ? OBS_CORRUPT : 0) | (observation.missing ? OBS_MISSING : 0) | (observation.duplicate ? OBS_DUPLICATE : 0) | (observation.discontinuity ? OBS_DISCONTINUITY : 0) | (observation.clipping ? OBS_CLIPPING : 0);
     const body = new Uint8Array(10); const view = new DataView(body.buffer);
     body[0] = this.directionByte(probe.direction); body[1] = probe.candidateIndex; body[2] = probe.probeIndex; body[3] = flags;
-    view.setUint16(4, observation.latencyMs, true); view.setInt16(6, Math.round(observation.signalDb * 10), true); view.setUint16(8, Math.round(observation.confidence * 1_000), true);
+    view.setUint16(4, observation.latencyMs ?? 0xffff, true); view.setInt16(6, observation.signalDb === undefined ? -2_000 : Math.round(observation.signalDb * 10), true); view.setUint16(8, Math.round(observation.confidence * 1_000), true);
     return body;
   }
   private decodeReport(body: Uint8Array): { probe: AcousticProbe; observation: AcousticProbeObservation } {
@@ -465,7 +467,8 @@ export class AcousticSession {
     if ((flags & ~127) !== 0 || candidateIndex >= this.options.candidates.length || probeIndex >= this.options.calibration.probesPerDirection) invalid('report geometry is invalid');
     const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
     const candidate = this.options.candidates[candidateIndex]!;
-    return { probe: { direction, candidateIndex, probeIndex, candidate }, observation: this.normalizeObservation({ received: (flags & OBS_RECEIVED) !== 0, bytePerfect: (flags & OBS_BYTE_PERFECT) !== 0, corrupt: (flags & OBS_CORRUPT) !== 0, missing: (flags & OBS_MISSING) !== 0, duplicate: (flags & OBS_DUPLICATE) !== 0, discontinuity: (flags & OBS_DISCONTINUITY) !== 0, clipping: (flags & OBS_CLIPPING) !== 0, latencyMs: view.getUint16(4, true), signalDb: view.getInt16(6, true) / 10, confidence: view.getUint16(8, true) / 1_000 }) };
+    const latency = view.getUint16(4, true); const signal = view.getInt16(6, true);
+    return { probe: { direction, candidateIndex, probeIndex, candidate }, observation: this.normalizeObservation({ received: (flags & OBS_RECEIVED) !== 0, bytePerfect: (flags & OBS_BYTE_PERFECT) !== 0, corrupt: (flags & OBS_CORRUPT) !== 0, missing: (flags & OBS_MISSING) !== 0, duplicate: (flags & OBS_DUPLICATE) !== 0, discontinuity: (flags & OBS_DISCONTINUITY) !== 0, clipping: (flags & OBS_CLIPPING) !== 0 ? true : undefined, latencyMs: latency === 0xffff ? undefined : latency, signalDb: signal === -2_000 ? undefined : signal / 10, confidence: view.getUint16(8, true) / 1_000 }) };
   }
   private onProbe(sessionId: bigint, body: Uint8Array): void {
     if (sessionId !== this.#sessionId || body.byteLength !== 3) return;
@@ -500,8 +503,9 @@ export class AcousticSession {
   private select(direction: 'AtoB' | 'BtoA', entries: readonly AcousticProbeLedgerEntry[]): AcousticCandidate | undefined {
     const ranked = this.options.candidates.map((candidate, candidateIndex) => {
       const observations = entries.filter((entry) => entry.candidateIndex === candidateIndex).map((entry) => entry.observation);
-      const safe = observations.length === this.options.calibration.probesPerDirection && observations.every((entry) => entry.received && entry.bytePerfect && !entry.corrupt && !entry.missing && !entry.clipping && entry.confidence >= 0.5);
-      const latency = observations.reduce((sum, entry) => sum + entry.latencyMs, 0) / Math.max(1, observations.length);
+      const safe = observations.length === this.options.calibration.probesPerDirection && observations.every((entry) => entry.received && entry.bytePerfect && !entry.corrupt && !entry.missing && entry.clipping !== true && entry.confidence >= 0.5);
+      const measuredLatency = observations.map((entry) => entry.latencyMs).filter((value): value is number => value !== undefined);
+      const latency = measuredLatency.length === 0 ? Number.POSITIVE_INFINITY : measuredLatency.reduce((sum, value) => sum + value, 0) / measuredLatency.length;
       return { candidate, safe, latency };
     }).filter((entry) => entry.safe);
     ranked.sort((left, right) => left.latency - right.latency || left.candidate.playbackGain - right.candidate.playbackGain || right.candidate.payloadBytes - left.candidate.payloadBytes || left.candidate.id.localeCompare(right.candidate.id));
@@ -511,7 +515,7 @@ export class AcousticSession {
     if (this.options.role !== this.expectedSender(direction) || this.#state !== this.stateFor(direction) || !this.#sessionId) return;
     const ordinal = this.#sentProbes[direction]; const total = this.options.candidates.length * this.options.calibration.probesPerDirection;
     if (ordinal >= total) return;
-    const probe = this.probeFor(direction, ordinal); this.#sentProbes[direction] += 1;
+    const probe = this.probeFor(direction, ordinal); this.options.modem.applyCandidate?.(probe.candidate); this.#sentProbes[direction] += 1;
     this.send(Fas1UnitType.Probe, this.#sessionId, new Uint8Array([this.directionByte(direction), probe.candidateIndex, probe.probeIndex]));
   }
   private queueCommit(): void {
