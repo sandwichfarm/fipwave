@@ -902,7 +902,8 @@ mod tests {
         disarm[5] = FWAV_TYPE_BROWSER_DISARM;
         disarm.truncate(FWAV_HEADER_BYTES + FWAV_DISARM_CAPABILITY_BYTES);
         disarm[8..12].copy_from_slice(&(FWAV_DISARM_CAPABILITY_BYTES as u32).to_le_bytes());
-        disarm[FWAV_HEADER_BYTES..].copy_from_slice(&arm[FWAV_HEADER_BYTES + 48..FWAV_HEADER_BYTES + 64]);
+        disarm[FWAV_HEADER_BYTES..]
+            .copy_from_slice(&arm[FWAV_HEADER_BYTES + 48..FWAV_HEADER_BYTES + 64]);
         inject_inbound(
             &sound.runtime,
             &sound.packet_tx,
