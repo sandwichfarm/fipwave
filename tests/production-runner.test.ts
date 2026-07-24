@@ -176,6 +176,19 @@ describe('production runner', () => {
     expect(rendered).not.toContain('codec:');
   });
 
+  it('renders B with only Sound and A with the non-advertised outbound-only UDP client posture', () => {
+    const a = renderFipsConfig(resolveDemoConfig('a'));
+    const b = renderFipsConfig(resolveDemoConfig('b'));
+    expect(a).toContain('  udp:');
+    expect(a).toContain('    outbound_only: true');
+    expect(a).toContain('    accept_connections: false');
+    expect(a).toContain('    advertise_on_nostr: false');
+    expect(a.match(/transport: sound/g)).toHaveLength(1);
+    expect(b).not.toContain('  udp:');
+    expect(b.match(/^  sound:/gm)).toHaveLength(1);
+    expect(b.match(/transport: sound/g)).toHaveLength(1);
+  });
+
   it('consumes a resolved config and closes only the bridge it successfully created', async () => {
     const bridgeClose = vi.fn(async () => {});
     const createBridge = vi.fn(async () => ({

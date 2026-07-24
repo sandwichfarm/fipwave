@@ -61,6 +61,18 @@ describe('demo configuration authority', () => {
     });
   });
 
+  it('derives exact Sound-only B and outbound-only A transport/proof policies without secrets in the public projection', () => {
+    const a = resolveDemoConfig('a');
+    const b = resolveDemoConfig('b');
+    expect(a.fips).toMatchObject({ targetIpv6: b.fips.ipv6Address, transports: [{ kind: 'sound' }, { kind: 'udp', outboundOnly: true, acceptConnections: false, advertise: false }] });
+    expect(b.fips).toMatchObject({ targetIpv6: b.fips.ipv6Address, transports: [{ kind: 'sound' }] });
+    expect(b.proof).toMatchObject({ port: 45900, challengeBytes: 32, timeoutMs: 45_000, maxAttempts: 2, maxRequestsPerMinute: 6, replayCacheEntries: 32, replayTtlMs: 120_000, freshnessMs: 60_000 });
+    const serialized = JSON.stringify(toPublicDemoConfig(a));
+    expect(serialized).toContain('45900');
+    expect(serialized).not.toContain(a.identity.nsec);
+    expect(serialized).not.toContain(b.identity.nsec);
+  });
+
   it('layers exact validated overrides without mutating or thawing canonical defaults', () => {
     const canonical = resolveDemoConfig('a');
     const before = JSON.stringify(canonical);
