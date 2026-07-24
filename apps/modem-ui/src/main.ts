@@ -751,6 +751,12 @@ function render(): void {
     ? `Machine: ${runnerConfig.machineId} · Role: ${runnerConfig.role} (${roleDescription(runnerConfig.role)}) · Evidence: ${runnerConfig.evidenceClass} · Chromium: ${navigator.userAgent} · Local epoch: ${epoch}`
     : 'Runner configuration pending');
   meta.className = 'measurements';
+  if (runnerConfig) {
+    meta.dataset.testid = 'runner-identity';
+    meta.dataset.machineId = runnerConfig.machineId;
+    meta.dataset.role = runnerConfig.role;
+    meta.dataset.evidenceClass = runnerConfig.evidenceClass;
+  }
   header.append(meta);
   const badge = element('p', `● ${labels[uiState]} · ${localBridgeCopy(bridgeState)}`);
   badge.className = `status status-${uiState}`;
@@ -775,7 +781,10 @@ function render(): void {
   operator.append(announcement);
   if (configFailure) operator.append(element('p', `Runner configuration failed: ${configFailure}`));
   operator.append(element('p', `Report target: ${runnerConfig?.reportTarget ?? 'Unknown'} · TUN mode: ${runnerConfig?.tunEvidence ?? 'Unknown'}`));
-  operator.append(element('p', `Bridge delivery: ${bridgeDelivery}`));
+  const bridgeDeliveryStatus = element('p', `Bridge delivery: ${bridgeDelivery}`);
+  bridgeDeliveryStatus.dataset.testid = 'bridge-delivery';
+  if (uiState === 'ready' && evidence) bridgeDeliveryStatus.dataset.audioSettingsAcceptedEpoch = String(epoch);
+  operator.append(bridgeDeliveryStatus);
   operator.append(element('p', quietRuntime));
   const resetInFlight = bridgeState?.status === 'resetting';
   const bridgeNeedsRecovery = bridgeState?.status === 'disconnected' || bridgeState?.status === 'overflow' || bridgeState?.status === 'rejected';

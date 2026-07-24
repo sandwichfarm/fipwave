@@ -332,10 +332,12 @@ describe('FIPS packet bridge', () => {
     const bridge = await createBridge();
     const response = await fetch(`http://127.0.0.1:${bridge.port}/bridge-status`);
     expect(response.ok).toBe(true);
-    expect(await response.json()).toEqual(expect.objectContaining({
-      role: 'Unknown', configuration: 'unknown', browserAudio: 'not-ready', acousticSession: 'not-ready',
+    const status = await response.json();
+    expect(status).toEqual(expect.objectContaining({
+      role: 'Unknown', configuration: 'unknown', browserAudio: 'not-armed',
       localBridge: 'disconnected', soundTransport: 'waiting', epoch: 1, soundMtu: null, txPackets: 0, rxPackets: 0,
     }));
+    expect(status).not.toHaveProperty('acousticSession');
   });
 
   it('accepts a private-container all-interface listener while host publication stays loopback-only', async () => {

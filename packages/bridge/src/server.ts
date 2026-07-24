@@ -399,8 +399,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       // IPv6 MTU authority. Keep that absence explicit for the browser rather
       // than projecting plausible defaults.
       role: config?.role ?? 'Unknown', configuration: config ? 'ready' : 'unknown',
-      browserAudio: localAudioPreflight ? 'ready' : 'not-ready',
-      acousticSession: state.acousticReady ? 'ready' : 'not-ready',
+      browserAudio: localAudioPreflight ? 'armed' : 'not-armed',
       localBridge: state.packetEndpoints.browser === 'ready' ? 'ready' : 'disconnected',
       soundTransport: state.packetEndpoints.fips === 'ready' ? 'started' : 'waiting',
       epoch: state.epoch, queueHealth,

@@ -85,6 +85,17 @@ export function isBytePerfectResult(result, direction, epoch) {
     && result.receivedSha256 === result.expectedSha256;
 }
 
+export function runnerIdentitySelector(machineId, role) {
+  if (!/^[a-z][a-z0-9-]*$/.test(machineId)) throw new Error('runner machine ID is invalid');
+  if (role !== 'A' && role !== 'B') throw new Error('runner role is invalid');
+  return `[data-testid="runner-identity"][data-machine-id="${machineId}"][data-role="${role}"][data-evidence-class="Loopback"]`;
+}
+
+export function audioSettingsAcceptedSelector(epoch) {
+  if (!Number.isSafeInteger(epoch) || epoch < 1) throw new Error('audio settings epoch is invalid');
+  return `[data-testid="bridge-delivery"][data-audio-settings-accepted-epoch="${epoch}"]`;
+}
+
 function timestampId() {
   return `${new Date().toISOString().replaceAll(/[-:.]/g, '')}-${process.pid}`;
 }
@@ -605,8 +616,8 @@ async function main() {
       pages.B.goto(origins.B, { waitUntil: 'domcontentloaded', timeout: options.startupTimeoutMs }),
     ]);
     await Promise.all([
-      pages.A.getByText(new RegExp(`Machine: ${specs.A.machineId} · Role: A · Evidence: Loopback`)).waitFor({ timeout: options.startupTimeoutMs }),
-      pages.B.getByText(new RegExp(`Machine: ${specs.B.machineId} · Role: B · Evidence: Loopback`)).waitFor({ timeout: options.startupTimeoutMs }),
+      pages.A.locator(runnerIdentitySelector(specs.A.machineId, specs.A.role)).waitFor({ timeout: options.startupTimeoutMs }),
+      pages.B.locator(runnerIdentitySelector(specs.B.machineId, specs.B.role)).waitFor({ timeout: options.startupTimeoutMs }),
     ]);
     recorder.event('pages-loaded', { origins, message: 'both production roles loaded' }, true);
 
@@ -617,8 +628,8 @@ async function main() {
     await Promise.all([
       pages.A.getByText('Audio preflight passed on this laptop.', { exact: true }).waitFor({ timeout: options.startupTimeoutMs }),
       pages.B.getByText('Audio preflight passed on this laptop.', { exact: true }).waitFor({ timeout: options.startupTimeoutMs }),
-      pages.A.getByText('Bridge delivery: Audio settings accepted for epoch 1', { exact: true }).waitFor({ timeout: options.startupTimeoutMs }),
-      pages.B.getByText('Bridge delivery: Audio settings accepted for epoch 1', { exact: true }).waitFor({ timeout: options.startupTimeoutMs }),
+      pages.A.locator(audioSettingsAcceptedSelector(1)).waitFor({ timeout: options.startupTimeoutMs }),
+      pages.B.locator(audioSettingsAcceptedSelector(1)).waitFor({ timeout: options.startupTimeoutMs }),
     ]);
     recorder.event('audio-preflight-complete', { message: 'both roles armed at epoch 1' }, true);
 

@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { audioSettingsAcceptedSelector } from '../../../scripts/self-loop-smoke.mjs';
 
 const requestedPort = Number(process.env.FIPWAVE_E2E_PORT ?? '4173');
 if (!Number.isInteger(requestedPort) || requestedPort < 1024 || requestedPort > 65_535) throw new Error('FIPWAVE_E2E_PORT must be a valid unprivileged TCP port');
@@ -18,7 +19,7 @@ async function canonicalFallback() {
   return report;
 }
 
-test('production Quiet route performs verified RESET, arm, teardown, and re-arm without claiming acoustic success', async ({ page }) => {
+test('production Quiet route uses stable post-arm readiness while preserving the explanatory delivery copy', async ({ page }) => {
   const assets = new Map<string, number>();
   page.on('response', (response) => {
     if (response.url().includes('/codec-assets/')) assets.set(new URL(response.url()).pathname, response.status());
@@ -32,7 +33,11 @@ test('production Quiet route performs verified RESET, arm, teardown, and re-arm 
 
   await page.getByRole('button', { name: 'Arm modem' }).click();
   await expect(page.getByText('Audio preflight passed on this laptop.')).toBeVisible();
-  await expect(page.getByText('Bridge delivery: Audio settings accepted for epoch 1')).toBeVisible();
+  const bridgeDelivery = page.locator(audioSettingsAcceptedSelector(1));
+  await expect(bridgeDelivery).toBeVisible();
+  await expect(bridgeDelivery).toContainText('Bridge delivery: Audio settings accepted for epoch 1; acoustic session is not committed');
+  await expect(page.getByText('Local bridge ready · epoch 1', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Start Cyrinx qualification' })).toBeEnabled();
   await expect(page.getByRole('row', { name: 'Input-device sample rate 44100' })).toBeVisible();
   await expect(page.getByRole('row', { name: 'Input-device channels 2' })).toBeVisible();
   await expect(page.getByRole('row', { name: 'Codec capture PCM channels 1' })).toBeVisible();
