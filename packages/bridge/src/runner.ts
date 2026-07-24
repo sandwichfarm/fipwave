@@ -103,7 +103,15 @@ export function renderFipsConfig(config: DemoConfig): string {
     `    mtu: ${config.fips.linkMtu}`,
     '    queue_items: 32',
     `    queue_bytes: ${config.fips.linkMtu * 32}`,
-    'peers: []',
+    'peers:',
+    `  - npub: "${config.peer.publicKey}"`,
+    `    alias: "sound-${config.inputRole === 'a' ? 'b' : 'a'}"`,
+    '    addresses:',
+    '      - transport: sound',
+    `        addr: "sound-${config.inputRole === 'a' ? 'b' : 'a'}"`,
+    '    connect_policy: auto_connect',
+    '    auto_reconnect: true',
+    '    via_nostr: false',
     '',
   ].join('\n');
 }

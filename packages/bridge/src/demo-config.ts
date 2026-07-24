@@ -56,8 +56,10 @@ export interface PublicDemoConfig {
 
 /** Replace only these disposable demo identities; public projections never select nsecs. */
 const IDENTITIES: DemoIdentityTable = Object.freeze({
-  a: Object.freeze({ publicKey: 'npub1fipwavea000000000000000000000000000000000000000000000000000', nsec: '0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20' }),
-  b: Object.freeze({ publicKey: 'npub1fipwaveb000000000000000000000000000000000000000000000000000', nsec: '0202020202020202020202020202020202020202020202020202020202020202' }),
+  // Disposable demo public keys derived from the adjacent fixed secp256k1
+  // nsecs. They are real NIP-19 npubs, not display-only placeholders.
+  a: Object.freeze({ publicKey: 'npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m', nsec: '0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20' }),
+  b: Object.freeze({ publicKey: 'npub1f49ke5fkzqev4x7j46uajq92f4zan6kcpty5yvm5c3g6wf2dqanqn7qsy2', nsec: '0202020202020202020202020202020202020202020202020202020202020202' }),
 });
 
 const DEFAULTS = Object.freeze({

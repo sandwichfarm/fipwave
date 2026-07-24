@@ -36,6 +36,8 @@ describe('demo configuration authority', () => {
 
     expect(a.peer.publicKey).toBe(b.identity.publicKey);
     expect(b.peer.publicKey).toBe(a.identity.publicKey);
+    expect(a.identity.publicKey).toBe('npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m');
+    expect(b.identity.publicKey).toBe('npub1f49ke5fkzqev4x7j46uajq92f4zan6kcpty5yvm5c3g6wf2dqanqn7qsy2');
     expect(a).toMatchObject({
       bridge: { browserPort: expect.any(Number), fipsPort: expect.any(Number), fipsUrl: expect.stringMatching(/^ws:\/\/127\.0\.0\.1:/) },
       codecCapabilities: expect.arrayContaining(['quiet']),

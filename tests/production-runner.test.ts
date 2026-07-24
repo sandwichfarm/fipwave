@@ -168,6 +168,11 @@ describe('production runner', () => {
     expect(rendered).toContain('peer_addr: "sound-b"');
     expect(rendered).toContain('mtu: 1357');
     expect(rendered).toContain('nsec: "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"');
+    expect(rendered).toContain('npub: "npub1f49ke5fkzqev4x7j46uajq92f4zan6kcpty5yvm5c3g6wf2dqanqn7qsy2"');
+    expect(rendered).toContain('transport: sound');
+    expect(rendered).toContain('addr: "sound-b"');
+    expect(rendered).toContain('connect_policy: auto_connect');
+    expect(rendered).not.toContain('peers: []');
     expect(rendered).not.toContain('codec:');
   });
 
