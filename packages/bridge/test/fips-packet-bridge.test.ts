@@ -36,9 +36,13 @@ function packet(epoch: number, sequence: bigint, payload: Buffer): Buffer {
   return encodeFrame({ type: MessageType.FIPS_PACKET, epoch, sequence, payload });
 }
 
+function patternedPacket(): Buffer {
+  return Buffer.from(Array.from({ length: 1357 }, (_value, index) => index % 251));
+}
+
 describe('FIPS packet bridge', () => {
   it('round-trips opaque packets without PCM metadata and rejects malformed packet frames', () => {
-    const payload = Buffer.alloc(1357, (index) => index % 251);
+    const payload = patternedPacket();
     const encoded = packet(1, 9n, payload);
     const decoded = decodeFrame(encoded);
 
@@ -56,7 +60,7 @@ describe('FIPS packet bridge', () => {
     const bridge = await createBridge();
     const browser = await openEndpoint(bridge.port, 'browser');
     const fips = await openEndpoint(bridge.port, 'fips');
-    const payload = Buffer.alloc(1357, (index) => index % 251);
+    const payload = patternedPacket();
 
     const receivedByFips = once(fips, 'message');
     browser.send(packet(1, 1n, payload));

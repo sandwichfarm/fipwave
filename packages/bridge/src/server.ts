@@ -69,6 +69,8 @@ export interface BridgeState {
   epoch: number; rejectedFrames: number; overflowedQueues: string[]; discontinuities: number;
   queueCounts: Partial<Record<keyof typeof MessageType, number>> & Record<string, number>;
   stampedResults: Array<Record<string, unknown>>;
+  packetCounters: { browserToFips: number; fipsToBrowser: number };
+  evidenceClass: 'Loopback'; acousticReady: false; peerConnected: false; pingReady: false;
 }
 export interface BridgeServer {
   port: number; sendPcmPlayback(frame: Buffer): void; startCyrinx(): Promise<{ codec: 'cyrinx' | 'quiet'; reasonCode: string | null; deadlineAtMs: number }>; reset(): Promise<number>; close(): Promise<void>; state(): BridgeState;
@@ -245,7 +247,11 @@ interface BrowserConnectionState {
   receivedEpoch: number;
   highestReceivedSequence: bigint;
 }
+type PacketDirection = 'browser-to-fips' | 'fips-to-browser';
 function queueName(type: MessageType): string { return MessageType[type]; }
+function packetQueueName(direction: PacketDirection): 'FIPS_PACKET_TO_FIPS' | 'FIPS_PACKET_TO_BROWSER' {
+  return direction === 'browser-to-fips' ? 'FIPS_PACKET_TO_FIPS' : 'FIPS_PACKET_TO_BROWSER';
+}
 function acoustic(type: MessageType): boolean { return type === MessageType.PCM_CAPTURE || type === MessageType.PCM_PLAYBACK; }
 function p95(values: number[]): number {
   const ordered = [...values].sort((a, b) => a - b);
@@ -301,16 +307,23 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }); response.end('Not found');
   });
   const webSocketServer = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });
-  const clients = new Set<WebSocket>(); const queues = new Map<MessageType, Queue>();
-  const state: BridgeState = { epoch: 1, rejectedFrames: 0, overflowedQueues: [], discontinuities: 0, queueCounts: {}, stampedResults: [] };
+  const clients = new Set<WebSocket>(); const queues = new Map<MessageType, Queue>(); const packetQueues = new Map<PacketDirection, Queue>();
+  const state: BridgeState = {
+    epoch: 1, rejectedFrames: 0, overflowedQueues: [], discontinuities: 0, queueCounts: {}, stampedResults: [],
+    packetCounters: { browserToFips: 0, fipsToBrowser: 0 }, evidenceClass: 'Loopback', acousticReady: false, peerConnected: false, pingReady: false,
+  };
   let audio: BrowserAudio | undefined; let generation = 1; let writeTail: Promise<unknown> = Promise.resolve();
   let results = new Map<string, BrowserResult>(); let failureReasons = new Set<string>();
-  let owner: WebSocket | undefined; let epochClaimed = false; let reconnectAllowed = false; let reconnectRequiresReset = false;
+  let owner: WebSocket | undefined; let fipsOwner: WebSocket | undefined; let epochClaimed = false; let reconnectAllowed = false; let reconnectRequiresReset = false;
   let operationGeneration = 1; let operationAbort = new AbortController(); let settleAbort: AbortController | undefined; let shuttingDown = false;
   let cyrinxExpiryTimer: unknown;
   for (const type of [MessageType.PCM_CAPTURE, MessageType.PCM_PLAYBACK, MessageType.QUALIFICATION_CASE, MessageType.QUALIFICATION_RESULT, MessageType.ERROR, MessageType.RESET]) queues.set(type, { frames: [], bytes: 0, overflowed: false });
-  const refreshState = () => { for (const [type, queue] of queues) state.queueCounts[queueName(type)] = queue.frames.length; };
-  const clearQueues = () => { for (const queue of queues.values()) { queue.frames = []; queue.bytes = 0; queue.overflowed = false; } refreshState(); };
+  for (const direction of ['browser-to-fips', 'fips-to-browser'] as const) packetQueues.set(direction, { frames: [], bytes: 0, overflowed: false });
+  const refreshState = () => {
+    for (const [type, queue] of queues) state.queueCounts[queueName(type)] = queue.frames.length;
+    for (const [direction, queue] of packetQueues) state.queueCounts[packetQueueName(direction)] = queue.frames.length;
+  };
+  const clearQueues = () => { for (const queue of [...queues.values(), ...packetQueues.values()]) { queue.frames = []; queue.bytes = 0; queue.overflowed = false; } refreshState(); };
   const enqueue = (frame: FwavFrame): void => {
     const queue = queues.get(frame.type); if (!queue) return;
     const now = options.now?.() ?? Date.now();
@@ -324,6 +337,32 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       fail(`FWAV ${queueName(frame.type)} queue overflow`);
     }
     queue.frames.push({ frame, enqueuedAt: now }); queue.bytes += frame.payload.byteLength + HEADER_BYTES; refreshState();
+  };
+  const enqueuePacket = (direction: PacketDirection, frame: FwavFrame): void => {
+    const queue = packetQueues.get(direction)!;
+    const now = options.now?.() ?? Date.now();
+    while (queue.frames.length && now - queue.frames[0]!.enqueuedAt > MAX_QUEUE_AGE_MS) {
+      const expired = queue.frames.shift()!; queue.bytes -= expired.frame.payload.byteLength + HEADER_BYTES;
+    }
+    if (queue.bytes + frame.payload.byteLength + HEADER_BYTES > MAX_MESSAGE_BYTES) {
+      queue.overflowed = true;
+      state.overflowedQueues = [...new Set([...state.overflowedQueues, packetQueueName(direction)])];
+      fail(`FWAV ${packetQueueName(direction)} queue overflow`);
+    }
+    queue.frames.push({ frame, enqueuedAt: now }); queue.bytes += frame.payload.byteLength + HEADER_BYTES; refreshState();
+  };
+  const flushPacketQueue = (direction: PacketDirection): void => {
+    const target = direction === 'browser-to-fips' ? fipsOwner : owner;
+    if (!target || target.readyState !== target.OPEN) return;
+    const queue = packetQueues.get(direction)!;
+    while (queue.frames.length) {
+      const entry = queue.frames.shift()!;
+      queue.bytes -= entry.frame.payload.byteLength + HEADER_BYTES;
+      target.send(encodeFrame(entry.frame));
+      if (direction === 'browser-to-fips') state.packetCounters.browserToFips += 1;
+      else state.packetCounters.fipsToBrowser += 1;
+    }
+    refreshState();
   };
   const clock = (): number => options.now?.() ?? Date.now();
   const timer: CyrinxTimer = options.cyrinxTimer ?? {
@@ -887,6 +926,11 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
         lastSequence.value = -1n;
         return;
       }
+      if (frame.type === MessageType.FIPS_PACKET) {
+        enqueuePacket('browser-to-fips', frame);
+        flushPacketQueue('browser-to-fips');
+        return;
+      }
       if (frame.type === MessageType.PCM_CAPTURE && cyrinxSession?.codec === 'cyrinx') {
         await acceptCyrinxCapture(socket, encoded);
         return;
@@ -969,10 +1013,35 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   };
   server.on('upgrade', (request: IncomingMessage, socket, head) => {
     const port = (server.address() as import('node:net').AddressInfo | null)?.port; const route = new URL(request.url ?? '/', `http://${LOOPBACK_HOST}`).pathname;
-    if (!port || route !== '/bridge' || !isSameOriginLoopback(request.headers.origin, port)) { rejectUpgrade(socket); return; }
+    if (!port || !['/bridge', '/bridge/browser', '/bridge/fips'].includes(route) || !isSameOriginLoopback(request.headers.origin, port)) { rejectUpgrade(socket); return; }
     webSocketServer.handleUpgrade(request, socket, head, (webSocket) => webSocketServer.emit('connection', webSocket, request));
   });
-  webSocketServer.on('connection', (socket) => {
+  webSocketServer.on('connection', (socket, request) => {
+    const route = new URL(request.url ?? '/', `http://${LOOPBACK_HOST}`).pathname;
+    if (route === '/bridge/fips') {
+      if (fipsOwner?.readyState === socket.OPEN) { state.rejectedFrames += 1; socket.close(1008, 'one FIPS transport owns the local endpoint'); return; }
+      fipsOwner = socket; clients.add(socket);
+      const lastSequence = { value: -1n }; let processing = Promise.resolve();
+      flushPacketQueue('browser-to-fips');
+      socket.once('close', () => { clients.delete(socket); if (fipsOwner === socket) fipsOwner = undefined; });
+      socket.on('message', (rawData, isBinary) => {
+        processing = processing.then(() => {
+          try {
+            if (!isBinary) fail('binary_frames_required');
+            const frame = decodeFrame(asBuffer(rawData));
+            if (frame.type !== MessageType.FIPS_PACKET) fail('fips_endpoint_requires_fips_packet');
+            if (frame.epoch !== state.epoch || frame.sequence <= lastSequence.value) fail('stale_or_duplicate_frame');
+            lastSequence.value = frame.sequence;
+            enqueuePacket('fips-to-browser', frame);
+            flushPacketQueue('fips-to-browser');
+          } catch (error) {
+            state.rejectedFrames += 1;
+            socket.close(1008, error instanceof Error ? error.message : 'invalid_fwav_message');
+          }
+        });
+      });
+      return;
+    }
     if (owner?.readyState === socket.OPEN || epochClaimed && !reconnectAllowed) { state.rejectedFrames += 1; socket.close(1008, 'one browser tab owns each qualification epoch'); return; }
     const connection: BrowserConnectionState = {
       mustResetBeforeUse: epochClaimed && reconnectAllowed && reconnectRequiresReset,
@@ -982,6 +1051,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       highestReceivedSequence: -1n,
     };
     owner = socket; epochClaimed = true; reconnectAllowed = false; clients.add(socket);
+    flushPacketQueue('fips-to-browser');
     const lastSequence = { value: -1n }; let processing = Promise.resolve();
     void expireCyrinx().then((expired) => {
       if (expired) return;
@@ -1025,6 +1095,6 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       await writeTail;
       await closeServer(server, webSocketServer);
     },
-    state: () => ({ ...state, queueCounts: { ...state.queueCounts }, overflowedQueues: [...state.overflowedQueues], stampedResults: state.stampedResults.map((result) => ({ ...result })) }),
+    state: () => ({ ...state, packetCounters: { ...state.packetCounters }, queueCounts: { ...state.queueCounts }, overflowedQueues: [...state.overflowedQueues], stampedResults: state.stampedResults.map((result) => ({ ...result })) }),
   };
 }

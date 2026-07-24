@@ -18,6 +18,8 @@ export enum MessageType {
   QUALIFICATION_RESULT = 6,
   ERROR = 7,
   RESET = 8,
+  /** One complete opaque FIPS transport packet; codec and waveform-neutral. */
+  FIPS_PACKET = 9,
 }
 
 export enum PcmEncoding {
@@ -75,7 +77,7 @@ function fail(message: string): never {
 }
 
 function isMessageType(value: number): value is MessageType {
-  return value >= MessageType.HELLO && value <= MessageType.RESET;
+  return value >= MessageType.HELLO && value <= MessageType.FIPS_PACKET;
 }
 
 function validateInteger(value: number, name: string, maximum: number): void {
