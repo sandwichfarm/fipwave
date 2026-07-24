@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: Qualify the Demo Substrate
 status: executing
-stopped_at: Completed 02-05-PLAN.md
-last_updated: "2026-07-24T02:20:10.585Z"
+stopped_at: Completed 02-06-PLAN.md
+last_updated: "2026-07-24T02:32:34.406Z"
 last_activity: 2026-07-23
 last_activity_desc: Plan 01-10 physical checkpoint reached
 progress:
   total_phases: 2
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 17
-  completed_plans: 15
+  completed_plans: 16
 ---
 
 # Project State
@@ -32,7 +32,7 @@ Plan: 10 of 10
 Status: Awaiting blocking-human physical qualification
 Last activity: 2026-07-23 — Plan 01-10 physical checkpoint reached
 
-Progress: [█████████░] 88%
+Progress: [█████████░] 94%
 
 ## Performance Metrics
 
@@ -72,6 +72,7 @@ Progress: [█████████░] 88%
 | Phase 02 P04 | 8min | 2 tasks | 3 files |
 | Phase 02 P07 | 11min | 2 tasks | 5 files |
 | Phase 02 P05 | 22min | 2 tasks | 9 files |
+| Phase 02 P06 | 10min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -106,6 +107,8 @@ Recent decisions affecting current work:
 - [Phase ?]: A local sound worker being Up never authorizes packet traffic until the current browser epoch is armed.
 - [Phase ?]: FIPS shares only the bridge service network namespace and never publishes its packet endpoint.
 - [Phase ?]: The browser runner stays bound to container loopback; an in-container forwarder makes its loopback-only host publication reachable on Docker Desktop.
+- [Phase ?]: The browser boundary accepts and emits only complete opaque FIPS_PACKET bytes for an armed epoch/generation.
+- [Phase ?]: The UI reports local bridge/FIPS transport facts only and never infers acoustic-peer or ping readiness.
 
 ### Pending Todos
 
@@ -145,6 +148,6 @@ hardware checkpoint remains explicit.
 
 ## Session Continuity
 
-Last session: 2026-07-24T02:20:10.576Z
-Stopped at: Completed 02-05-PLAN.md
+Last session: 2026-07-24T02:32:34.398Z
+Stopped at: Completed 02-06-PLAN.md
 Resume file: None
