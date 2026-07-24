@@ -46,17 +46,17 @@ Requirements for the Sovereign Engineering demo-day proof of concept.
 
 ### Acoustic Link
 
-- [ ] **LINK-01**: Every acoustic data unit identifies its protocol version,
+- [x] **LINK-01**: Every acoustic data unit identifies its protocol version,
       packet, fragment, type, declared length, and integrity value.
 
-- [ ] **LINK-02**: The sound link rejects malformed or corrupt acoustic units
+- [x] **LINK-02**: The sound link rejects malformed or corrupt acoustic units
       before any bytes are delivered to FIPS.
 
-- [ ] **LINK-03**: The sound link fragments and reassembles an opaque FIPS
+- [x] **LINK-03**: The sound link fragments and reassembles an opaque FIPS
       transport packet of at least 1357 bytes using codec-sized blocks entirely
       below the FIPS boundary.
 
-- [ ] **LINK-04**: Reassembly has explicit limits for packet size, fragment
+- [x] **LINK-04**: Reassembly has explicit limits for packet size, fragment
       count, memory, and expiry and never delivers a partial packet.
 
 - [ ] **LINK-05**: Duplicate acoustic data or acknowledgement units do not cause
@@ -193,7 +193,7 @@ Requirements for the Sovereign Engineering demo-day proof of concept.
       trigger bounded retry, recalibration, fallback, or an actionable terminal
       error without an infinite invisible loop.
 
-- [ ] **NEG-07**: Frequency changes are represented only by mutually supported
+- [x] **NEG-07**: Frequency changes are represented only by mutually supported
       versioned modem profiles that really encode and decode the same waveform;
       the pinned Cyrinx profile remains the fallback.
 
@@ -288,10 +288,10 @@ Roadmap phase mapping is populated during roadmap creation.
 | CODEC-02 | Phase 1 | Complete |
 | CODEC-03 | Phase 1 | Complete |
 | CODEC-04 | Phase 1 | Complete |
-| LINK-01 | Phase 3 | Pending |
-| LINK-02 | Phase 3 | Pending |
-| LINK-03 | Phase 3 | Pending |
-| LINK-04 | Phase 3 | Pending |
+| LINK-01 | Phase 3 | Complete |
+| LINK-02 | Phase 3 | Complete |
+| LINK-03 | Phase 3 | Complete |
+| LINK-04 | Phase 3 | Complete |
 | LINK-05 | Phase 3 | Pending |
 | LINK-06 | Phase 3 | Pending |
 | LINK-07 | Phase 3 | Pending |
@@ -327,7 +327,7 @@ Roadmap phase mapping is populated during roadmap creation.
 | NEG-04 | Phase 3 | Pending |
 | NEG-05 | Phase 3 | Pending |
 | NEG-06 | Phase 3 | Pending |
-| NEG-07 | Phase 3 | Pending |
+| NEG-07 | Phase 3 | Complete |
 | UI-01 | Phase 5 | Pending |
 | UI-02 | Phase 5 | Pending |
 | UI-03 | Phase 5 | Pending |

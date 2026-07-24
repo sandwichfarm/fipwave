@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 03
 current_phase_name: negotiate-and-deliver-reliable-acoustic-packets
 status: executing
-stopped_at: Completed 03-01-PLAN.md
-last_updated: "2026-07-24T05:49:16.704Z"
+stopped_at: Completed 03-03-PLAN.md
+last_updated: "2026-07-24T05:58:11.426Z"
 last_activity: 2026-07-24
 last_activity_desc: Phase 03 execution started
 progress:
   total_phases: 3
   completed_phases: 1
   total_plans: 24
-  completed_plans: 17
+  completed_plans: 18
 ---
 
 # Project State
@@ -32,7 +32,7 @@ Plan: 2 of 7
 Status: Ready to execute
 Last activity: 2026-07-24 — Phase 03 execution started
 
-Progress: [███████░░░] 71%
+Progress: [████████░░] 75%
 
 ## Performance Metrics
 
@@ -74,6 +74,7 @@ Progress: [███████░░░] 71%
 | Phase 02 P05 | 22min | 2 tasks | 9 files |
 | Phase 02 P06 | 10min | 3 tasks | 8 files |
 | Phase 03 P01 | 35m | 2 tasks | 9 files |
+| Phase 03 P03 | 8m | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -122,6 +123,8 @@ Recent decisions affecting current work:
 - [Phase ?]: The UI reports local bridge/FIPS transport facts only and never infers acoustic-peer or ping readiness.
 - [Phase ?]: TrafficClass originates at semantic callers and is never inferred from opaque FIPS packet bytes.
 - [Phase ?]: FWAV byte 6 carries validated local traffic-class metadata while legacy sends default to Ordinary.
+- [Phase ?]: FAS1 is a strict 36-byte little-endian CRC-32C envelope with a 217-byte body and 1357-byte complete-packet cap.
+- [Phase ?]: Only exact versioned executable modem profile IDs may be selected; scalar frequency-like settings reject.
 
 ### Pending Todos
 
@@ -161,6 +164,6 @@ hardware checkpoint remains explicit.
 
 ## Session Continuity
 
-Last session: 2026-07-24T05:49:16.695Z
-Stopped at: Completed 03-01-PLAN.md
+Last session: 2026-07-24T05:58:11.417Z
+Stopped at: Completed 03-03-PLAN.md
 Resume file: None
