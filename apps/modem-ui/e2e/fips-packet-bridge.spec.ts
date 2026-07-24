@@ -19,16 +19,6 @@ function frame(epoch: number, sequence: bigint, payload: number[]): Buffer {
   return output;
 }
 function opened(socket: WebSocket): Promise<void> { return new Promise((resolve, reject) => { socket.once('open', () => resolve()); socket.once('error', reject); }); }
-function nextBinary(socket: WebSocket): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    socket.once('message', (value, binary) => {
-      if (!binary) return reject(new Error('expected binary FIPS packet'));
-      resolve(Buffer.isBuffer(value) ? Buffer.from(value) : Array.isArray(value) ? Buffer.concat(value) : Buffer.from(value));
-    });
-    socket.once('error', reject);
-  });
-}
-
 let runner: Awaited<ReturnType<typeof startProductionRunner>>;
 let reportDirectory = '';
 test.beforeAll(async () => {
@@ -38,7 +28,7 @@ test.beforeAll(async () => {
 });
 test.afterAll(async () => { await runner.close(); await rm(reportDirectory, { recursive: true, force: true }); });
 
-test('armed production browser exchanges complete FIPS bytes with the real local WebSocket bridge', async ({ page }) => {
+test('audio preflight in the production browser cannot bypass acoustic session readiness', async ({ page }) => {
   await page.addInitScript(() => {
     const track = { label: 'Test microphone', getSettings: () => ({ sampleRate: 48_000, channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false }), stop: () => undefined };
     Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => ({ getAudioTracks: () => [track], getTracks: () => [track] }) } });
@@ -59,13 +49,15 @@ test('armed production browser exchanges complete FIPS bytes with the real local
 
   await page.getByRole('button', { name: 'Arm modem' }).click();
   await expect(page.getByText('Audio preflight passed on this laptop.')).toBeVisible();
+  await expect(page.getByText(/acoustic session is not committed/)).toBeVisible();
   const inbound = [0, 1, 2, 255];
   fips.send(frame(1, 0n, inbound));
-  await expect.poll(() => page.evaluate(() => window.__fipsPacketDeliveries)).toEqual([inbound]);
+  await page.waitForTimeout(100);
+  await expect.poll(() => page.evaluate(() => window.__fipsPacketDeliveries)).toEqual([]);
   const outbound = [9, 8, 7];
-  const bridgeFrame = nextBinary(fips);
   await page.evaluate((payload) => window.dispatchEvent(new CustomEvent('fips-packet-send', { detail: new Uint8Array(payload) })), outbound);
-  expect([...await bridgeFrame]).toEqual([...frame(1, 1n, outbound)]);
+  await page.waitForTimeout(100);
+  await expect.poll(() => page.evaluate(() => window.__fipsPacketDeliveries)).toEqual([]);
 
   // Reset re-arms on a new bridge epoch. A delayed frame from the prior epoch
   // must remain harmless even after the new browser lifecycle becomes ready.
@@ -73,6 +65,6 @@ test('armed production browser exchanges complete FIPS bytes with the real local
   await expect(page.getByText('Audio preflight passed on this laptop.')).toBeVisible();
   fips.send(frame(1, 2n, [0xbb]));
   await page.waitForTimeout(100);
-  await expect.poll(() => page.evaluate(() => window.__fipsPacketDeliveries)).toEqual([inbound]);
+  await expect.poll(() => page.evaluate(() => window.__fipsPacketDeliveries)).toEqual([]);
   fips.close();
 });
