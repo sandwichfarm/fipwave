@@ -152,7 +152,18 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
     fallback: options.qualificationTrace?.fallback ?? { codecId: 'quiet', state: 'available', reasonCode: null },
     cyrinx: { stage: 'idle', coldReceivePassed: false },
   };
-  const config = Object.freeze({ machineId: options.machineId, role: demoConfig.role, reportTarget: options.report, tunEvidence: options.tunEvidence, tunEvidenceSource: tunEvidence.source, evidenceMode, evidenceClass: evidenceMode, buildCommit: build.commit, codec: { ...QUIET_CODEC }, qualification } satisfies RunnerQualificationConfig);
+  const calibrationCandidates = demoConfig.calibrationCandidates.map((candidate) => ({ id: candidate.id, profileId: candidate.profileId, payloadBytes: candidate.payloadBytes, repetition: candidate.repetition, guardMs: candidate.guardMs, playbackGain: candidate.playbackGain, ackTimeoutMs: candidate.ackTimeoutMs }));
+  const config = Object.freeze({
+    machineId: options.machineId, role: demoConfig.role, reportTarget: options.report, tunEvidence: options.tunEvidence, tunEvidenceSource: tunEvidence.source, evidenceMode, evidenceClass: evidenceMode, buildCommit: build.commit, codec: { ...QUIET_CODEC }, qualification,
+    // The browser receives this exact public projection of demo-config.  It
+    // cannot invent, reorder, or truncate acoustic candidates at runtime.
+    acoustic: {
+      profiles: ['quiet-audible-7k-v1'] as ['quiet-audible-7k-v1'],
+      ranges: { minPayloadBytes: Math.min(...calibrationCandidates.map((candidate) => candidate.payloadBytes)), maxPayloadBytes: Math.max(...calibrationCandidates.map((candidate) => candidate.payloadBytes)) },
+      candidates: calibrationCandidates,
+      calibration: { ...demoConfig.acoustic.calibration },
+    },
+  } satisfies RunnerQualificationConfig);
   const codecAssetDir = options.codecAssetDir ?? path.join(PROJECT_ROOT, '.artifacts', 'codecs');
   const codecAssets = await verifiedCodecAssets(codecAssetDir, options.codecAssets ?? await loadCodecAssets());
   const cyrinxExecutable = path.join(PROJECT_ROOT, '.artifacts', 'build', 'cyrinx', 'cyrinx_batch');

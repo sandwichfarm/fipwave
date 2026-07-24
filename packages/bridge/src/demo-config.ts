@@ -25,7 +25,7 @@ interface BridgeConfig {
 interface RetryConfig { readonly maxAttempts: number; readonly minDelayMs: number; readonly maxDelayMs: number; }
 interface HeartbeatConfig { readonly intervalMs: number; readonly deadLinkTimeoutMs: number; }
 interface AudioDefaults { readonly sampleRate: 48_000; readonly channels: 1; readonly echoCancellation: false; readonly noiseSuppression: false; readonly autoGainControl: false; }
-interface CalibrationCandidate { readonly id: string; readonly profileId: 'quiet-audible-7k-v1'; readonly codec: 'quiet'; readonly profile: 'audible-7k-channel-0'; readonly payloadBytes: number; readonly repetition: 1; readonly guardMs: 750; readonly playbackGain: number; }
+interface CalibrationCandidate { readonly id: string; readonly profileId: 'quiet-audible-7k-v1'; readonly codec: 'quiet'; readonly profile: 'audible-7k-channel-0'; readonly payloadBytes: number; readonly repetition: 1; readonly guardMs: 750; readonly playbackGain: number; readonly ackTimeoutMs: 4_000; }
 interface AcousticConfig {
   readonly protocol: Readonly<{ maximumBodyBytes: 217; maximumPacketBytes: 1357; maxFragments: 16 }>;
   readonly arq: Readonly<{ windowSize: 4; maxAttempts: 3; maxQueuedPackets: 4; deliveredIdHistory: 32 }>;
@@ -74,9 +74,9 @@ const DEFAULTS = Object.freeze({
   codecCapabilities: Object.freeze(['quiet'] as const),
   audioDefaults: Object.freeze({ sampleRate: 48_000 as const, channels: 1 as const, echoCancellation: false as const, noiseSuppression: false as const, autoGainControl: false as const }),
   calibrationCandidates: Object.freeze([
-    Object.freeze({ id: 'quiet-bootstrap-96-v1', profileId: 'quiet-audible-7k-v1' as const, codec: 'quiet' as const, profile: 'audible-7k-channel-0' as const, payloadBytes: 96, repetition: 1 as const, guardMs: 750 as const, playbackGain: 1 }),
-    Object.freeze({ id: 'quiet-full-frame-v1', profileId: 'quiet-audible-7k-v1' as const, codec: 'quiet' as const, profile: 'audible-7k-channel-0' as const, payloadBytes: 217, repetition: 1 as const, guardMs: 750 as const, playbackGain: 1 }),
-    Object.freeze({ id: 'quiet-bootstrap-gain-2-v1', profileId: 'quiet-audible-7k-v1' as const, codec: 'quiet' as const, profile: 'audible-7k-channel-0' as const, payloadBytes: 96, repetition: 1 as const, guardMs: 750 as const, playbackGain: 2 }),
+    Object.freeze({ id: 'quiet-bootstrap-96-v1', profileId: 'quiet-audible-7k-v1' as const, codec: 'quiet' as const, profile: 'audible-7k-channel-0' as const, payloadBytes: 96, repetition: 1 as const, guardMs: 750 as const, playbackGain: 1, ackTimeoutMs: 4_000 as const }),
+    Object.freeze({ id: 'quiet-full-frame-v1', profileId: 'quiet-audible-7k-v1' as const, codec: 'quiet' as const, profile: 'audible-7k-channel-0' as const, payloadBytes: 217, repetition: 1 as const, guardMs: 750 as const, playbackGain: 1, ackTimeoutMs: 4_000 as const }),
+    Object.freeze({ id: 'quiet-bootstrap-gain-2-v1', profileId: 'quiet-audible-7k-v1' as const, codec: 'quiet' as const, profile: 'audible-7k-channel-0' as const, payloadBytes: 96, repetition: 1 as const, guardMs: 750 as const, playbackGain: 2, ackTimeoutMs: 4_000 as const }),
   ]),
   acoustic: Object.freeze({ protocol: Object.freeze({ maximumBodyBytes: 217 as const, maximumPacketBytes: 1_357 as const, maxFragments: 16 as const }), arq: Object.freeze({ windowSize: 4 as const, maxAttempts: 3 as const, maxQueuedPackets: 4 as const, deliveredIdHistory: 32 as const }), calibration: Object.freeze({ maxCandidates: 3 as const, probesPerDirection: 4 as const, deadlineMs: 120_000 as const, maximumPlaybackGain: 2 as const }) }),
   retries: Object.freeze({ maxAttempts: 3, minDelayMs: 500, maxDelayMs: 2_000 }),

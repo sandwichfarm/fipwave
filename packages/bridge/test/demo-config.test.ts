@@ -38,6 +38,11 @@ describe('demo configuration authority', () => {
     expect(b.peer.publicKey).toBe(a.identity.publicKey);
     expect(a.calibrationCandidates).toEqual(b.calibrationCandidates);
     expect(a.calibrationCandidates.map((candidate) => candidate.profileId)).toEqual(['quiet-audible-7k-v1', 'quiet-audible-7k-v1', 'quiet-audible-7k-v1']);
+    expect(a.calibrationCandidates.map((candidate) => ({ id: candidate.id, payloadBytes: candidate.payloadBytes, playbackGain: candidate.playbackGain, ackTimeoutMs: candidate.ackTimeoutMs }))).toEqual([
+      { id: 'quiet-bootstrap-96-v1', payloadBytes: 96, playbackGain: 1, ackTimeoutMs: 4_000 },
+      { id: 'quiet-full-frame-v1', payloadBytes: 217, playbackGain: 1, ackTimeoutMs: 4_000 },
+      { id: 'quiet-bootstrap-gain-2-v1', payloadBytes: 96, playbackGain: 2, ackTimeoutMs: 4_000 },
+    ]);
     expect(a.identity.publicKey).toBe('npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m');
     expect(b.identity.publicKey).toBe('npub1f49ke5fkzqev4x7j46uajq92f4zan6kcpty5yvm5c3g6wf2dqanqn7qsy2');
     expect(a).toMatchObject({

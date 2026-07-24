@@ -18,6 +18,12 @@ export interface RunnerConfig {
   tunEvidence: string;
   evidenceMode: EvidenceClass;
   evidenceClass: EvidenceClass;
+  acoustic: Readonly<{
+    profiles: readonly ['quiet-audible-7k-v1'];
+    ranges: Readonly<{ minPayloadBytes: number; maxPayloadBytes: number }>;
+    candidates: readonly Readonly<{ id: string; profileId: 'quiet-audible-7k-v1'; payloadBytes: number; repetition: number; guardMs: number; playbackGain: number; ackTimeoutMs: number }>[];
+    calibration: Readonly<{ maxCandidates: number; probesPerDirection: number; deadlineMs: number; maximumPlaybackGain: number }>;
+  }>;
 }
 
 export interface AppliedQuietSettings {
@@ -80,8 +86,36 @@ export async function fetchRunnerConfig(): Promise<Readonly<RunnerConfig>> {
   if (!response.ok) throw new Error('runner qualification configuration is unavailable');
   const value = await response.json() as Partial<RunnerConfig>;
   const evidenceClass = value.evidenceClass;
-  if (!value.machineId || (value.role !== 'A' && value.role !== 'B') || !value.reportTarget || !value.tunEvidence || !evidenceClass || !['Fixture', 'Loopback', 'Open air'].includes(evidenceClass) || value.evidenceMode !== evidenceClass) throw new Error('runner qualification configuration is invalid');
-  return Object.freeze({ machineId: value.machineId, role: value.role, reportTarget: value.reportTarget, tunEvidence: value.tunEvidence, evidenceMode: evidenceClass, evidenceClass });
+  const acoustic = value.acoustic;
+  const integerBetween = (input: unknown, minimum: number, maximum: number): input is number => Number.isInteger(input) && typeof input === 'number' && input >= minimum && input <= maximum;
+  const exactRecord = (input: unknown, keys: readonly string[]): input is Record<string, unknown> => !!input && typeof input === 'object' && !Array.isArray(input) && Object.keys(input).length === keys.length && keys.every((key) => key in input);
+  const validCandidate = (candidate: unknown): candidate is RunnerConfig['acoustic']['candidates'][number] => {
+    if (!exactRecord(candidate, ['id', 'profileId', 'payloadBytes', 'repetition', 'guardMs', 'playbackGain', 'ackTimeoutMs'])) return false;
+    const record = candidate;
+    return typeof record.id === 'string' && /^[a-z0-9][a-z0-9-]{2,63}$/.test(record.id)
+      && record.profileId === 'quiet-audible-7k-v1'
+      && integerBetween(record.payloadBytes, 96, 217)
+      && record.repetition === 1
+      && integerBetween(record.guardMs, 1, 5_000)
+      && (record.playbackGain === 1 || record.playbackGain === 2)
+      && integerBetween(record.ackTimeoutMs, 4_000, 15_000);
+  };
+  const validAcoustic = exactRecord(acoustic, ['profiles', 'ranges', 'candidates', 'calibration']) && (() => {
+    const record = acoustic;
+    const ranges = record.ranges; const calibration = record.calibration; const candidates = record.candidates;
+    if (!exactRecord(ranges, ['minPayloadBytes', 'maxPayloadBytes']) || !exactRecord(calibration, ['maxCandidates', 'probesPerDirection', 'deadlineMs', 'maximumPlaybackGain']) || !Array.isArray(candidates)) return false;
+    const minPayloadBytes = ranges.minPayloadBytes; const maxPayloadBytes = ranges.maxPayloadBytes;
+    return Array.isArray(record.profiles) && record.profiles.length === 1 && record.profiles[0] === 'quiet-audible-7k-v1'
+      && integerBetween(minPayloadBytes, 96, 217) && integerBetween(maxPayloadBytes, minPayloadBytes, 217)
+      && Array.isArray(candidates) && candidates.length >= 1 && candidates.length <= 3 && candidates.every(validCandidate)
+      && new Set(candidates.map((candidate) => candidate.id)).size === candidates.length
+      && integerBetween(calibration.maxCandidates, candidates.length, candidates.length)
+      && integerBetween(calibration.probesPerDirection, 1, 4)
+      && integerBetween(calibration.deadlineMs, 1, 120_000)
+      && calibration.maximumPlaybackGain === 2;
+  })();
+  if (!value.machineId || (value.role !== 'A' && value.role !== 'B') || !value.reportTarget || !value.tunEvidence || !evidenceClass || !['Fixture', 'Loopback', 'Open air'].includes(evidenceClass) || value.evidenceMode !== evidenceClass || !validAcoustic) throw new Error('runner qualification configuration is invalid');
+  return Object.freeze({ machineId: value.machineId, role: value.role, reportTarget: value.reportTarget, tunEvidence: value.tunEvidence, evidenceMode: evidenceClass, evidenceClass, acoustic: Object.freeze({ profiles: ['quiet-audible-7k-v1'] as ['quiet-audible-7k-v1'], ranges: Object.freeze({ ...(acoustic as RunnerConfig['acoustic']).ranges }), candidates: Object.freeze((acoustic as RunnerConfig['acoustic']).candidates.map((candidate) => Object.freeze({ ...candidate }))), calibration: Object.freeze({ ...(acoustic as RunnerConfig['acoustic']).calibration }) }) });
 }
 
 export function directionForRole(role: Role): LiteralDirection { return role === 'A' ? 'A → B' : 'B → A'; }

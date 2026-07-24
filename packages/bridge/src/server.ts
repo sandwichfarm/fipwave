@@ -48,6 +48,12 @@ export interface QualificationReport {
   frame: { messageType: 'AUDIO_SETTINGS'; epoch: number; sequence: string; payloadBytes: number };
 }
 export interface ParsedAudioSettingsFrame { epoch: number; sequence: bigint; payload: Buffer; }
+export interface RunnerAcousticCalibration {
+  profiles: readonly ['quiet-audible-7k-v1'];
+  ranges: Readonly<{ minPayloadBytes: number; maxPayloadBytes: number }>;
+  candidates: readonly Readonly<{ id: string; profileId: 'quiet-audible-7k-v1'; payloadBytes: number; repetition: number; guardMs: number; playbackGain: number; ackTimeoutMs: number }>[];
+  calibration: Readonly<{ maxCandidates: number; probesPerDirection: number; deadlineMs: number; maximumPlaybackGain: number }>;
+}
 export interface RunnerQualificationConfig {
   machineId: string;
   role: 'A' | 'B';
@@ -58,6 +64,7 @@ export interface RunnerQualificationConfig {
   evidenceClass: 'Fixture' | 'Loopback' | 'Open air';
   buildCommit: string;
   codec: MachineReport['codec'];
+  acoustic: RunnerAcousticCalibration;
   qualification: NonNullable<MachineReport['qualification']>;
 }
 export interface RunnerReportAuthority {
@@ -150,6 +157,12 @@ function immutableConfig(config: RunnerQualificationConfig): RunnerQualification
   return Object.freeze({
     ...config,
     codec: Object.freeze({ ...config.codec }),
+    acoustic: Object.freeze({
+      profiles: [...config.acoustic.profiles] as ['quiet-audible-7k-v1'],
+      ranges: Object.freeze({ ...config.acoustic.ranges }),
+      candidates: Object.freeze(config.acoustic.candidates.map((candidate) => Object.freeze({ ...candidate }))),
+      calibration: Object.freeze({ ...config.acoustic.calibration }),
+    }),
     qualification: Object.freeze({
       ...config.qualification,
       deadline: Object.freeze({ ...config.qualification.deadline }),

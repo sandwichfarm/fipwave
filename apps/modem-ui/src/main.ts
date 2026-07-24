@@ -194,9 +194,11 @@ function configureAcousticSession(config: Readonly<RunnerConfig>): void {
   const session = new AcousticSession({
     role: config.role, identity: config.machineId, expectedPeer: config.role === 'A' ? 'fipwave-b' : 'fipwave-a', modem,
     clock: { now: () => Date.now() }, timers: { setTimeout: (callback, delay) => window.setTimeout(callback, delay) as unknown as ReturnType<typeof setTimeout>, clearTimeout: (handle) => window.clearTimeout(handle as unknown as number) },
-    nonce: () => crypto.getRandomValues(new Uint8Array(16)), profiles: ['quiet-audible-7k-v1'], ranges: { minPayloadBytes: 96, maxPayloadBytes: 217 },
-    candidates: [{ id: 'quiet-audible-7k-v1', profileId: 'quiet-audible-7k-v1', payloadBytes: 96, repetition: 1, guardMs: 750, playbackGain: Math.min(2, requestedPlaybackGain()), ackTimeoutMs: 4_000 }],
-    calibration: { probesPerDirection: 1, maxCandidates: 1, deadlineMs: 30_000 },
+    nonce: () => crypto.getRandomValues(new Uint8Array(16)), profiles: config.acoustic.profiles, ranges: config.acoustic.ranges,
+    // Preserve the exact runner allowlist and order.  Warm-start selection is
+    // performed by the session only after literal A→B then B→A observations.
+    candidates: config.acoustic.candidates.map((candidate) => ({ ...candidate })),
+    calibration: { ...config.acoustic.calibration },
     measureProbe: (probe) => receivedProbes.get(probeReceiptKey(
       acousticSession?.snapshot.sessionId ?? 0n,
       probe.direction === 'AtoB' ? 1 : 2,
