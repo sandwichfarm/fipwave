@@ -954,6 +954,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sound_config_is_strict_and_codec_neutral() {
+        let valid: SoundConfig = serde_yaml::from_str(
+            "bridge_url: ws://127.0.0.1:4310/bridge/fips\npeer_addr: sound-a\nmtu: 1357\nqueue_items: 8\nqueue_bytes: 10856\n",
+        )
+        .expect("loopback sound configuration");
+        assert_eq!(valid.mtu(), 1357);
+        assert!(valid.validate().is_ok());
+
+        for invalid in [
+            "bridge_url: ws://example.com/bridge/fips\npeer_addr: sound-a\n",
+            "bridge_url: ws://127.0.0.1:4310/bridge/fips\npeer_addr: 198.51.100.2:9\n",
+            "bridge_url: ws://127.0.0.1:4310/bridge/fips\npeer_addr: sound-a\nmtu: 1356\n",
+            "bridge_url: ws://127.0.0.1:4310/bridge/fips\npeer_addr: sound-a\ncodec: cyrinx\n",
+        ] {
+            assert!(serde_yaml::from_str::<SoundConfig>(invalid)
+                .ok()
+                .is_some_and(|config| config.validate().is_err()));
+        }
+    }
+
+    #[test]
     fn parse_external_addr_accepts_bare_ipv4_with_appended_bind_port() {
         let sa = parse_external_advert_addr("198.51.100.1", 2121).unwrap();
         assert_eq!(sa.to_string(), "198.51.100.1:2121");
