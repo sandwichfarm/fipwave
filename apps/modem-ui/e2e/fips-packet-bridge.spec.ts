@@ -1,49 +1,50 @@
+import { execFileSync } from 'node:child_process';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { expect, test } from '@playwright/test';
+import WebSocket from 'ws';
 
-function packet(epoch: number, payload: number[]): number[] {
-  const bytes = new Uint8Array(32 + payload.length); const view = new DataView(bytes.buffer);
-  bytes.set([0x46, 0x57, 0x41, 0x56]); view.setUint8(4, 1); view.setUint8(5, 9); view.setUint32(8, payload.length, true); view.setUint32(12, epoch, true); view.setBigUint64(16, 1n, true); bytes.set(payload, 32);
-  return [...bytes];
+import { startProductionRunner } from '../../../packages/bridge/src/runner.js';
+
+function frame(epoch: number, sequence: bigint, payload: number[]): Buffer {
+  const output = Buffer.alloc(32 + payload.length);
+  output.write('FWAV'); output.writeUInt8(1, 4); output.writeUInt8(9, 5); output.writeUInt32LE(payload.length, 8); output.writeUInt32LE(epoch, 12); output.writeBigUInt64LE(sequence, 16); Buffer.from(payload).copy(output, 32);
+  return output;
 }
+function opened(socket: WebSocket): Promise<void> { return new Promise((resolve, reject) => { socket.once('open', () => resolve()); socket.once('error', reject); }); }
+function nextBinary(socket: WebSocket): Promise<Buffer> { return new Promise((resolve, reject) => { socket.once('message', (value, binary) => binary ? resolve(Buffer.from(value)) : reject(new Error('expected binary FIPS packet'))); socket.once('error', reject); }); }
 
-test('armed browser packet boundary preserves complete bytes and rejects pre-arm traffic', async ({ page }) => {
+let runner: Awaited<ReturnType<typeof startProductionRunner>>;
+let reportDirectory = '';
+test.beforeAll(async () => {
+  execFileSync('npm', ['run', 'build'], { stdio: 'pipe' });
+  reportDirectory = await mkdtemp(path.join(tmpdir(), 'fipwave-browser-'));
+  runner = await startProductionRunner({ machineId: 'fipwave-a', role: 'A', port: 0, report: path.join(reportDirectory, 'report.json'), tunEvidence: 'none', evidenceMode: 'Loopback', uiDir: path.resolve('dist/modem-ui') });
+});
+test.afterAll(async () => { await runner.close(); await rm(reportDirectory, { recursive: true, force: true }); });
+
+test('armed production browser exchanges complete FIPS bytes with the real local WebSocket bridge', async ({ page }) => {
   await page.addInitScript(() => {
     const track = { label: 'Test microphone', getSettings: () => ({ sampleRate: 48_000, channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false }), stop: () => undefined };
     Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => ({ getAudioTracks: () => [track], getTracks: () => [track] }) } });
     class FakeAudioContext { state = 'suspended'; sampleRate = 48_000; destination = {}; audioWorklet = { addModule: async () => undefined }; async resume() { this.state = 'running'; } async close() { this.state = 'closed'; } createMediaStreamSource() { return { connect: () => undefined }; } createBuffer() { return { copyToChannel: () => undefined }; } createBufferSource() { return { connect: () => undefined, addEventListener: () => undefined, start: () => undefined, stop: () => undefined }; } }
     class FakeWorklet { port = { onmessage: null }; connect() { return {}; } disconnect() {} }
-    class FakeWebSocket extends EventTarget {
-      static instance: FakeWebSocket | undefined; binaryType = 'arraybuffer'; sent: ArrayBuffer[] = [];
-      constructor() { super(); FakeWebSocket.instance = this; queueMicrotask(() => this.dispatchEvent(new Event('open'))); }
-      send(value: ArrayBuffer) { this.sent.push(value); if (new DataView(value).getUint8(5) === 2) queueMicrotask(() => this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ reportPath: '/tmp/loopback.json' }) }))); }
-      close() {}
-    }
-    Object.assign(window, { AudioContext: FakeAudioContext, AudioWorkletNode: FakeWorklet, WebSocket: FakeWebSocket, __fipsTestSocket: () => FakeWebSocket.instance });
+    Object.assign(window, { AudioContext: FakeAudioContext, AudioWorkletNode: FakeWorklet });
   });
-  await page.route('**/qualification-config', (route) => route.fulfill({ json: { machineId: 'fipwave-a', role: 'A', reportTarget: '/tmp/report.json', tunEvidence: 'none', evidenceMode: 'Loopback', evidenceClass: 'Loopback' } }));
-  await page.goto('http://127.0.0.1:5173/');
-
-  const beforeArm = await page.evaluate(() => {
-    const received: number[][] = []; window.addEventListener('fips-packet-received', (event) => received.push([...(event as CustomEvent<Uint8Array>).detail]));
-    const socket = (window as unknown as { __fipsTestSocket: () => { dispatchEvent(event: Event): boolean } | undefined }).__fipsTestSocket();
-    socket?.dispatchEvent(new MessageEvent('message', { data: new Uint8Array([0]).buffer }));
-    return received;
-  });
-  expect(beforeArm).toEqual([]);
-
+  const port = runner.port;
+  const fips = new WebSocket(`ws://127.0.0.1:${port}/bridge/fips`, { origin: `http://127.0.0.1:${port}` });
+  await opened(fips);
+  await page.goto(`http://127.0.0.1:${port}/`);
+  const received = page.evaluate(() => new Promise<number[]>((resolve) => window.addEventListener('fips-packet-received', (event) => resolve([...(event as CustomEvent<Uint8Array>).detail]), { once: true })));
   await page.getByRole('button', { name: 'Arm modem' }).click();
   await expect(page.getByText('Audio preflight passed on this laptop.')).toBeVisible();
-  const payload = [0, 1, 2, 255];
-  const observed = await page.evaluate((incoming) => new Promise<number[]>((resolve) => {
-    window.addEventListener('fips-packet-received', (event) => resolve([...(event as CustomEvent<Uint8Array>).detail]), { once: true });
-    const socket = (window as unknown as { __fipsTestSocket: () => { dispatchEvent(event: Event): boolean } }).__fipsTestSocket();
-    socket.dispatchEvent(new MessageEvent('message', { data: new Uint8Array(incoming).buffer }));
-  }), packet(1, payload));
-  expect(observed).toEqual(payload);
-  const emitted = await page.evaluate((value) => {
-    window.dispatchEvent(new CustomEvent('fips-packet-send', { detail: new Uint8Array(value) }));
-    const socket = (window as unknown as { __fipsTestSocket: () => { sent: ArrayBuffer[] } }).__fipsTestSocket();
-    return [...new Uint8Array(socket.sent.at(-1)!)] ;
-  }, payload);
-  expect(emitted).toEqual(packet(1, payload));
+  const inbound = [0, 1, 2, 255];
+  fips.send(frame(1, 0n, inbound));
+  expect(await received).toEqual(inbound);
+  const outbound = [9, 8, 7];
+  const bridgeFrame = nextBinary(fips);
+  await page.evaluate((payload) => window.dispatchEvent(new CustomEvent('fips-packet-send', { detail: new Uint8Array(payload) })), outbound);
+  expect([...await bridgeFrame]).toEqual([...frame(1, 1n, outbound)]);
+  fips.close();
 });
