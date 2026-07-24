@@ -8,6 +8,7 @@
 pub mod loopback;
 pub mod nym;
 pub mod socks5;
+pub mod sound;
 pub mod tcp;
 pub mod tor;
 pub mod udp;
@@ -25,6 +26,7 @@ use ethernet::EthernetTransport;
 #[cfg(test)]
 use loopback::LoopbackTransport;
 use nym::NymTransport;
+use sound::SoundTransport;
 use secp256k1::XOnlyPublicKey;
 use std::fmt;
 use std::net::SocketAddr;
@@ -227,6 +229,13 @@ impl TransportType {
         name: "nym",
         connection_oriented: true,
         reliable: true,
+    };
+
+    /// Local codec-neutral complete-packet sound bridge.
+    pub const SOUND: TransportType = TransportType {
+        name: "sound",
+        connection_oriented: false,
+        reliable: false,
     };
 
     /// Check if the transport is connectionless.
@@ -672,6 +681,8 @@ pub enum TransportHandle {
     Tor(TorTransport),
     /// Nym mixnet transport (via SOCKS5).
     Nym(NymTransport),
+    /// Local codec-neutral sound bridge.
+    Sound(SoundTransport),
     /// BLE L2CAP transport.
     #[cfg(target_os = "linux")]
     Ble(DefaultBleTransport),
@@ -690,6 +701,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.start_async().await,
             TransportHandle::Tor(t) => t.start_async().await,
             TransportHandle::Nym(t) => t.start_async().await,
+            TransportHandle::Sound(t) => t.start_async().await,
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.start_async().await,
             #[cfg(test)]
@@ -706,6 +718,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.stop_async().await,
             TransportHandle::Tor(t) => t.stop_async().await,
             TransportHandle::Nym(t) => t.stop_async().await,
+            TransportHandle::Sound(t) => t.stop_async().await,
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.stop_async().await,
             #[cfg(test)]
@@ -722,6 +735,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.send_async(addr, data).await,
             TransportHandle::Tor(t) => t.send_async(addr, data).await,
             TransportHandle::Nym(t) => t.send_async(addr, data).await,
+            TransportHandle::Sound(t) => t.send_async(addr, data).await,
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.send_async(addr, data).await,
             #[cfg(test)]
@@ -738,6 +752,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.transport_id(),
             TransportHandle::Tor(t) => t.transport_id(),
             TransportHandle::Nym(t) => t.transport_id(),
+            TransportHandle::Sound(t) => t.transport_id(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.transport_id(),
             #[cfg(test)]
@@ -754,6 +769,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.name(),
             TransportHandle::Tor(t) => t.name(),
             TransportHandle::Nym(t) => t.name(),
+            TransportHandle::Sound(t) => t.name(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.name(),
             #[cfg(test)]
@@ -770,6 +786,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.transport_type(),
             TransportHandle::Tor(t) => t.transport_type(),
             TransportHandle::Nym(t) => t.transport_type(),
+            TransportHandle::Sound(t) => t.transport_type(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.transport_type(),
             #[cfg(test)]
@@ -786,6 +803,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.state(),
             TransportHandle::Tor(t) => t.state(),
             TransportHandle::Nym(t) => t.state(),
+            TransportHandle::Sound(t) => t.state(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.state(),
             #[cfg(test)]
@@ -802,6 +820,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.mtu(),
             TransportHandle::Tor(t) => t.mtu(),
             TransportHandle::Nym(t) => t.mtu(),
+            TransportHandle::Sound(t) => t.mtu(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.mtu(),
             #[cfg(test)]
@@ -821,6 +840,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.link_mtu(addr),
             TransportHandle::Tor(t) => t.link_mtu(addr),
             TransportHandle::Nym(t) => t.link_mtu(addr),
+            TransportHandle::Sound(t) => t.link_mtu(addr),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.link_mtu(addr),
             #[cfg(test)]
@@ -837,6 +857,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.local_addr(),
             TransportHandle::Tor(_) => None,
             TransportHandle::Nym(_) => None,
+            TransportHandle::Sound(_) => None,
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(_) => None,
             #[cfg(test)]
@@ -853,6 +874,7 @@ impl TransportHandle {
             TransportHandle::Tcp(_) => None,
             TransportHandle::Tor(_) => None,
             TransportHandle::Nym(_) => None,
+            TransportHandle::Sound(_) => None,
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(_) => None,
             #[cfg(test)]
@@ -893,6 +915,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.discover(),
             TransportHandle::Tor(t) => t.discover(),
             TransportHandle::Nym(t) => t.discover(),
+            TransportHandle::Sound(t) => t.discover(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.discover(),
             #[cfg(test)]
@@ -909,6 +932,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.auto_connect(),
             TransportHandle::Tor(t) => t.auto_connect(),
             TransportHandle::Nym(t) => t.auto_connect(),
+            TransportHandle::Sound(t) => t.auto_connect(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.auto_connect(),
             #[cfg(test)]
@@ -925,6 +949,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.accept_connections(),
             TransportHandle::Tor(t) => t.accept_connections(),
             TransportHandle::Nym(t) => t.accept_connections(),
+            TransportHandle::Sound(t) => t.accept_connections(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.accept_connections(),
             #[cfg(test)]
@@ -947,6 +972,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.connect_async(addr).await,
             TransportHandle::Tor(t) => t.connect_async(addr).await,
             TransportHandle::Nym(t) => t.connect_async(addr).await,
+            TransportHandle::Sound(_) => Ok(()), // static, connectionless peer policy
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.connect_async(addr).await,
             #[cfg(test)]
@@ -967,6 +993,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.connection_state_sync(addr),
             TransportHandle::Tor(t) => t.connection_state_sync(addr),
             TransportHandle::Nym(t) => t.connection_state_sync(addr),
+            TransportHandle::Sound(t) => t.connection_state(addr),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.connection_state_sync(addr),
             #[cfg(test)]
@@ -986,6 +1013,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.close_connection_async(addr).await,
             TransportHandle::Tor(t) => t.close_connection_async(addr).await,
             TransportHandle::Nym(t) => t.close_connection_async(addr).await,
+            TransportHandle::Sound(_) => {} // static, connectionless peer policy
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.close_connection_async(addr).await,
             #[cfg(test)]
@@ -1011,6 +1039,7 @@ impl TransportHandle {
             TransportHandle::Tcp(_) => TransportCongestion::default(),
             TransportHandle::Tor(_) => TransportCongestion::default(),
             TransportHandle::Nym(_) => TransportCongestion::default(),
+            TransportHandle::Sound(t) => TransportCongestion { recv_drops: t.transport_stats()["overflowed"].as_u64() },
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(_) => TransportCongestion::default(),
             #[cfg(test)]
@@ -1039,6 +1068,7 @@ impl TransportHandle {
             TransportHandle::Nym(t) => {
                 serde_json::to_value(t.stats().snapshot()).unwrap_or_default()
             }
+            TransportHandle::Sound(t) => t.transport_stats(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => {
                 serde_json::to_value(t.stats().snapshot()).unwrap_or_default()

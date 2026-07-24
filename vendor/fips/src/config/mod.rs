@@ -39,9 +39,10 @@ pub use node::{
 };
 pub use peer::{ConnectPolicy, PeerAddress, PeerConfig};
 pub use transport::{
-    BleConfig, DirectoryServiceConfig, EthernetConfig, NymConfig, TcpConfig, TorConfig,
+    BleConfig, DirectoryServiceConfig, EthernetConfig, NymConfig, SoundConfig, TcpConfig, TorConfig,
     TransportInstances, TransportsConfig, UdpConfig,
 };
+pub use transport::MIN_SOUND_MTU;
 
 /// Default config filename.
 const CONFIG_FILENAME: &str = "fips.yaml";

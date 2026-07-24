@@ -873,6 +873,61 @@ impl NymConfig {
     }
 }
 
+/// Minimum complete-packet link MTU needed for FIPS's 1280-byte IPv6 MTU.
+pub const MIN_SOUND_MTU: u16 = 1357;
+const DEFAULT_SOUND_QUEUE_ITEMS: usize = 32;
+const DEFAULT_SOUND_QUEUE_BYTES: usize = MIN_SOUND_MTU as usize * DEFAULT_SOUND_QUEUE_ITEMS;
+
+/// Codec-neutral local bridge transport configuration.
+///
+/// This boundary deliberately contains only local endpoint, peer policy and
+/// resource bounds. Waveform, packet-fragmentation and browser implementation
+/// details remain outside FIPS.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SoundConfig {
+    /// Loopback WebSocket endpoint owned by the local bridge.
+    pub bridge_url: String,
+    /// The single statically configured opaque FIPS peer address.
+    pub peer_addr: String,
+    #[serde(default = "default_sound_mtu")]
+    pub mtu: u16,
+    #[serde(default = "default_sound_queue_items")]
+    pub queue_items: usize,
+    #[serde(default = "default_sound_queue_bytes")]
+    pub queue_bytes: usize,
+}
+
+fn default_sound_mtu() -> u16 { MIN_SOUND_MTU }
+fn default_sound_queue_items() -> usize { DEFAULT_SOUND_QUEUE_ITEMS }
+fn default_sound_queue_bytes() -> usize { DEFAULT_SOUND_QUEUE_BYTES }
+
+impl SoundConfig {
+    pub fn mtu(&self) -> u16 { self.mtu }
+    pub fn queue_items(&self) -> usize { self.queue_items }
+    pub fn queue_bytes(&self) -> usize { self.queue_bytes }
+
+    /// Validate the narrow, local-only configuration accepted by Sound.
+    pub fn validate(&self) -> Result<(), String> {
+        let loopback = self.bridge_url.starts_with("ws://127.")
+            || self.bridge_url.starts_with("ws://localhost")
+            || self.bridge_url.starts_with("ws://[::1]");
+        if !loopback || !self.bridge_url.contains("/bridge/fips") {
+            return Err("sound_bridge_url_must_be_loopback_fips_endpoint".into());
+        }
+        if !self.peer_addr.starts_with("sound-") || self.peer_addr.len() > 64 {
+            return Err("sound_peer_addr_invalid".into());
+        }
+        if self.mtu < MIN_SOUND_MTU {
+            return Err("sound_mtu_below_1357".into());
+        }
+        if self.queue_items == 0 || self.queue_items > 256 || self.queue_bytes < self.mtu as usize || self.queue_bytes > 1024 * 1024 {
+            return Err("sound_queue_bounds_invalid".into());
+        }
+        Ok(())
+    }
+}
+
 // ============================================================================
 // TransportsConfig
 // ============================================================================
@@ -906,6 +961,10 @@ pub struct TransportsConfig {
     /// BLE transport instances.
     #[serde(default, skip_serializing_if = "is_transport_empty")]
     pub ble: TransportInstances<BleConfig>,
+
+    /// Local codec-neutral sound bridge instances.
+    #[serde(default, skip_serializing_if = "is_transport_empty")]
+    pub sound: TransportInstances<SoundConfig>,
 }
 
 /// Helper for skip_serializing_if on TransportInstances.
@@ -922,6 +981,7 @@ impl TransportsConfig {
             && self.tor.is_empty()
             && self.nym.is_empty()
             && self.ble.is_empty()
+            && self.sound.is_empty()
     }
 
     /// Merge another TransportsConfig into this one.
@@ -946,6 +1006,9 @@ impl TransportsConfig {
         if !other.ble.is_empty() {
             self.ble = other.ble;
         }
+        if !other.sound.is_empty() {
+            self.sound = other.sound;
+        }
     }
 }
 
@@ -969,8 +1032,7 @@ mod tests {
             "bridge_url: ws://127.0.0.1:4310/bridge/fips\npeer_addr: sound-a\ncodec: cyrinx\n",
         ] {
             assert!(serde_yaml::from_str::<SoundConfig>(invalid)
-                .ok()
-                .is_some_and(|config| config.validate().is_err()));
+                .map_or(true, |config| config.validate().is_err()));
         }
     }
 
