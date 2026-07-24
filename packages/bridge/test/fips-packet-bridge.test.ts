@@ -159,6 +159,16 @@ async function requestAcousticCapability(socket: BrowserSocket, epoch: number): 
 }
 
 describe('FIPS packet bridge', () => {
+  it('serves exact local proof routes without adding a listener or allowing Role B ping', async () => {
+    const bridge = await createBridgeServer({ host: '127.0.0.1', port: 0, artifactDir: await mkdtemp(path.join(tmpdir(), 'fipwave-proof-')), proofController: { role: 'A', status: async () => ({ pingReady: false, reason: 'peer_missing' }), ping: async () => ({ pingReady: false, reason: 'peer_missing' }) } });
+    servers.push(bridge);
+    const status = await fetch(`http://127.0.0.1:${bridge.port}/proof-status`);
+    expect(status.status).toBe(200);
+    expect(await status.json()).toMatchObject({ reason: 'peer_missing' });
+    const action = await fetch(`http://127.0.0.1:${bridge.port}/proof-ping`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    expect(action.status).toBe(200);
+    expect((await fetch(`http://127.0.0.1:${bridge.port}/proof-ping`, { method: 'GET' })).status).toBe(405);
+  });
   it('round-trips each Rust-authored FIPS traffic class beside byte-identical opaque bytes', async () => {
     const bridge = await createBridge();
     const browser = await openEndpoint(bridge.port, 'browser');
