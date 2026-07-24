@@ -12,6 +12,7 @@ const DEFAULTS = Object.freeze({
   outputVolume: 65,
   inputVolume: 90,
   playbackGainPercent: 100,
+  messagesPerDirection: 5,
   portA: 4174,
   portB: 4175,
   startupTimeoutMs: 60_000,
@@ -30,6 +31,7 @@ function usage() {
     '  --output-volume 0..100        macOS output level during the run (default: 65)',
     '  --input-volume 0..100         macOS input level during the run (default: 90)',
     '  --playback-gain-percent N     browser playback multiplier (default: 100; try 200 for diagnostics)',
+    '  --messages-per-direction N    corpus messages sent each way (default: 5)',
     '  --port-a 1024..65535          role A runner port (default: 4174)',
     '  --port-b 1024..65535          role B runner port (default: 4175)',
     '  --startup-timeout-ms N        runner/browser startup timeout (default: 60000)',
@@ -52,6 +54,7 @@ export function parseArgs(values) {
     ['--output-volume', ['outputVolume', 0, 100]],
     ['--input-volume', ['inputVolume', 0, 100]],
     ['--playback-gain-percent', ['playbackGainPercent', 1, 400]],
+    ['--messages-per-direction', ['messagesPerDirection', 1, 25]],
     ['--port-a', ['portA', 1024, 65_535]],
     ['--port-b', ['portB', 1024, 65_535]],
     ['--startup-timeout-ms', ['startupTimeoutMs', 1_000, 60 * 60_000]],
@@ -593,8 +596,8 @@ async function main() {
     recorder.event('browser-launched', { ...summary.browser, message: `${summary.browser.version}, PID ${summary.browser.pid}` }, true);
 
     const origins = {
-      A: `http://127.0.0.1:${specs.A.port}/#playbackGain=${options.playbackGainPercent / 100}`,
-      B: `http://127.0.0.1:${specs.B.port}/#playbackGain=${options.playbackGainPercent / 100}`,
+      A: `http://127.0.0.1:${specs.A.port}/#playbackGain=${options.playbackGainPercent / 100}&corpusLimit=${options.messagesPerDirection}`,
+      B: `http://127.0.0.1:${specs.B.port}/#playbackGain=${options.playbackGainPercent / 100}&corpusLimit=${options.messagesPerDirection}`,
     };
     const contexts = {
       A: await browser.newContext({ viewport: { width: 1280, height: 900 } }),

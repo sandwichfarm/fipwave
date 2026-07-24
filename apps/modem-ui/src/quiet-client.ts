@@ -434,11 +434,13 @@ export class QuietClient {
     });
   }
 
-  async sendCorpus(role: Role, epoch: number, onProgress: (entry: CorpusCase, index: number, total: number) => void): Promise<void> {
+  async sendCorpus(role: Role, epoch: number, onProgress: (entry: CorpusCase, index: number, total: number) => void, limit?: number): Promise<void> {
     const runtime = this.#runtimeWindow;
     if (!this.#receiver || epoch !== this.#epoch || role !== this.#localRole || !runtime?.Quiet) throw new Error('Quiet is not armed');
+    if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 25)) throw new Error('Quiet corpus limit is invalid');
     const generation = this.#generation;
-    const entries = (manifest.cases as CorpusCase[]).filter((entry) => entry.direction === directionForRole(role));
+    const matching = (manifest.cases as CorpusCase[]).filter((entry) => entry.direction === directionForRole(role));
+    const entries = limit === undefined ? matching : matching.slice(0, limit);
     for (const [index, entry] of entries.entries()) {
       if (generation !== this.#generation || epoch !== this.#epoch) throw new Error('Quiet transmission cancelled by reset');
       const payload = await corpusPayload(entry, index % (entry.size === 256 ? 20 : 5)); const digest = await sha256(payload); if (digest !== entry.sha256) throw new Error(`committed corpus digest mismatch: ${entry.id}`);

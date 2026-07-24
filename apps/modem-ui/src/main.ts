@@ -81,7 +81,14 @@ function requestedPlaybackGain(): number {
   const gain = Number(raw);
   return Number.isFinite(gain) && gain > 0 && gain <= 4 ? gain : 1;
 }
+function requestedCorpusLimit(): number | undefined {
+  const raw = new URLSearchParams(window.location.hash.replace(/^#/, '')).get('corpusLimit');
+  if (raw === null || raw.trim() === '') return undefined;
+  const limit = Number(raw);
+  return Number.isSafeInteger(limit) && limit >= 1 && limit <= 25 ? limit : undefined;
+}
 const quiet = new QuietClient((received) => { void appendQuietEvidence(received); }, { playbackGain: requestedPlaybackGain() });
+const quietCorpusLimit = requestedCorpusLimit();
 let acousticSession: AcousticSession | undefined;
 let acousticAdapter: AcousticSessionAdapter | undefined;
 let acousticTx = 0;
@@ -1161,7 +1168,7 @@ async function sendQuietCorpus(): Promise<void> {
     await quiet.sendCorpus(config.role, sendEpoch, (entry, index, total) => {
       corpusRows = [...corpusRows, { direction: entry.direction, caseId: entry.id, evidenceClass: config.evidenceClass, result: `Sent locally ${index}/${total}; receiver evidence is independent`, airtime: 'pending' }];
       render();
-    });
+    }, quietCorpusLimit);
     if (epoch !== sendEpoch) return;
     quietCorpusSendState = 'sent';
     quietRuntime = `Quiet ${direction} corpus sent · receiver remains armed · epoch ${sendEpoch}`;
@@ -1281,9 +1288,17 @@ async function reset(): Promise<void> {
 
 render();
 void runAcousticFixtureIfRequested();
-void fetchRunnerConfig().then((config) => { runnerConfig = config; syncBridgeState(); render(); if (!developmentDiagnostic) void refreshProofStatus(); }, (error: unknown) => { configFailure = safeConfigReason(error); render(); });
+void fetchRunnerConfig().then((config) => {
+  runnerConfig = config;
+  syncBridgeState();
+  render();
+  // Quiet's current receiver runs its audio callback on the main thread.
+  // The large Debug DOM must stay quiescent during physical qualification;
+  // proof remains manually refreshable there while the compact demo view polls.
+  if (!developmentDiagnostic && !debugMode) void refreshProofStatus();
+}, (error: unknown) => { configFailure = safeConfigReason(error); render(); });
 // Session state and heartbeats are owned by the acoustic controller. Keep the
 // audience projection fresh even between controller callbacks without exposing
 // any additional transport authority to the UI.
 window.setInterval(() => { if (!debugMode) render(); }, 750);
-window.setInterval(() => { if (!developmentDiagnostic && !proofRequest) void refreshProofStatus(); }, 5_000);
+window.setInterval(() => { if (!developmentDiagnostic && !debugMode && !proofRequest) void refreshProofStatus(); }, 5_000);
