@@ -47,6 +47,7 @@ struct Runtime {
     browser_ready: bool,
     epoch: u32,
     next_sequence: u64,
+    highest_received_sequence: Option<u64>,
     sender: Option<mpsc::Sender<Vec<u8>>>,
     last_error: Option<&'static str>,
     counters: SoundCounters,
@@ -59,6 +60,7 @@ impl Default for Runtime {
             browser_ready: false,
             epoch: 1,
             next_sequence: 0,
+            highest_received_sequence: None,
             sender: None,
             last_error: None,
             counters: SoundCounters::default(),
@@ -339,19 +341,32 @@ async fn inject_inbound(
     let kind = encoded[5];
     let payload_len = u32::from_le_bytes(encoded[8..12].try_into().expect("header")) as usize;
     let epoch = u32::from_le_bytes(encoded[12..16].try_into().expect("header"));
+    let sequence = u64::from_le_bytes(encoded[16..24].try_into().expect("header"));
     if encoded.len() != FWAV_HEADER_BYTES + payload_len {
         reject(runtime, "sound_frame_length_invalid");
         return Err(());
     }
+    // Sound accepts only the canonical packet envelope emitted by this module.
+    // In particular, PCM metadata and extension flags are not meaningful at the
+    // FIPS boundary and must never become an alternate parser surface.
+    if encoded[6..8] != [0, 0]
+        || encoded[24..28] != [0, 0, 0, 0]
+        || encoded[28..30] != [0, 0]
+        || encoded[30..32] != [0, 0]
+    {
+        reject(runtime, "sound_frame_noncanonical");
+        return Err(());
+    }
     if kind == FWAV_TYPE_RESET {
         let mut current = runtime.lock().expect("sound runtime");
-        if payload_len != 0 || epoch <= current.epoch {
+        if payload_len != 0 || sequence != 0 || epoch <= current.epoch {
             current.counters.rejected += 1;
             current.last_error = Some("sound_reset_invalid");
             return Err(());
         }
         current.epoch = epoch;
         current.next_sequence = 0;
+        current.highest_received_sequence = None;
         current.browser_ready = false;
         current.counters = SoundCounters::default();
         current.last_error = None;
@@ -359,7 +374,7 @@ async fn inject_inbound(
     }
     if kind == FWAV_TYPE_BROWSER_ARM || kind == FWAV_TYPE_BROWSER_DISARM {
         let mut current = runtime.lock().expect("sound runtime");
-        if payload_len != 0 || current.state != TransportState::Up || current.epoch != epoch {
+        if payload_len != 0 || sequence != 0 || current.state != TransportState::Up || current.epoch != epoch {
             current.counters.rejected += 1;
             current.last_error = Some("sound_browser_control_invalid");
             return Err(());
@@ -371,27 +386,28 @@ async fn inject_inbound(
         reject(runtime, "sound_packet_invalid");
         return Err(());
     }
-    {
-        let current = runtime.lock().expect("sound runtime");
-        if current.state != TransportState::Up || !current.browser_ready || current.epoch != epoch {
-            drop(current);
-            reject(runtime, "sound_packet_not_armed");
-            return Err(());
-        }
-    }
     let data = encoded[FWAV_HEADER_BYTES..].to_vec();
-    if packet_tx
-        .try_send(ReceivedPacket::new(
+    let mut current = runtime.lock().expect("sound runtime");
+    if current.state != TransportState::Up || !current.browser_ready || current.epoch != epoch {
+        drop(current);
+        reject(runtime, "sound_packet_not_armed");
+        return Err(());
+    }
+    if current.highest_received_sequence.is_some_and(|highest| sequence <= highest) {
+        current.counters.rejected += 1;
+        current.last_error = Some("sound_packet_replay");
+        return Err(());
+    }
+    if packet_tx.try_send(ReceivedPacket::new(
             transport_id,
             peer.clone(),
             data.clone(),
-        ))
-        .is_err()
-    {
-        reject(runtime, "sound_packet_channel_full");
+        )).is_err() {
+        current.counters.rejected += 1;
+        current.last_error = Some("sound_packet_channel_full");
         return Err(());
     }
-    let mut current = runtime.lock().expect("sound runtime");
+    current.highest_received_sequence = Some(sequence);
     current.counters.rx_packets += 1;
     current.counters.rx_bytes += data.len() as u64;
     Ok(())
@@ -529,6 +545,32 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(rx.recv().await.unwrap().data, payload);
+
+        // A current-epoch packet may be delivered once only. Replays and
+        // noncanonical header variants are rejected before PacketTx injection.
+        assert!(inject_inbound(
+            &sound.runtime,
+            &sound.packet_tx,
+            sound.transport_id,
+            &sound.configured_peer(),
+            sound.mtu(),
+            &packet,
+        )
+        .await
+        .is_err());
+        let mut noncanonical = encode_packet(1, 2, &[0x5a]);
+        noncanonical[6] = 1;
+        assert!(inject_inbound(
+            &sound.runtime,
+            &sound.packet_tx,
+            sound.transport_id,
+            &sound.configured_peer(),
+            sound.mtu(),
+            &noncanonical,
+        )
+        .await
+        .is_err());
+        assert!(rx.try_recv().is_err());
 
         let mut reset = vec![0; FWAV_HEADER_BYTES];
         reset[0..4].copy_from_slice(b"FWAV");
