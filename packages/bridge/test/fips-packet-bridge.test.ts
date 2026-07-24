@@ -32,6 +32,11 @@ async function createBridge(): Promise<BridgeServer> {
   return bridge;
 }
 
+async function drainBridge(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
 function packet(epoch: number, sequence: bigint, payload: Buffer): Buffer {
   return encodeFrame({ type: MessageType.FIPS_PACKET, epoch, sequence, payload });
 }
@@ -77,7 +82,7 @@ describe('FIPS packet bridge', () => {
     browser.close(); fips.close();
   });
 
-  it('rejects text, wrong-role, stale, and queue-overflow input before accepted delivery counters change', async () => {
+  it('rejects text, wrong-role, stale, and unavailable-destination input before accepted delivery counters change', async () => {
     const bridge = await createBridge();
     const browser = await openEndpoint(bridge.port, 'browser');
     browser.send('not a binary packet');
@@ -91,13 +96,39 @@ describe('FIPS packet bridge', () => {
     stale.send(packet(0, 1n, Buffer.alloc(1)));
     await once(stale, 'close');
 
-    const queueFill = await openEndpoint(bridge.port, 'fips');
-    queueFill.send(packet(1, 1n, Buffer.alloc(MAX_MESSAGE_BYTES - 32)));
-    queueFill.send(packet(1, 2n, Buffer.alloc(1)));
-    await once(queueFill, 'close');
-
     expect(bridge.state().packetCounters).toEqual({ browserToFips: 0, fipsToBrowser: 0 });
-    expect(bridge.state().rejectedFrames).toBeGreaterThanOrEqual(4);
-    expect(bridge.state().overflowedQueues).toContain('FIPS_PACKET_TO_BROWSER');
+    expect(bridge.state().rejectedFrames).toBeGreaterThanOrEqual(3);
+  });
+
+  it('exposes bounded per-direction packet queues and safely rejects unavailable or bulk-control input', async () => {
+    const bridge = await createBridge();
+    const browser = await openEndpoint(bridge.port, 'browser');
+    browser.send(packet(1, 1n, Buffer.alloc(64)));
+    await drainBridge();
+
+    expect(bridge.state()).toMatchObject({
+      packetQueues: {
+        browserToFips: { items: 0, bytes: 0, maxItems: 32, maxBytes: MAX_MESSAGE_BYTES, maxAgeMs: 5_000 },
+        fipsToBrowser: { items: 0, bytes: 0, maxItems: 32, maxBytes: MAX_MESSAGE_BYTES, maxAgeMs: 5_000 },
+      },
+      lastError: { code: 'fips_destination_unavailable' },
+      packetCounters: { browserToFips: 0, fipsToBrowser: 0 },
+    });
+
+    const error = bridge.state().lastError!;
+    expect(error.message).toMatch(/^[^\r\n]{1,240}$/);
+    expect(error.message).not.toContain('64');
+
+    const controlBridge = await createBridge();
+    const control = await openEndpoint(controlBridge.port, 'browser');
+    control.send(encodeFrame({
+      type: MessageType.QUALIFICATION_CASE,
+      epoch: 1,
+      sequence: 1n,
+      payload: Buffer.from(JSON.stringify({ action: 'start_cyrinx', packet: Buffer.alloc(64).toString('base64') })),
+    }));
+    await drainBridge();
+    expect(controlBridge.state().lastError).toMatchObject({ code: 'control_payload_contains_packet_data' });
+    expect(controlBridge.state().packetQueues.browserToFips.items).toBe(0);
   });
 });
