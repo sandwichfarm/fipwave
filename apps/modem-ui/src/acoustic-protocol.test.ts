@@ -124,6 +124,19 @@ describe('FAS1 binary protocol', () => {
     expect(() => reassemblePacket([fragments[0]!, fragments[0]!])).toThrow();
   });
 
+  it('enforces the committed 96-byte canonical DATA geometry before reassembly', () => {
+    const packet = new Uint8Array(FAS1_MAX_PACKET_BYTES).fill(7);
+    const fragments = fragmentPacket({ packet, sessionId: SESSION, sequenceStart: 0, packetId: 9, payloadBytes: 96 });
+    expect(fragments).toHaveLength(15);
+    expect(fragments.slice(0, -1).every((fragment) => fragment.body.byteLength === 96)).toBe(true);
+    expect(fragments.at(-1)?.body.byteLength).toBe(13);
+    expect(reassemblePacket(fragments, 96)).toEqual(packet);
+    const nonCanonical = fragments.map((fragment) => ({ ...fragment, body: fragment.body.slice() }));
+    nonCanonical[0] = { ...nonCanonical[0]!, body: nonCanonical[0]!.body.slice(0, 95) };
+    nonCanonical[1] = { ...nonCanonical[1]!, body: Uint8Array.of(7, ...nonCanonical[1]!.body) };
+    expect(() => reassemblePacket(nonCanonical, 96)).toThrow();
+  });
+
   it('serializes directional settings in one canonical A-to-B then B-to-A order', async () => {
     const aToB = { profileId: 'quiet-audible-7k-v1', payloadBytes: 96, repetition: 1, guardMs: 750, playbackGain: 1, ackTimeoutMs: 4_000 };
     const bToA = { profileId: 'quiet-audible-7k-v1', payloadBytes: 217, repetition: 1, guardMs: 750, playbackGain: 2, ackTimeoutMs: 15_000 };
