@@ -53,7 +53,7 @@ describe('demo configuration authority', () => {
     const canonical = resolveDemoConfig('a');
     const before = JSON.stringify(canonical);
     const overridden = resolveDemoConfig('a', {
-      bridge: { browserPort: 4_410 },
+      bridge: { browserPort: 4_410, fipsPort: 4_410 },
       retries: { maxAttempts: 4, minDelayMs: 600, maxDelayMs: 1_200 },
       heartbeat: { intervalMs: 2_000, deadLinkTimeoutMs: 8_000 },
     });
@@ -68,6 +68,7 @@ describe('demo configuration authority', () => {
   it.each([
     ['unknown key', { unknown: true }],
     ['wide bridge URL', { bridge: { fipsUrl: 'ws://bridge.example.test:4311/bridge/fips' } }],
+    ['split bridge endpoints', { bridge: { browserPort: 4_410, fipsPort: 4_411 } }],
     ['small MTU', { fips: { linkMtu: 1356 } }],
     ['bad retry range', { retries: { maxAttempts: 0, minDelayMs: 1_000, maxDelayMs: 500 } }],
     ['inconsistent peer', { peerPublicKey: 'npub1other' }],

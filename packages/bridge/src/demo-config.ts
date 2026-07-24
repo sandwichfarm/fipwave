@@ -130,6 +130,9 @@ export function resolveDemoConfig(input?: string, overrides?: unknown): DemoConf
   const bridgePatch = 'bridge' in raw ? bridgeOverride(raw.bridge) : {};
   const browserPort = bridgePatch.browserPort ?? DEFAULTS.bridge.browserPort;
   const localFipsPort = bridgePatch.fipsPort ?? DEFAULTS.bridge.fipsPort;
+  // One local bridge owns both browser and FIPS paths. Allowing these ports to
+  // drift would make a valid-looking browser UI talk to a different listener.
+  if (browserPort !== localFipsPort) fail('bridge_ports_must_match');
   const bridge: BridgeConfig = { host: LOOPBACK_HOST, browserPort, fipsPort: localFipsPort, fipsUrl: validateFipsUrl(bridgePatch.fipsUrl ?? fipsUrl(localFipsPort), localFipsPort), browserPath: DEFAULTS.bridge.browserPath, fipsPath: DEFAULTS.bridge.fipsPath };
 
   const fipsPatch = 'fips' in raw ? record(raw.fips, 'fips_override_invalid') : {};
