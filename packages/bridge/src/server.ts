@@ -988,6 +988,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       lastSequence.value = frame.sequence;
       await expireCyrinx();
       if (frame.type === MessageType.RESET) {
+        if (frame.flags === RESET_ACK_FLAG) fail('reset_ack_not_accepted');
         if (frame.payload.length !== 0 || frame.flags !== 0) fail('reset_payload_not_empty');
         const alreadyPreempted = connection.preemptedControls.delete(frame.sequence);
         connection.mustResetBeforeUse = false;
