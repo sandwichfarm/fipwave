@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { checkFipsComposeSource, validateFipsComposeTopology } from '../scripts/check-compose.mjs';
+import { assertFipsRuntimeInspect, parseFipsComposeSmokeArgs } from '../scripts/fips-compose-smoke.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -46,4 +47,16 @@ test('Compose topology rejects namespace, bind, port, and privilege widening mut
   assert.throws(() => validateFipsComposeTopology({ services: { bridge, fips: { ...fips, cap_add: ['NET_ADMIN', 'SYS_ADMIN'] } } }), /capabilities/);
   assert.throws(() => validateFipsComposeTopology({ services: { bridge, fips: { ...fips, privileged: true } } }), /privileged/);
   assert.throws(() => validateFipsComposeTopology({ services: { bridge, fips: { ...fips, devices: [] } } }), /device/);
+});
+
+test('owned runtime smoke accepts one role and rejects unsafe inspected topology', () => {
+  assert.deepEqual(parseFipsComposeSmokeArgs(['--role', 'a']), { role: 'a', timeoutMs: 60_000 });
+  assert.throws(() => parseFipsComposeSmokeArgs(['--role', 'c']), /role/);
+  const inspected = [
+    { Name: '/owned_bridge', HostConfig: { Privileged: false, NetworkMode: 'owned_default', CapAdd: null }, NetworkSettings: { Ports: { '4310/tcp': [{ HostIp: '127.0.0.1', HostPort: '4310' }] } } },
+    { Name: '/owned_fips', HostConfig: { Privileged: false, NetworkMode: 'container:owned_bridge', CapAdd: ['NET_ADMIN'], Devices: [{ PathOnHost: '/dev/net/tun', PathInContainer: '/dev/net/tun' }], SecurityOpt: ['no-new-privileges:true'] }, NetworkSettings: { Ports: {} } },
+  ];
+  assert.doesNotThrow(() => assertFipsRuntimeInspect(inspected));
+  inspected[1].HostConfig.CapAdd = ['NET_ADMIN', 'SYS_ADMIN'];
+  assert.throws(() => assertFipsRuntimeInspect(inspected), /capabilities/);
 });
