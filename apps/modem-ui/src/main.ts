@@ -2,6 +2,7 @@ import './style.css';
 import { armAudio, canBufferPcmCaptureFrame, enqueuePcmPlayback, resetAudio, setPcmCaptureHandler, validatePcmPlaybackFrame, type AppliedAudioEvidence } from './audio.js';
 import { acceptBridgePlaybackFrame } from '../../../packages/bridge/src/codecs/websocket.js';
 import { createFipsPacketAdapter } from './fips-packet-adapter.js';
+import { reduceBridgeState, validateBridgeSnapshot, type BridgeState } from './bridge-state.js';
 import { CyrinxCaseWatchdog, sameCyrinxBrowserCase, type CyrinxBrowserCase } from './cyrinx-case-watchdog.js';
 import { CyrinxQualificationSession, type CyrinxSessionSnapshot } from './qualification-session.js';
 import {
@@ -38,6 +39,7 @@ let packetGeneration = 0;
 let browserPacketReady = false;
 let packetTx = 0;
 let packetRx = 0;
+let bridgeState: BridgeState | undefined;
 let quietRuntime = 'Not armed';
 type QuietCorpusSendState = 'unavailable' | 'ready' | 'sending' | 'sent';
 let quietCorpusSendState: QuietCorpusSendState = 'unavailable';
@@ -94,6 +96,7 @@ function decodeFipsPacket(input: ArrayBuffer): Uint8Array {
 const fipsPackets = createFipsPacketAdapter({
   onPacket(packet) {
     packetRx += 1;
+    syncBridgeState();
     window.dispatchEvent(new CustomEvent('fips-packet-received', { detail: packet }));
   },
   emitPacket(packet) {
@@ -101,6 +104,7 @@ const fipsPackets = createFipsPacketAdapter({
     if (!browserPacketReady || !socket || socket.readyState !== WebSocket.OPEN) throw new Error('FIPS packet adapter is disconnected');
     socket.send(encodeFipsPacket(packet));
     packetTx += 1;
+    syncBridgeState();
   },
 });
 window.addEventListener('fips-packet-send', (event) => {
@@ -150,6 +154,15 @@ function frameForSettings(value: AppliedAudioEvidence): ArrayBuffer {
 }
 
 function asError(reason: unknown, fallback: string): Error { return reason instanceof Error ? reason : new Error(fallback); }
+function syncBridgeState(): void {
+  const snapshot = validateBridgeSnapshot({
+    role: runnerConfig?.role, configuration: 'ready', browserAudio: browserPacketReady ? 'armed' : 'not-armed',
+    localBridge: bridge?.readyState === WebSocket.OPEN ? 'ready' : 'disconnected', soundTransport: 'waiting', epoch,
+    queueHealth: 'clear', queueItems: 0, queueBytes: 0, txPackets: packetTx, rxPackets: packetRx, soundMtu: 1357,
+    lastEventAt: new Date().toISOString(), lastError: failure ? failure.replace(/[\r\n]+/g, ' ').slice(0, 240) : null,
+  });
+  if (snapshot) bridgeState = reduceBridgeState(bridgeState, { type: 'snapshot', snapshot });
+}
 function resultKey(caseId: string, resultEpoch: number): string { return `${resultEpoch}\u0000${caseId}`; }
 function reportCyrinxRuntimeFailure(value: CyrinxBrowserCase): void {
   const socket = bridge;
@@ -231,6 +244,7 @@ function failBridge(socket: WebSocket, reason: Error): void {
   bridgeDelivery = `Failed — ${reason.message}`;
   uiState = 'disconnected';
   failure = reason.message;
+  bridgeState = reduceBridgeState(bridgeState, { type: 'reset-failed', reason: failure });
   render();
 }
 
@@ -456,6 +470,7 @@ async function reportQuietResult(received: ReceiveCaseEvidence): Promise<void> {
 async function requestBridgeReset(): Promise<number> {
   const previousEpoch = epoch;
   fipsPackets.invalidate(); browserPacketReady = false; packetGeneration += 1;
+  bridgeState = reduceBridgeState(bridgeState, { type: 'reset-start' });
   const socket = bridge?.readyState === WebSocket.OPEN ? bridge : await openFreshBridge();
   const accepted = new Promise<number>((resolve, reject) => {
     const timer = window.setTimeout(() => {
@@ -602,6 +617,7 @@ async function arm(): Promise<void> {
     packetGeneration += 1;
     fipsPackets.arm(epoch, packetGeneration);
     browserPacketReady = true;
+    syncBridgeState();
     bridgeDelivery = `Audio settings accepted for epoch ${epoch}`;
     uiState = 'ready';
   } catch (error) {
@@ -723,12 +739,14 @@ async function reset(): Promise<void> {
   uiState = 'requesting'; failure = ''; render();
   try {
     fipsPackets.invalidate(); browserPacketReady = false; packetGeneration += 1;
+    bridgeState = reduceBridgeState(bridgeState, { type: 'reset-start' });
     clearCyrinxCase();
     for (const incomplete of quiet.flushIncomplete()) await appendQuietEvidence(incomplete);
     const nextEpoch = await requestBridgeReset();
     await quiet.reset();
     await resetAudio();
     epoch = nextEpoch;
+    bridgeState = reduceBridgeState(bridgeState, { type: 'reset-ack', epoch: nextEpoch });
     evidence = undefined;
     // Reset only changes audio/epoch. Cyrinx remains irreversible once the
     // runner started it; re-arm therefore cannot restart the primary path.
@@ -748,4 +766,4 @@ async function reset(): Promise<void> {
 }
 
 render();
-void fetchRunnerConfig().then((config) => { runnerConfig = config; render(); }, (error: unknown) => { configFailure = error instanceof Error ? error.message : 'unknown configuration error'; render(); });
+void fetchRunnerConfig().then((config) => { runnerConfig = config; syncBridgeState(); render(); }, (error: unknown) => { configFailure = error instanceof Error ? error.message : 'unknown configuration error'; render(); });
