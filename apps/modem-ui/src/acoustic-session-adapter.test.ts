@@ -2,13 +2,14 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { FipsTrafficClass } from '../../../packages/bridge/src/protocol.js';
 import { AcousticSessionAdapter } from './acoustic-session-adapter.js';
+import type { AcousticSessionSnapshot, AcousticTrafficClass } from './acoustic-session.js';
 
 function session(ready = false) {
-  let snapshot = { epoch: 7, ready, state: ready ? 'Ready' : 'AwaitingHeartbeat' };
+  let snapshot: Pick<AcousticSessionSnapshot, 'epoch' | 'ready' | 'state'> = { epoch: 7, ready, state: ready ? 'Ready' : 'AwaitingHeartbeat' };
   return {
     get snapshot() { return snapshot; },
     queued: [] as Array<{ bytes: Uint8Array; trafficClass: string }>,
-    enqueuePacket(bytes: Uint8Array, trafficClass: string) {
+    enqueuePacket(bytes: Uint8Array, trafficClass: AcousticTrafficClass) {
       this.queued.push({ bytes: bytes.slice(), trafficClass });
       return { accepted: true };
     },

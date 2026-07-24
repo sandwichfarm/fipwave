@@ -270,6 +270,7 @@ export class QuietClient {
   #playbackGain: number;
   #generation = 0;
   #cancelTransmission: (() => void) | undefined;
+  #unitHandler: ((unit: Uint8Array) => void) | undefined;
   #metrics: QuietMetrics = { captureHighWaterBytes: 0, captureHighWaterMs: 0, playbackHighWaterBytes: 0, playbackHighWaterMs: 0, discontinuities: 0 };
 
   constructor(onReceive: (evidence: ReceiveCaseEvidence) => void = () => undefined, options: QuietClientOptions = {}) {
@@ -282,6 +283,15 @@ export class QuietClient {
   get metrics(): Readonly<QuietMetrics> {
     const capture = this.#receiverEvidence.metrics();
     return { ...this.#metrics, captureHighWaterBytes: capture.captureHighWaterBytes, captureHighWaterMs: capture.captureHighWaterMs, discontinuities: this.#metrics.discontinuities + capture.discontinuities };
+  }
+
+  /**
+   * Raw codec-frame seam for FAS1. The receiver never interprets the unit and
+   * callers receive a copy only while the currently armed generation owns it.
+   */
+  onUnit(handler: (unit: Uint8Array) => void): () => void {
+    this.#unitHandler = handler;
+    return () => { if (this.#unitHandler === handler) this.#unitHandler = undefined; };
   }
 
   async arm(epoch: number, localRole: Role): Promise<AppliedQuietSettings> {
@@ -330,7 +340,10 @@ export class QuietClient {
     await loadClassicScript(runtime.document, '/codec-assets/quiet-emscripten.js');
     await ready;
     await new Promise<void>((resolve, reject) => {
-      this.#receiver = quiet.receiver({ profile: QUIET_PROFILE, onReceive: (raw) => { void this.#receiverEvidence.accept(raw).then((evidence) => { if (evidence && generation === this.#generation && evidence.epoch === this.#epoch && evidence.sender === peerRole(localRole) && evidence.direction === receiveDirectionForRole(localRole)) this.#onReceive(evidence); }); }, onCreate: resolve, onCreateFail: (reason) => reject(new Error(`Quiet microphone failed: ${reason}`)), onReceiveFail: () => { this.#metrics.discontinuities += 1; } });
+      this.#receiver = quiet.receiver({ profile: QUIET_PROFILE, onReceive: (raw) => {
+        if (generation === this.#generation && this.#epoch === epoch) this.#unitHandler?.(new Uint8Array(raw).slice());
+        void this.#receiverEvidence.accept(raw).then((evidence) => { if (evidence && generation === this.#generation && evidence.epoch === this.#epoch && evidence.sender === peerRole(localRole) && evidence.direction === receiveDirectionForRole(localRole)) this.#onReceive(evidence); });
+      }, onCreate: resolve, onCreateFail: (reason) => reject(new Error(`Quiet microphone failed: ${reason}`)), onReceiveFail: () => { this.#metrics.discontinuities += 1; } });
     });
     const settings = this.#track?.getSettings() ?? {}; const flag = (value: unknown): boolean | undefined => typeof value === 'boolean' ? value : undefined;
     const quietContext = [...this.#contexts][0];
@@ -338,6 +351,26 @@ export class QuietClient {
     this.#applied = applied;
     if (applied.contextState !== 'running' || applied.contextSampleRate !== 48_000 || applied.captureSampleRate !== 48_000 || (applied.inputDeviceSampleRate !== 44_100 && applied.inputDeviceSampleRate !== 48_000) || (applied.inputDeviceChannels !== 1 && applied.inputDeviceChannels !== 2) || applied.captureChannels !== 1 || applied.echoCancellation !== false || applied.noiseSuppression !== false || applied.autoGainControl !== false) { await this.reset(); throw new Error('Quiet applied microphone settings are incompatible'); }
     return applied;
+  }
+
+  /** Resolves only after local `onFinish` and the fixed local guard. */
+  async sendUnit(unit: Uint8Array, epoch = this.#epoch): Promise<void> {
+    const runtime = this.#runtimeWindow;
+    if (!(unit instanceof Uint8Array) || unit.byteLength < 1 || unit.byteLength > QUIET_FRAME_BYTES || epoch === undefined || epoch !== this.#epoch || !runtime?.Quiet || !this.#receiver) throw new Error('Quiet is not armed');
+    const generation = this.#generation;
+    const startedAt = performance.now();
+    this.#metrics.playbackHighWaterBytes = Math.max(this.#metrics.playbackHighWaterBytes, unit.byteLength);
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (callback: () => void) => { if (settled) return; settled = true; this.#cancelTransmission = undefined; callback(); };
+      this.#cancelTransmission = () => finish(() => reject(new Error('Quiet transmission cancelled by reset')));
+      this.#transmitter?.destroy();
+      this.#transmitter = runtime.Quiet!.transmitter({ profile: QUIET_PROFILE, clampFrame: QUIET_CLAMP_FRAME, onFinish: () => {
+        this.#metrics.playbackHighWaterMs = Math.max(this.#metrics.playbackHighWaterMs, performance.now() - startedAt);
+        runtime.setTimeout(() => finish(() => generation === this.#generation && epoch === this.#epoch ? resolve() : reject(new Error('Quiet transmission cancelled by reset'))), QUIET_GUARD_MS);
+      } });
+      this.#transmitter.transmit(unit.slice().buffer);
+    });
   }
 
   async sendCorpus(role: Role, epoch: number, onProgress: (entry: CorpusCase, index: number, total: number) => void): Promise<void> {
