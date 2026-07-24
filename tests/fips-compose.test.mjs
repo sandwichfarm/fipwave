@@ -35,6 +35,8 @@ test('the committed FIPS Compose source is a loopback-only shared namespace', as
     readFile(path.join(root, 'vendor/fips/Dockerfile'), 'utf8'),
   ]);
   assert.deepEqual(checkFipsComposeSource(compose, bridgeDockerfile, fipsDockerfile).publishedPorts, ['127.0.0.1:4310:4310']);
+  assert.match(compose, /^\s+-\s+fips-control:\/run\/fips:ro\s*$/m);
+  assert.match(compose, /^\s+-\s+fips-control:\/run\/fips\s*$/m);
 });
 
 test('Compose topology rejects namespace, bind, port, and privilege widening mutations', () => {

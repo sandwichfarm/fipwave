@@ -172,6 +172,8 @@ describe('production runner', () => {
     expect(rendered).toContain('transport: sound');
     expect(rendered).toContain('addr: "sound-b"');
     expect(rendered).toContain('connect_policy: auto_connect');
+    expect(rendered).toContain('control:');
+    expect(rendered).toContain('socket_path: "/run/fips/control.sock"');
     expect(rendered).not.toContain('peers: []');
     expect(rendered).not.toContain('codec:');
   });
