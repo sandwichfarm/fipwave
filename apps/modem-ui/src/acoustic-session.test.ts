@@ -180,8 +180,8 @@ describe('AcousticSession calibration, selection, and commitment', () => {
     const a = new AcousticSession({ ...options('A', aModem), candidates });
     const b = new AcousticSession({ ...options('B', bModem), candidates });
     a.start(); await settlePair(a, b);
-    expect(aModem.appliedCandidates).toEqual(['quiet-safe-1', 'quiet-safe-1', 'quiet-safe-1', 'quiet-safe-1', 'quiet-safe-2', 'quiet-safe-2', 'quiet-safe-2', 'quiet-safe-2']);
-    expect(bModem.appliedCandidates).toEqual(['quiet-safe-1', 'quiet-safe-1', 'quiet-safe-1', 'quiet-safe-1', 'quiet-safe-2', 'quiet-safe-2', 'quiet-safe-2', 'quiet-safe-2']);
+    expect(aModem.appliedCandidates).toEqual(['quiet-safe-1', 'quiet-safe-1', 'quiet-safe-1', 'quiet-safe-1', 'quiet-safe-2', 'quiet-safe-2', 'quiet-safe-2', 'quiet-safe-2', 'quiet-safe-2']);
+    expect(bModem.appliedCandidates).toEqual(['quiet-safe-1', 'quiet-safe-1', 'quiet-safe-1', 'quiet-safe-1', 'quiet-safe-2', 'quiet-safe-2', 'quiet-safe-2', 'quiet-safe-2', 'quiet-safe-2']);
   });
 
   it('executes four numbered A-to-B probes before four numbered B-to-A probes and automatically reaches readiness after COMMIT_ACK', async () => {

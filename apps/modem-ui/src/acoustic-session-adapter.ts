@@ -34,7 +34,10 @@ export class AcousticSessionAdapter {
 
   constructor(private readonly options: AcousticSessionAdapterOptions) {
     this.fips = createFipsPacketAdapter({
-      onPacket: (envelope) => { this.options.session.enqueuePacket(envelope.bytes, trafficClass(envelope.trafficClass)); },
+      onPacket: (envelope) => {
+        const result = this.options.session.enqueuePacket(envelope.bytes, trafficClass(envelope.trafficClass));
+        return result.accepted ? { accepted: true } : { accepted: false, reason: result.reason === 'acoustic_queue_full' ? 'acoustic_queue_full' : result.reason === 'acoustic_not_ready' ? 'acoustic_not_ready' : result.reason === 'acoustic_packet_bounds' ? 'acoustic_packet_bounds' : 'acoustic_class_invalid' };
+      },
       emitPacket: (envelope) => this.options.emitPacket(envelope),
     });
     this.refresh();

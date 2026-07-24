@@ -1,6 +1,6 @@
 import { FipsTrafficClass, isFipsTrafficClass } from '../../../packages/bridge/src/protocol.js';
 
-export type PacketResult = { accepted: true } | { accepted: false; reason: 'not-armed' | 'stale' | 'invalid' };
+export type PacketResult = { accepted: true } | { accepted: false; reason: 'not-armed' | 'stale' | 'invalid' | 'acoustic_queue_full' | 'acoustic_not_ready' | 'acoustic_packet_bounds' | 'acoustic_class_invalid' };
 
 /** A complete opaque FIPS packet plus source-authored local scheduling metadata. */
 export interface FipsPacketEnvelope {
@@ -16,7 +16,7 @@ export interface FipsPacketAdapter {
 }
 
 export interface FipsPacketAdapterOptions {
-  onPacket(envelope: FipsPacketEnvelope): void;
+  onPacket(envelope: FipsPacketEnvelope): PacketResult | void;
   emitPacket(envelope: FipsPacketEnvelope): void;
 }
 
@@ -45,8 +45,7 @@ export function createFipsPacketAdapter(options: FipsPacketAdapterOptions): Fips
       if (rejected) return rejected;
       const accepted = envelope(packet, trafficClass);
       if (!accepted) return { accepted: false, reason: 'invalid' };
-      options.onPacket(accepted);
-      return { accepted: true };
+      return options.onPacket(accepted) ?? { accepted: true };
     },
     send(packet, trafficClass = FipsTrafficClass.Ordinary) {
       if (!lifecycle) return { accepted: false, reason: 'not-armed' };

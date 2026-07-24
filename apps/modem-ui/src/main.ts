@@ -126,6 +126,7 @@ let fipsPackets = createFipsPacketAdapter({
     packetRx += 1;
     syncBridgeState();
     window.dispatchEvent(new CustomEvent('fips-packet-received', { detail: envelope }));
+    return { accepted: true };
   },
   emitPacket(envelope) {
     const socket = bridge;
@@ -166,13 +167,14 @@ function configureAcousticSession(config: Readonly<RunnerConfig>): void {
   let adapter: AcousticSessionAdapter | undefined;
   let transmit = Promise.resolve();
   const modem = {
-    send(unit: Uint8Array): void {
+    send(unit: Uint8Array): Promise<void> {
       const queuedEpoch = epoch;
       // Quiet's Promise is local playback completion plus guard only. The
       // session's remote ACK and heartbeat remain the delivery/readiness proof.
       transmit = transmit.then(() => quiet.sendUnit(unit, queuedEpoch)).then(() => undefined, () => {
         adapter?.markDegraded();
       });
+      return transmit;
     },
     onUnit(handler: (unit: Uint8Array) => void): () => void {
       return quiet.onUnit((unit) => {

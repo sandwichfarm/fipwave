@@ -334,6 +334,7 @@ export class AcousticSession {
   private driveTurn(): void {
     this.expireWork();
     if (this.#state !== 'Ready' || !this.#sessionId || this.#turnOwner !== this.options.role || this.#awaitingAck) return;
+    this.applyOutboundCandidate();
     // A due heartbeat is the scheduler's highest-priority control item.  The
     // timer only sets this bit; it never calls the modem during a peer-owned
     // turn.  This check is after all session/generation/turn guards above.
@@ -554,6 +555,7 @@ export class AcousticSession {
     this.#work = this.#work.then(async () => {
       if (this.#state !== 'Committing' || !this.#sessionId || !this.#selected.AtoB || !this.#selected.BtoA) return;
       this.#settings = { aToB: this.toSettings(this.#selected.AtoB), bToA: this.toSettings(this.#selected.BtoA) };
+      this.applyOutboundCandidate();
       this.#settingsDigest = await digestSettings(this.#settings);
       this.send(Fas1UnitType.Commit, this.#sessionId, this.#settingsDigest);
     }).catch(() => this.fail('acoustic_commit_failed'));
@@ -566,7 +568,7 @@ export class AcousticSession {
       this.#settings = { aToB: this.toSettings(this.#selected.AtoB!), bToA: this.toSettings(this.#selected.BtoA!) };
       const digest = await digestSettings(this.#settings);
       if (!equal(received, digest)) { this.fail('acoustic_commit_digest_mismatch'); return; }
-      this.#settingsDigest = digest; this.#state = 'AwaitingHeartbeat'; this.#turnOwner = 'A';
+      this.#settingsDigest = digest; this.applyOutboundCandidate(); this.#state = 'AwaitingHeartbeat'; this.#turnOwner = 'A';
       this.send(Fas1UnitType.CommitAck, this.#sessionId, digest);
       // The sole direct post-commit heartbeat is a deterministic bootstrap
       // exchange.  B is already AwaitingHeartbeat after the synchronous
@@ -593,6 +595,10 @@ export class AcousticSession {
     if (reply) this.#turnOwner = 'A';
   }
   private toSettings(candidate: AcousticCandidate): DirectionalSettings { return { profileId: candidate.profileId, payloadBytes: candidate.payloadBytes, repetition: candidate.repetition, guardMs: candidate.guardMs, playbackGain: candidate.playbackGain, ackTimeoutMs: candidate.ackTimeoutMs }; }
+  private applyOutboundCandidate(): void {
+    const candidate = this.options.role === 'A' ? this.#selected.AtoB : this.#selected.BtoA;
+    if (candidate) this.options.modem.applyCandidate?.(candidate);
+  }
   private fail(reason: string): void { if (this.#timer !== undefined) this.options.timers.clearTimeout(this.#timer); this.#timer = undefined; this.clearHeartbeatTimers(); this.#state = 'Error'; this.#reason = reason; }
   private mutualRange(peer: AcousticCapabilityRange): boolean { return peer.minPayloadBytes <= this.options.ranges.maxPayloadBytes && peer.maxPayloadBytes >= this.options.ranges.minPayloadBytes; }
   private send(type: Fas1UnitType, sessionId: bigint, body: Uint8Array): void { const raw = encodeFas1({ type, flags: 0, sessionId, sequence: this.#sequence++, packetId: 0, fragmentIndex: 0, fragmentCount: 0, packetLength: 0, body }); void this.options.modem.send(raw); }
