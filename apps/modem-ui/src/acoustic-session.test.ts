@@ -277,3 +277,40 @@ describe('AcousticSession packet, fragment, reassembly, retry, duplicate, and tu
     expect(a.snapshot.counters.retries).toBeGreaterThan(0);
   });
 });
+
+describe('AcousticSession priority, backpressure, heartbeat, degraded recovery, and concurrency', () => {
+  it('uses stable control, heartbeat, ordinary priority with FIFO within each class and rejects a fifth complete packet before retaining bytes', async () => {
+    const timers = new FakeTimers(); const clock = new ManualClock();
+    const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
+    const a = new AcousticSession({ ...options('A', aModem), clock, timers }); const b = new AcousticSession({ ...options('B', bModem), clock, timers });
+    a.start(); await settlePair(a, b); b.heartbeat();
+    expect(b.enqueuePacket(Uint8Array.of(1), 'ordinary').accepted).toBe(true);
+    expect(b.enqueuePacket(Uint8Array.of(2), 'control').accepted).toBe(true);
+    expect(b.enqueuePacket(Uint8Array.of(3), 'heartbeat').accepted).toBe(true);
+    expect(b.enqueuePacket(Uint8Array.of(4), 'ordinary').accepted).toBe(true);
+    expect(b.enqueuePacket(Uint8Array.of(5), 'ordinary')).toEqual({ accepted: false, reason: 'acoustic_queue_full' });
+    expect(b.snapshot.counters).toMatchObject({ queuedPackets: 4, queuedBytes: 4 });
+
+    expect(a.enqueuePacket(Uint8Array.of(9), 'ordinary').accepted).toBe(true);
+    for (let round = 0; round < 16; round += 1) timers.runAll();
+    const bData = bModem.sent.map(decodeFas1).filter((unit) => unit.type === Fas1UnitType.Data).map((unit) => unit.body[0]);
+    expect(bData).toEqual([2, 3, 1, 4]);
+  });
+
+  it('disarms once on repeated missed heartbeats, accepts only a current-session heartbeat for finite recovery, and reaches one terminal error on exhaustion', async () => {
+    const timers = new FakeTimers(); const clock = new ManualClock();
+    const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
+    const a = new AcousticSession({ ...options('A', aModem), clock, timers }); const b = new AcousticSession({ ...options('B', bModem), clock, timers });
+    a.start(); await settlePair(a, b); b.heartbeat();
+    a.markHeartbeatMissed(); a.markHeartbeatMissed();
+    expect(a.snapshot).toMatchObject({ state: 'Degraded', ready: false, reason: 'acoustic_heartbeat_missed' });
+    timers.runAll();
+    expect(a.snapshot).toMatchObject({ state: 'Recovering', ready: false });
+    b.heartbeat();
+    expect(a.snapshot).toMatchObject({ state: 'Ready', ready: true });
+
+    a.markHeartbeatMissed(); timers.runAll(); a.markHeartbeatMissed(); timers.runAll(); a.markHeartbeatMissed(); timers.runAll();
+    expect(a.snapshot).toMatchObject({ state: 'Error', ready: false, reason: 'acoustic_recovery_exhausted' });
+    expect(a.snapshot.counters.queuedPackets).toBe(0);
+  });
+});

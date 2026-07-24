@@ -177,6 +177,7 @@ export class AcousticSession {
   #delivered = new Map<number, number>();
   #deliveryTimer: ReturnType<typeof setTimeout> | undefined;
   #awaitingAck = false;
+  #recoveryAttempts = 0;
   #counters = { retries: 0, dropped: 0, duplicates: 0, deliveredPackets: 0 };
 
   constructor(private readonly options: AcousticSessionOptions) {
@@ -237,6 +238,11 @@ export class AcousticSession {
   dispose(): void { this.reset(this.#epoch); this.#unsubscribe(); }
   async settle(): Promise<void> { let current: Promise<void>; do { current = this.#work; await current; } while (current !== this.#work); }
   heartbeat(): boolean { if (!this.#sessionId || (this.#state !== 'AwaitingHeartbeat' && this.#state !== 'Ready')) return false; this.send(Fas1UnitType.Heartbeat, this.#sessionId, new Uint8Array()); return true; }
+  markHeartbeatMissed(): void {
+    if (this.#state !== 'Ready' && this.#state !== 'Recovering') return;
+    this.clearDeliveryTimer(); this.#awaitingAck = false; this.#state = 'Degraded'; this.#reason = 'acoustic_heartbeat_missed';
+    this.schedule(() => this.beginRecovery(), this.guardMs());
+  }
 
   receive(raw: Uint8Array): void {
     let unit;
@@ -302,6 +308,15 @@ export class AcousticSession {
     if (!this.#active || !this.#awaitingAck || this.#active.packetId !== packetId || this.#active.attempts !== attempt) return;
     this.#awaitingAck = false; this.#counters.retries += 1; this.driveTurn();
   }
+  private beginRecovery(): void {
+    if (this.#state !== 'Degraded') return;
+    this.#recoveryAttempts += 1;
+    if (this.#recoveryAttempts > 2) {
+      this.#state = 'Error'; this.#reason = 'acoustic_recovery_exhausted'; this.#queues = { control: [], heartbeat: [], ordinary: [] }; this.#active = undefined; this.#inbound = undefined; this.#awaitingAck = false; this.clearDeliveryTimer();
+      return;
+    }
+    this.#state = 'Recovering'; this.#reason = undefined;
+  }
   private onData(unit: Fas1Unit): void {
     this.expireWork();
     if (this.#state !== 'Ready' || unit.sessionId !== this.#sessionId || this.#turnOwner !== complement(this.options.role)) return;
@@ -344,7 +359,7 @@ export class AcousticSession {
     this.#counters.retries += 1; this.#turnOwner = complement(this.options.role);
   }
   private sendUnit(unit: Fas1Unit): void { void this.options.modem.send(encodeFas1(unit)); }
-  private degrade(reason: string): void { if (this.#state === 'Error' || this.#state === 'Degraded') return; this.clearDeliveryTimer(); this.#awaitingAck = false; this.#state = 'Degraded'; this.#reason = reason; }
+  private degrade(reason: string): void { if (this.#state === 'Error' || this.#state === 'Degraded') return; this.clearDeliveryTimer(); this.#awaitingAck = false; this.#state = 'Degraded'; this.#reason = reason; this.schedule(() => this.beginRecovery(), this.guardMs()); }
 
   private onHello(headerSessionId: bigint, body: Uint8Array): void {
     if (this.options.role !== 'B' || this.#state !== 'Listening' || headerSessionId !== 0n) return;
@@ -488,9 +503,10 @@ export class AcousticSession {
     this.#state = 'AwaitingHeartbeat';
   }
   private onHeartbeat(sessionId: bigint): void {
-    if (sessionId !== this.#sessionId || (this.#state !== 'AwaitingHeartbeat' && this.#state !== 'Ready')) return;
+    if (sessionId !== this.#sessionId || (this.#state !== 'AwaitingHeartbeat' && this.#state !== 'Ready' && this.#state !== 'Recovering')) return;
     const reply = this.#state === 'AwaitingHeartbeat'; this.#state = 'Ready';
-    if (reply) { this.#turnOwner = this.options.role === 'A' ? 'A' : 'A'; this.heartbeat(); }
+    this.#recoveryAttempts = 0;
+    if (reply) { this.#turnOwner = 'A'; this.heartbeat(); }
   }
   private toSettings(candidate: AcousticCandidate): DirectionalSettings { return { profileId: candidate.profileId, payloadBytes: candidate.payloadBytes, repetition: candidate.repetition, guardMs: candidate.guardMs, playbackGain: candidate.playbackGain, ackTimeoutMs: candidate.ackTimeoutMs }; }
   private fail(reason: string): void { if (this.#timer !== undefined) this.options.timers.clearTimeout(this.#timer); this.#timer = undefined; this.#state = 'Error'; this.#reason = reason; }
