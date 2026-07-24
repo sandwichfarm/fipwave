@@ -46,7 +46,7 @@ async function main() {
   const { role, timeoutMs } = parseFipsComposeSmokeArgs(process.argv.slice(2));
   const project = `fipwave_smoke_${process.pid}_${Date.now()}`.replaceAll(/[^a-z0-9_]/g, '');
   const tempDirectory = await mkdtemp(path.join(tmpdir(), 'fipwave-compose-'));
-  const environment = { ROLE: role, MACHINE_ID: `fipwave-${role}`, BROWSER_PORT: role === 'a' ? '4310' : '4312' };
+  const environment = { ROLE: role.toUpperCase(), MACHINE_ID: `fipwave-${role}`, BROWSER_PORT: role === 'a' ? '4310' : '4312' };
   let cleanupError;
   try {
     await compose(project, ['build'], environment);
