@@ -38,7 +38,7 @@ transferred.
 | T-02-04 | Repudiation | Evidence classification | medium | mitigate | Local bridge evidence remains `Loopback` and non-physical | closed |
 | T-02-05 | Tampering | Sound receive worker | high | mitigate | Canonical envelope, current epoch/arm, and strict monotonic sequence precede the sole `PacketTx` injection | closed |
 | T-02-06 | Elevation of Privilege | FIPS transport integration | high | mitigate | Sound is constructed and dispatched only through normal `TransportHandle` and `PacketTx` paths | closed |
-| T-02-07 | Denial of Service | Sound queues/reconnect | high | mitigate | Item, byte, and age bounds plus reset/disconnect draining and budget release | closed |
+| T-02-07 | Denial of Service | Sound queues/reconnect | high | mitigate | Item, byte, and age bounds plus one runtime-mutex transaction for reserve/enqueue/rollback and reset/disconnect draining; a deterministic interleaving regression proves disconnect cannot reset byte accounting during enqueue | closed |
 | T-02-08 | Spoofing | Sound peer policy | high | mitigate | Exact loopback URL and configured static peer; no ambient discovery | closed |
 | T-02-09 | Information Disclosure | Sound control state | medium | mitigate | Scalar counters and safe error codes only; no URL or packet bytes | closed |
 | T-02-10 | Spoofing | Role resolver | high | mitigate | Literal `a`/`b`, complementary derived identities, immutable result | closed |
@@ -57,9 +57,9 @@ transferred.
 | T-02-23 | Denial of Service | Compose smoke ownership | medium | mitigate | Unique project, bounded polling, argument arrays, and owned cleanup | closed |
 | T-02-24 | Repudiation | Runtime evidence | medium | mitigate | Smoke output explicitly disclaims open-air delivery and ping | closed |
 | T-02-25 | Tampering | Browser state reducer | high | mitigate | Partial/invalid state fails to explicit Unknown values | closed |
-| T-02-26 | Information Disclosure | DOM/error rendering | high | mitigate | Only bounded canonical error strings pass; DOM uses text content | closed |
+| T-02-26 | Information Disclosure | DOM/error rendering | high | mitigate | An exact fixed/template error allowlist rejects raw stack, frame, URL, nsec, multiline, and oversized text; DOM uses text content and adversarial tests cover the projection | closed |
 | T-02-27 | Spoofing | Readiness/MTU UI | high | mitigate | Invalid state has null MTU and unknown configuration; no derived defaults | closed |
-| T-02-28 | Replay | Recovery callbacks/status | high | mitigate | All snapshots are ignored while resetting until exact next-epoch acknowledgement | closed |
+| T-02-28 | Replay | Recovery callbacks/status | high | mitigate | Epoch plus active-browser-socket generation gates every message, RESET acknowledgement, and playback completion; retiring sockets cannot satisfy current recovery | closed |
 | T-02-29 | Denial of Service | Long text/telemetry | medium | mitigate | Error bounds plus wrapping/scroll containment; no event feed | closed |
 | T-02-30 | Tampering / Replay | Browser packet adapter | high | mitigate | Armed epoch/generation and packet-size gates; failure invalidates the adapter | closed |
 | T-02-SC/01 | Tampering | Node dependency graph (02-01) | high | mitigate | Committed lockfile and dependency audit gate | closed |
@@ -73,13 +73,19 @@ transferred.
 ## Verification Evidence
 
 - `npm run verify:dependencies` passed.
-- Node 22.23.1 `npm test` passed: 199/199.
+- Node 22.23.1 `npm test` passed: 207/207.
 - `npm run typecheck` and `npm run build` passed.
-- Browser status and production packet suites passed.
-- `cargo test sound_ --locked` passed: 9/9.
-- Full Rust regression passed after hardening: 1,599 tests.
+- Browser suites passed: 11/11 standard and 2/2 production-browser checks.
+- `cargo test sound_ --locked` passed: 12/12; the focused
+  `transport::sound::tests` module passed 11/11.
+- Full locked Rust regression passed after hardening: 1,598 library tests,
+  9 `fipsctl` tests, and 50 `fipstop` tests; 4 library and 1 documentation
+  tests were intentionally ignored.
 - Role-A Compose runtime smoke passed with first-process FIPS, `fips0`,
   MTU 1280, effective `NET_ADMIN` only, a real configured peer, and local
+  Sound worker readiness.
+- Role-B Compose runtime smoke passed with the complementary role-derived
+  identity, peer, `fips0` MTU 1280, effective `NET_ADMIN` only, and local
   Sound worker readiness.
 
 ## Accepted Risks Log
@@ -92,6 +98,7 @@ No accepted risks.
 |---|---:|---:|---:|---|
 | 2026-07-24 | 33 | 25 | 8 | gsd-security-auditor, initial audit |
 | 2026-07-24 | 37 | 37 | 0 | gsd-security-auditor, post-hardening re-audit |
+| 2026-07-24 | 37 | 37 | 0 | gsd-security-auditor, final audit at `813100e` |
 
 The final count separates the seven per-plan supply-chain entries and the
 four early Phase 2 transport/bridge threats, which were normalized from the

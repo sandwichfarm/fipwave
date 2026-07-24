@@ -22,11 +22,11 @@ peer, an authenticated FIPS link, heartbeat survival, or ICMPv6.
 | Frameworks | Vitest 4.1.10, Playwright 1.61.1, Rust `cargo test`, Node test |
 | Required Node | `v22.23.1` |
 | Fresh audit command | `PATH="/Users/sandwich/.npm/_npx/d295cebdb7c54afe/node_modules/node/bin:$PATH" npm run typecheck && npm test && (cd vendor/fips && cargo test sound_ --locked)` |
-| Fresh audit result | Passed: TypeScript; 20 files / 195 Node tests; 8 focused Rust sound tests |
+| Fresh audit result | Passed: TypeScript; 21 files / 207 Node tests; 12 focused Rust `sound_` tests |
 | Browser packet command | `PATH="/Users/sandwich/.npm/_npx/d295cebdb7c54afe/node_modules/node/bin:$PATH" npm run test:browser -- apps/modem-ui/e2e/fips-packet-bridge.spec.ts` |
-| Browser packet result | Passed: production page exchanges opaque bytes and refuses a delayed prior-epoch packet after reset |
+| Browser packet result | Passed: 11/11 standard browser checks and 2/2 production-browser checks; the production page exchanges opaque bytes, refuses a delayed prior-epoch packet after reset, and ignores RESET acknowledgement from a retiring socket |
 | Deployment evidence | `npm run test:compose`; `npm run test:fips-compose:runtime -- --role a`; `npm run test:fips-compose:runtime -- --role b` — all passed in final review evidence |
-| Full pinned-fork evidence | `cargo test --lib --locked` — 1,594 passed / 4 ignored in final review evidence |
+| Full pinned-fork evidence | `cargo test --locked` — 1,598 library + 9 `fipsctl` + 50 `fipstop` passed; 4 library + 1 documentation tests ignored |
 
 ## Per-Task Verification Map
 
@@ -43,8 +43,8 @@ peer, an authenticated FIPS link, heartbeat survival, or ICMPv6.
 | 02-06-01 | CODEC-01, WEB-04, WEB-05, WEB-06 | Built browser page arms then exchanges exact complete binary FIPS bytes with a real local WebSocket bridge; delayed prior-epoch post-reset packet cannot reach the adapter. | `vitest run apps/modem-ui/src/fips-packet-adapter.test.ts`; `npm run test:browser -- apps/modem-ui/e2e/fips-packet-bridge.spec.ts` | green |
 | 02-06-02 | CONFIG-02, FIPS-02, FIPS-03, WEB-05, WEB-06 | Validated browser reducer separates worker state from browser readiness, requires MTU >=1357, and makes reset acknowledgement/failure retry-safe. | `vitest run apps/modem-ui/src/bridge-state.test.ts apps/modem-ui/src/audio.test.ts` | green |
 | 02-06-03 | WEB-05, WEB-06 | Browser status card renders safe scalar facts and recovery controls without peer/ping claims or page-width overflow. | `npm run test:browser -- apps/modem-ui/e2e/bridge-status.spec.ts` | green |
-| 02-07-01 | FIPS-01, FIPS-02, FIPS-03, CODEC-01 | Strict SoundConfig plus SoundTransport start/send/inbound `ReceivedPacket`/stop; 1357-byte loopback packet succeeds, unarmed/oversize/stale work fails closed. | `(cd vendor/fips && cargo test sound_transport --locked)` | green |
-| 02-07-02 | FIPS-01, FIPS-02, FIPS-03 | Exhaustive Sound dispatch, static policy, pre-operational 1357→1280 MTU and safe control statistics are exercised. | `(cd vendor/fips && cargo test sound_ --locked)` | green |
+| 02-07-01 | FIPS-01, FIPS-02, FIPS-03, CODEC-01 | Strict SoundConfig plus SoundTransport start/send/inbound `ReceivedPacket`/stop; 1357-byte loopback packet succeeds, unarmed/oversize/stale work fails closed, reconnect requires re-arm, same-epoch replay remains rejected, and sequence numbering remains monotonic. | `(cd vendor/fips && cargo test sound_transport --locked)` | green |
+| 02-07-02 | FIPS-01, FIPS-02, FIPS-03 | Exhaustive Sound dispatch, static policy, pre-operational 1357→1280 MTU, safe control statistics, and mutex-owned queue accounting are exercised; a deterministic pause-after-reservation regression proves disconnect cannot reset accounting during enqueue. | `(cd vendor/fips && cargo test sound_ --locked)` | green |
 
 ## Requirement Coverage
 
@@ -65,6 +65,10 @@ peer, an authenticated FIPS link, heartbeat survival, or ICMPv6.
 |---|---|---|
 | Production browser recovery had only an armed happy-path packet assertion. | Added a built-page behavioral assertion to `apps/modem-ui/e2e/fips-packet-bridge.spec.ts`: arm, exchange bytes, reset/re-arm, inject a delayed old-epoch packet, and assert no second adapter delivery. | FILLED — test passed. |
 | New test initially failed TypeScript due to an overly narrow `Window` type cast. | Declared the test-only optional `Window.__fipsPacketDeliveries` property; no implementation code changed. | Test fix iteration 1; typecheck and all suites passed. |
+| A retiring browser socket could race current RESET acknowledgement. | Bound message, RESET, and playback-completion paths to the active socket generation and added a browser regression for a retiring socket. | FILLED — current socket alone can acknowledge recovery. |
+| Sound reconnect behavior lacked an end-to-end sequence/replay regression. | Added a bounded disconnect/reconnect test that requires browser re-arm, preserves same-epoch replay high-water, and sends the next packet with the next sequence. | FILLED — focused Sound tests passed. |
+| Cross-generation byte-accounting correctness was not forced by the original replacement-queue test. | Added a test-only synchronization probe that pauses after reservation under the runtime mutex, proves disconnect blocks, then verifies enqueue and teardown return accounting to zero. | FILLED — the test would fail under the former out-of-lock atomic design. |
+| Raw runtime exceptions could reach operator-facing DOM text. | Added a closed error allowlist with bounded reconstructed audio templates plus adversarial secret, URL, stack, multiline, and oversized-input tests. | FILLED — unsafe text maps to a fixed generic error. |
 
 ## Manual-Only Boundary
 
@@ -79,7 +83,7 @@ peer, an authenticated FIPS link, heartbeat survival, or ICMPv6.
 
 - [x] Every Phase 2 plan task has an executable behavioral or provenance check.
 - [x] All Phase 2-owned requirements map to passing automated evidence.
-- [x] Fresh audit ran under Node 22.23.1; all 195 Node tests, focused browser test, and focused Rust Sound tests passed.
+- [x] Fresh audit ran under Node 22.23.1; all 207 Node tests, 13 browser checks, 12 focused Rust Sound tests, and the complete locked Rust suite passed.
 - [x] Implementation files were not modified during this Nyquist audit.
 - [x] Physical acoustic/FIPS-peer/ICMP claims remain explicitly excluded.
 
