@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 03
-current_phase_name: negotiate-and-deliver-reliable-acoustic-packets
-status: executing
-stopped_at: Completed 03-07-PLAN.md
-last_updated: "2026-07-24T06:52:39.345Z"
+current_phase: 04
+current_phase_name: prove-the-sound-only-fips-ping
+status: planning
+stopped_at: Phase 03 software verified; physical acceptance deferred
+last_updated: "2026-07-24T08:41:39.000Z"
 last_activity: 2026-07-24
-last_activity_desc: Phase 03 execution started
+last_activity_desc: Phase 03 software verified; physical acceptance deferred
 progress:
-  total_phases: 3
+  total_phases: 5
   completed_phases: 2
   total_plans: 24
   completed_plans: 23
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-24)
 
 **Core value:** A real OS-level IPv6 ping must travel in both directions across a live FIPS peer link whose only connection to the isolated node is sound.
-**Current focus:** Phase 03 — negotiate-and-deliver-reliable-acoustic-packets
+**Current focus:** Phase 04 — prove-the-sound-only-fips-ping
 
 ## Current Position
 
-Phase: 03 (negotiate-and-deliver-reliable-acoustic-packets) — EXECUTING
-Plan: 7 of 7
-Status: Ready to execute
-Last activity: 2026-07-24 — Phase 03 execution started
+Phase: 04 (prove-the-sound-only-fips-ping) — PLANNING
+Plan: 0 of TBD
+Status: Ready to plan
+Last activity: 2026-07-24 — Phase 03 software verified; physical acceptance deferred
 
 Progress: [██████████] 96%
 
@@ -158,13 +158,17 @@ explicitly deferred below and still gates the final Open air claim.
 | Phase | State | Resume |
 |-------|-------|--------|
 | 1 | verification_deferred_human | `$gsd-verify-work 1` |
+| 3 | verification_deferred_human | `$gsd-verify-work 3` |
 
 The exact two-laptop Open air and exact-host TUN gate remains mandatory before
 making the final physical demo claim. The 2026-07-23 single-laptop physical
 self-loop proved real speaker-to-microphone feasibility in both directions but
 is intentionally `Loopback`, not qualifying `Open air`, evidence. Per the
 overnight execution brief, implementation phases continue while this external
-hardware checkpoint remains explicit.
+hardware checkpoint remains explicit. Phase 3 software verification passed all
+5 must-haves; its remaining physical checks are a real 1357-byte
+speaker-to-microphone exchange on each target laptop, the exact two-laptop
+Open-air exchange, and an observed physical loss/recovery cycle.
 
 ## Deferred Items
 
@@ -175,6 +179,6 @@ hardware checkpoint remains explicit.
 
 ## Session Continuity
 
-Last session: 2026-07-24T06:52:29.033Z
-Stopped at: Completed 03-07-PLAN.md
+Last session: 2026-07-24T08:41:39.000Z
+Stopped at: Phase 03 software verified; physical acceptance deferred
 Resume file: None
