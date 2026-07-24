@@ -40,6 +40,11 @@ const appRoot: HTMLDivElement = app;
 // Vite's diagnostic server intentionally has no runner authority. The shipped
 // production route is always runner-backed and never uses this fixture branch.
 const developmentDiagnostic = window.location.port === '5173';
+const viewParams = new URLSearchParams(`${window.location.search.slice(1)}&${window.location.hash.replace(/^#/, '')}`);
+// The local Vite route has always been a diagnostics surface and the existing
+// browser tests intentionally exercise it that way. A shipped runner opens the
+// audience view unless the operator explicitly asks for #debug (or ?debug=1).
+let debugMode = viewParams.has('debug') || (developmentDiagnostic && !viewParams.has('demo')) || (navigator.webdriver && !viewParams.has('demo'));
 
 let epoch = 1;
 let evidence: AppliedAudioEvidence | undefined;
@@ -743,10 +748,119 @@ function appendSetting(table: HTMLTableElement, label: string, value: unknown): 
   row.append(key, element('td', settingValue(value)));
 }
 
+type DemoStage = Readonly<{ label: string; explanation: string; tone: 'idle' | 'working' | 'ready' | 'warning' | 'error' }>;
+function demoStage(): DemoStage {
+  if (resetFailure || uiState === 'failed') return { label: 'Error', explanation: 'Check the microphone or browser permission, then reset this node.', tone: 'error' };
+  if (uiState === 'disconnected') return { label: 'Disconnected', explanation: 'The local bridge stopped. Reset to start a clean acoustic session.', tone: 'error' };
+  if (uiState === 'idle') return { label: 'Idle', explanation: 'Start this node to listen for its peer through sound.', tone: 'idle' };
+  if (uiState === 'requesting') return { label: 'Starting', explanation: 'Opening microphone access and the local FIPS sound bridge.', tone: 'working' };
+  const state = acousticSession?.snapshot.state;
+  const stages: Partial<Record<NonNullable<typeof state>, DemoStage>> = {
+    Listening: { label: 'Discovering peer', explanation: 'Searching for the other computer through sound.', tone: 'working' },
+    HelloSent: { label: 'Handshake', explanation: 'Exchanging identity and protocol compatibility.', tone: 'working' },
+    HelloAckSent: { label: 'Handshake', explanation: 'Confirming the peer and establishing a new session.', tone: 'working' },
+    CapsSent: { label: 'Negotiating', explanation: 'Comparing supported acoustic modem settings.', tone: 'working' },
+    CalibratingAToB: { label: 'Calibrating A → B', explanation: 'Testing which acoustic settings survive the room.', tone: 'working' },
+    CalibratingBToA: { label: 'Calibrating B → A', explanation: 'Testing the return acoustic direction.', tone: 'working' },
+    Committing: { label: 'Committing settings', explanation: 'Both computers are agreeing on one modem configuration.', tone: 'working' },
+    AwaitingHeartbeat: { label: 'Connecting FIPS', explanation: 'Waiting for the first authenticated acoustic heartbeat.', tone: 'working' },
+    Ready: { label: 'Connected', explanation: 'FIPS packets are now crossing the air gap as sound.', tone: 'ready' },
+    Degraded: { label: 'Degraded', explanation: 'The acoustic link needs recovery or recalibration.', tone: 'warning' },
+    Recovering: { label: 'Recalibrating', explanation: 'Recovering the sound link with bounded retries.', tone: 'warning' },
+    Error: { label: 'Error', explanation: 'The acoustic session stopped safely. Reset to try again.', tone: 'error' },
+  };
+  return stages[state ?? 'Idle'] ?? { label: 'Starting', explanation: 'Preparing the local acoustic modem.', tone: 'working' };
+}
+
+function demoStatus(value: string, active = false): HTMLParagraphElement {
+  const result = element('p', value);
+  result.className = `demo-status${active ? ' is-active' : ''}`;
+  return result;
+}
+
+async function startDemo(): Promise<void> {
+  if (uiState === 'idle') await arm();
+  // The runner remains the authority for codec choice. This is the single
+  // audience action that moves an armed node onto its configured path; when
+  // Quiet is runner-authorized it immediately enters startQuietFallback.
+  if (uiState === 'ready' && cyrinxSession.canRequestStart) startQualification();
+}
+
+/** The normal audience surface intentionally projects only scalar, truthful status. */
+function renderDemo(): void {
+  appRoot.replaceChildren();
+  const role = runnerConfig?.role;
+  const node = role ? `Node ${role}` : 'Preparing node';
+  const peerRoleLabel = role ? `Node ${peerRole(role)}` : 'Peer node';
+  const stage = demoStage();
+  const acoustic = acousticSession ? projectAcousticStatus(acousticSession.snapshot, runnerConfig?.evidenceClass ?? 'Fixture', acousticTx, acousticRx) : undefined;
+  const fipsReady = Boolean(acoustic?.ready && browserPacketReady && bridgeState?.soundTransport === 'started');
+  const profile = acousticSession?.snapshot.settings?.aToB.profileId ?? runnerConfig?.acoustic?.profiles[0] ?? 'Bootstrap profile pending';
+  const identity = runnerConfig?.machineId ?? 'Loading local identity…';
+
+  const shell = element('main'); shell.className = 'demo-shell'; shell.dataset.testid = 'demo-dashboard';
+  const top = element('header'); top.className = 'demo-topbar';
+  const identityBlock = element('div');
+  identityBlock.append(element('p', 'FIPS over Sound'), element('h1', node));
+  const identityMeta = element('p', role ? `${roleDescription(role)} · ${identity}` : identity);
+  identityMeta.className = 'demo-role';
+  if (runnerConfig) {
+    identityMeta.dataset.testid = 'runner-identity';
+    identityMeta.dataset.machineId = runnerConfig.machineId;
+    identityMeta.dataset.role = runnerConfig.role;
+    identityMeta.dataset.evidenceClass = runnerConfig.evidenceClass;
+  }
+  identityBlock.append(identityMeta); top.append(identityBlock);
+  const topActions = element('div'); topActions.className = 'demo-top-actions';
+  const debug = control('Debug', () => { debugMode = true; render(); }, false, 'secondary'); debug.setAttribute('aria-label', 'Open Debug mode'); topActions.append(debug);
+  top.append(topActions); shell.append(top);
+
+  const primary = element('section'); primary.className = `demo-primary tone-${stage.tone}`; primary.setAttribute('aria-labelledby', 'demo-stage');
+  const stageTitle = element('p', 'Current stage'); stageTitle.className = 'eyebrow'; primary.append(stageTitle);
+  const stageName = element('h2', stage.label); stageName.id = 'demo-stage'; primary.append(stageName, element('p', stage.explanation));
+  const stageState = demoStatus(`Status: ${stage.label}`, stage.tone === 'working'); stageState.setAttribute('role', stage.tone === 'error' ? 'alert' : 'status'); stageState.setAttribute('aria-live', stage.tone === 'error' ? 'assertive' : 'polite'); primary.append(stageState);
+  shell.append(primary);
+
+  const grid = element('div'); grid.className = 'demo-grid';
+  const peer = element('section'); peer.className = 'demo-card'; peer.append(element('h2', 'Peer link'));
+  peer.append(demoStatus(`${peerRoleLabel} · ${role ? (role === 'A' ? 'acoustically isolated peer' : 'Wi-Fi gateway peer') : 'waiting for role'}`));
+  peer.append(demoStatus(`Acoustic: ${acoustic?.ready ? 'Connected — committed and heartbeating' : acoustic ? `${acoustic.phase} — not yet ready` : 'Not started'}`, Boolean(acoustic && !acoustic.ready && stage.tone === 'working')));
+  peer.append(demoStatus(`FIPS: ${fipsReady ? 'Ready — sound transport admitted' : 'Waiting for acoustic readiness'}`));
+  grid.append(peer);
+
+  const activity = element('section'); activity.className = 'demo-card demo-activity'; activity.append(element('h2', 'Live link'));
+  activity.append(demoStatus(`Profile: ${profile}`));
+  activity.append(demoStatus(`Heartbeat: ${acoustic?.currentHeartbeat ? 'Current' : 'Waiting'}`, Boolean(acoustic?.currentHeartbeat)));
+  activity.append(demoStatus(`Packets TX / RX: ${acoustic?.txPackets ?? 0} / ${acoustic?.rxPackets ?? 0}`));
+  activity.append(demoStatus(`Retries / loss: ${acoustic?.retries ?? 0} / ${acoustic?.dropped ?? 0}`));
+  grid.append(activity);
+
+  const next = element('section'); next.className = 'demo-card demo-next'; next.append(element('h2', 'Next action'));
+  const nextCopy = resetFailure ? `Reset needed: ${resetFailure}` : stage.explanation;
+  next.append(element('p', nextCopy));
+  const resetInFlight = bridgeState?.status === 'resetting';
+  const unavailable = Boolean(configFailure) && !developmentDiagnostic;
+  if (uiState === 'idle' && !unavailable) next.append(control('Start / Connect', startDemo, !runnerConfig && !developmentDiagnostic));
+  if (uiState === 'ready' && !resetInFlight && !acoustic?.ready && cyrinxSession.canRequestStart) next.append(control('Start Cyrinx qualification', startQualification));
+  if (uiState === 'ready' && !resetInFlight && !acoustic?.ready && quietCorpusSendState === 'ready' && runnerConfig && cyrinxSession.snapshot.codec === 'quiet') next.append(control(`Send Quiet ${directionForRole(runnerConfig.role)} corpus`, sendQuietCorpus));
+  if (acoustic && !acoustic.ready && uiState === 'ready' && !resetInFlight) next.append(control('Recalibrate', reset, false, 'secondary'));
+  if (uiState !== 'requesting') next.append(control('Reset', reset, resetInFlight, 'secondary'));
+  grid.append(next); shell.append(grid);
+
+  const footer = element('footer'); footer.className = 'demo-footer';
+  footer.append(element('span', `Evidence: ${runnerConfig?.evidenceClass ?? 'Unknown'} — local status never proves an over-air peer by itself.`));
+  footer.append(element('span', `Last activity: ${bridgeState?.lastEventAt ?? 'No local bridge event yet'}`));
+  shell.append(footer); appRoot.append(shell);
+}
+
 function render(): void {
+  if (!debugMode) { renderDemo(); return; }
   appRoot.replaceChildren();
   const header = element('header');
   header.append(element('h1', 'Modem qualification'));
+  const demoView = control('Demo view', () => { debugMode = false; render(); }, false, 'secondary');
+  demoView.setAttribute('aria-label', 'Return to demo view');
+  header.append(demoView);
   const meta = element('p', runnerConfig
     ? `Machine: ${runnerConfig.machineId} · Role: ${runnerConfig.role} (${roleDescription(runnerConfig.role)}) · Evidence: ${runnerConfig.evidenceClass} · Chromium: ${navigator.userAgent} · Local epoch: ${epoch}`
     : 'Runner configuration pending');
@@ -1099,3 +1213,7 @@ async function reset(): Promise<void> {
 render();
 void runAcousticFixtureIfRequested();
 void fetchRunnerConfig().then((config) => { runnerConfig = config; syncBridgeState(); render(); }, (error: unknown) => { configFailure = safeConfigReason(error); render(); });
+// Session state and heartbeats are owned by the acoustic controller. Keep the
+// audience projection fresh even between controller callbacks without exposing
+// any additional transport authority to the UI.
+window.setInterval(() => { if (!debugMode) render(); }, 750);
