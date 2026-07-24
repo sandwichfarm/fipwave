@@ -487,14 +487,13 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     connection.acousticCapabilityUsed = false;
     if (socket.readyState === socket.OPEN) socket.send(JSON.stringify({ kind: 'acoustic-capability', epoch: state.epoch, capability: connection.acousticCapability.toString('hex') }));
   };
-  const disarmAcousticSession = (connection?: BrowserConnectionState, socket?: WebSocket): void => {
+  const disarmAcousticSession = (): void => {
     if (!state.acousticReady) return;
     state.acousticReady = false;
     notifyFipsBrowserState(false);
     acousticReadinessProof = undefined;
     state.packetReadiness = { browser: false, fips: false };
     clearQueues();
-    if (connection && socket) issueAcousticCapability(socket, connection);
   };
   const rejectSocket = (socket: WebSocket, error: unknown): void => {
     const safe = safeBridgeError(error);
@@ -795,7 +794,6 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     await persist(generation);
     const resetFrame = encodeFrame({ type: MessageType.RESET, flags: RESET_ACK_FLAG, epoch: state.epoch, sequence: 0n, payload: Buffer.alloc(0) });
     for (const client of clients) if (client.readyState === client.OPEN) client.send(resetFrame);
-    if (owner) for (const connection of browserConnections) issueAcousticCapability(owner, connection);
     broadcastSession();
     return state.epoch;
   };
@@ -1074,12 +1072,17 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
           }
         } else {
           if (!acousticReadinessProof || !timingSafeEqual(frame.payload, connection.acousticCapability)) fail('acoustic_disarm_capability_invalid');
-          disarmAcousticSession(connection, socket);
+          disarmAcousticSession();
         }
         return;
       }
       if (frame.sequence <= lastSequence.value) fail('stale_or_duplicate_frame');
       lastSequence.value = frame.sequence;
+      if (frame.type === MessageType.HELLO) {
+        if (frame.payload.byteLength !== 0 || frame.flags !== 0) fail('acoustic_capability_request_invalid');
+        issueAcousticCapability(socket, connection);
+        return;
+      }
       await expireCyrinx();
       if (frame.type === MessageType.RESET) {
         if (frame.flags === RESET_ACK_FLAG) fail('reset_ack_not_accepted');
@@ -1232,7 +1235,6 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       acousticCapabilityUsed: false,
     };
     owner = socket; epochClaimed = true; reconnectAllowed = false; clients.add(socket); browserConnections.add(connection); state.packetEndpoints.browser = 'ready';
-    issueAcousticCapability(socket, connection);
     flushPacketQueue('fips-to-browser');
     const lastSequence = { value: -1n }; sequenceTrackers.add(lastSequence); let processing = Promise.resolve();
     void expireCyrinx().then((expired) => {

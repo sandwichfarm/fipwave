@@ -613,6 +613,9 @@ async function openFreshBridge(): Promise<WebSocket> {
     socket.addEventListener('open', () => { window.clearTimeout(timer); resolve(); }, { once: true });
     socket.addEventListener('error', () => { window.clearTimeout(timer); reject(new Error('Local bridge disconnected')); }, { once: true });
   });
+  // Capabilities are explicitly requested after ownership is established so
+  // unrelated bridge clients retain their stable startup message ordering.
+  socket.send(encodeControlFrame({ type: 1, epoch, sequence: bridgeSequence++ }));
   return socket;
 }
 

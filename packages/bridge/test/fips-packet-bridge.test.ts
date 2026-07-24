@@ -38,7 +38,10 @@ async function openEndpoint(port: number, endpoint: 'browser' | 'fips'): Promise
     }))
     : undefined;
   await once(socket, 'open');
-  if (capability) socket.readinessCapability = await capability;
+  if (capability) {
+    socket.send(encodeFrame({ type: MessageType.HELLO, epoch: 1, sequence: 0n, payload: Buffer.alloc(0) }));
+    socket.readinessCapability = await capability;
+  }
   return socket;
 }
 
@@ -124,6 +127,17 @@ function acousticReady(socket: BrowserSocket, epoch: number): Buffer {
 function acousticDisarm(socket: BrowserSocket, epoch: number): Buffer {
   if (!socket.readinessCapability) throw new Error('browser readiness capability is missing');
   return encodeFrame({ type: MessageType.ACOUSTIC_DISARM, epoch, sequence: 0n, payload: socket.readinessCapability });
+}
+
+async function requestAcousticCapability(socket: BrowserSocket, epoch: number): Promise<void> {
+  const received = new Promise<void>((resolve) => socket.once('message', (raw) => {
+    const message = JSON.parse(Buffer.from(raw as Buffer).toString('utf8')) as Record<string, unknown>;
+    if (message.kind !== 'acoustic-capability' || typeof message.capability !== 'string') throw new Error('bridge did not issue an acoustic capability');
+    socket.readinessCapability = Buffer.from(message.capability, 'hex');
+    resolve();
+  }));
+  socket.send(encodeFrame({ type: MessageType.HELLO, epoch, sequence: 0n, payload: Buffer.alloc(0) }));
+  await received;
 }
 
 describe('FIPS packet bridge', () => {
@@ -403,6 +417,7 @@ describe('FIPS packet bridge', () => {
 
     const rearm = once(fips, 'message');
     await drainBridge();
+    await requestAcousticCapability(browser, 2);
     browser.send(acousticReady(browser, 2));
     await rearm;
     const disarm = once(fips, 'message');
