@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 04
 current_phase_name: prove-the-sound-only-fips-ping
 status: planning
-stopped_at: Phase 4 UI-SPEC approved
-last_updated: "2026-07-24T09:03:49.032Z"
+stopped_at: Completed 04-01-PLAN.md
+last_updated: "2026-07-24T10:28:36.201Z"
 last_activity: 2026-07-24
 last_activity_desc: Phase 03 software verified; physical acceptance deferred
 progress:
   total_phases: 4
   completed_phases: 2
-  total_plans: 24
-  completed_plans: 23
+  total_plans: 29
+  completed_plans: 24
 ---
 
 # Project State
@@ -27,12 +27,12 @@ See: .planning/PROJECT.md (updated 2026-07-24)
 
 ## Current Position
 
-Phase: 04 (prove-the-sound-only-fips-ping) — PLANNING
-Plan: 0 of TBD
-Status: Ready to plan
+Phase: 04 (prove-the-sound-only-fips-ping) — IN PROGRESS
+Plan: 1 of 5
+Status: Executing remaining plans
 Last activity: 2026-07-24 — Phase 03 software verified; physical acceptance deferred
 
-Progress: [██████████] 96%
+Progress: [████████░░] 83%
 
 ## Performance Metrics
 
@@ -80,6 +80,7 @@ Progress: [██████████] 96%
 | Phase 03 P05 | 6m | 2 tasks | 2 files |
 | Phase 03 P06 | 18m | 2 tasks | 4 files |
 | Phase 03 P07 | 18m | 2 tasks | 8 files |
+| Phase 04 P01 | 36min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -136,6 +137,7 @@ Recent decisions affecting current work:
 - [Phase ?]: Phase 3: AUDIO_SETTINGS is local preflight only; only a current-epoch acoustic readiness projection may arm FIPS.
 - [Phase ?]: Phase 3: Session readiness requires matching settings commitment and current heartbeat; microphone preflight cannot arm FIPS.
 - [Phase ?]: Phase 3: The built browser's two-role FAS1 seam is Fixture-only evidence and cannot claim Loopback or Open air.
+- [Phase ?]: Phase 4 Plan 1: FIPS proof observation permits only fixed peers/links/transports Unix-socket queries, and the controller requires an explicit configured B target before process launch.
 
 ### Pending Todos
 
@@ -179,6 +181,6 @@ Open-air exchange, and an observed physical loss/recovery cycle.
 
 ## Session Continuity
 
-Last session: 2026-07-24T09:03:49.025Z
-Stopped at: Phase 4 UI-SPEC approved
-Resume file: .planning/phases/04-prove-the-sound-only-fips-ping/04-UI-SPEC.md
+Last session: 2026-07-24T10:28:36.194Z
+Stopped at: Completed 04-01-PLAN.md
+Resume file: None
