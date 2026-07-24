@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 01
-current_phase_name: Qualify the Demo Substrate
-status: executing
-stopped_at: Completed 02-06-PLAN.md
-last_updated: "2026-07-24T02:32:34.406Z"
-last_activity: 2026-07-23
-last_activity_desc: Plan 01-10 physical checkpoint reached
+current_phase: 3
+current_phase_name: Negotiate and Deliver Reliable Acoustic Packets
+status: planning
+stopped_at: Phase 2 complete, ready to plan Phase 3
+last_updated: "2026-07-24T05:00:31.506Z"
+last_activity: 2026-07-24
+last_activity_desc: Phase 2 complete, transitioned to Phase 3
 progress:
-  total_phases: 2
+  total_phases: 5
   completed_phases: 1
   total_plans: 17
   completed_plans: 16
@@ -20,17 +20,17 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-07-23)
+See: .planning/PROJECT.md (updated 2026-07-24)
 
 **Core value:** A real OS-level IPv6 ping must travel in both directions across a live FIPS peer link whose only connection to the isolated node is sound.
-**Current focus:** Phase 01 — Qualify the Demo Substrate
+**Current focus:** Phase 3 — Negotiate and Deliver Reliable Acoustic Packets
 
 ## Current Position
 
-Phase: 01 (Qualify the Demo Substrate) — EXECUTING
-Plan: 10 of 10
-Status: Awaiting blocking-human physical qualification
-Last activity: 2026-07-23 — Plan 01-10 physical checkpoint reached
+Phase: 3 — Negotiate and Deliver Reliable Acoustic Packets
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-07-24 — Phase 2 complete, transitioned to Phase 3
 
 Progress: [█████████░] 94%
 
@@ -38,7 +38,7 @@ Progress: [█████████░] 94%
 
 **Velocity:**
 
-- Total plans completed: 0
+- Total plans completed: 7
 - Average duration: -
 - Total execution time: 0 hours
 
@@ -46,7 +46,7 @@ Progress: [█████████░] 94%
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| - | - | - | - |
+| 2 | 7 | - | - |
 
 **Recent Trend:**
 
@@ -80,6 +80,13 @@ Progress: [█████████░] 94%
 
 Recent decisions affecting current work:
 
+- Phase 2: FIPS uses a first-class codec-neutral SoundTransport with a strict
+  1357-byte minimum link MTU and complete opaque-packet boundary.
+- Phase 2: One validated A/B resolver owns disposable identities, peer mapping,
+  ports, audio/profile defaults, retry, and heartbeat values; public state
+  never includes nsecs.
+- Phase 2: Browser/FIPS traffic stays on a loopback-only binary WebSocket
+  bridge; epoch and socket-generation gates reject stale recovery work.
 - Phase 1: Cyrinx gets a strict 90-minute exact-laptop bidirectional qualification and must yield immediately to a browser-ready audible fallback on failure.
 - Phase 1: The newer throughput reassessment governs: keep the bridge codec-neutral, require at least a 1357-byte sound MTU, do not make `ggwave` primary, and do not make Hush default.
 - Phase 4: The acceptance proof is a real container-kernel `ping -6`; the isolated receiver has no alternate FIPS transport.
@@ -148,6 +155,6 @@ hardware checkpoint remains explicit.
 
 ## Session Continuity
 
-Last session: 2026-07-24T02:32:34.398Z
-Stopped at: Completed 02-06-PLAN.md
+Last session: 2026-07-24T05:00:31.506Z
+Stopped at: Phase 2 complete, ready to plan Phase 3
 Resume file: None

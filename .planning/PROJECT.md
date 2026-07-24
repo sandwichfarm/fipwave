@@ -23,22 +23,27 @@ peer link whose only connection to the isolated node is sound.
 
 ### Validated
 
-(None yet — ship to validate)
+- ✓ A pinned `jmcorgan/fips` fork has a first-class sound transport that
+  participates in normal lifecycle, packet, MTU, policy, and control paths —
+  Phase 2.
+- ✓ The FIPS-facing modem boundary is codec-neutral, binary, bounded, and
+  carries complete opaque packets with a 1357-byte link MTU — Phase 2.
+- ✓ Each Dockerized FIPS daemon has a loopback-only binary bridge to the
+  browser-owned modem boundary with reset and stale-epoch protection —
+  Phase 2.
+- ✓ Disposable A/B identities, peer mappings, ports, codec/audio defaults,
+  calibration candidates, retries, and heartbeat thresholds resolve from one
+  validated secret-safe authority — Phase 2.
 
 ### Active
 
-- [ ] Fork and minimally extend FIPS with a sound transport adapter that
-      participates in normal FIPS peering.
 - [ ] Encode complete FIPS transport packets into acoustic frames and decode
       them on the peer, including any link-local fragmentation and reassembly
       needed beneath FIPS.
-- [ ] Keep the FIPS-facing modem boundary codec-neutral and select the physical
-      codec through a strict 90-minute two-laptop Cyrinx gate with an immediate
-      browser-ready fallback.
+- [ ] Select the physical codec through a strict 90-minute two-laptop Cyrinx
+      gate with an immediate browser-ready fallback.
 - [ ] Carry traffic bidirectionally over microphones and speakers so FIPS
       handshake, heartbeat, peering, and reply traffic all work.
-- [ ] Bridge each Dockerized FIPS daemon to a browser that exclusively owns
-      microphone capture and synthesized speaker output.
 - [ ] Run a two-laptop topology where the receiving node has no active FIPS
       transport other than sound and the sending node connects it to the wider
       mesh.
@@ -48,9 +53,6 @@ peer link whose only connection to the isolated node is sound.
       macOS/macOS or macOS/Linux laptop combinations.
 - [ ] Launch the complete role-specific stack with `npm run demo -- a` or
       `npm run demo -- b`, with the role as the only required difference.
-- [ ] Keep disposable demo identities, peer mappings, ports, codec
-      capabilities, calibration candidates, and timing in one validated
-      configuration source.
 - [ ] Establish each acoustic session through a robust bootstrap handshake,
       capability exchange, bidirectional calibration sweep, and matching
       settings commitment before FIPS traffic is admitted.
@@ -99,10 +101,10 @@ peer link whose only connection to the isolated node is sound.
 - FIPS defaults several transports to a 1280-byte link MTU and has 114-byte and
   69-byte handshake frames. Acoustic encoding research must balance the
   reported MTU, packet duration, error rate, and demo-room noise.
-- The bridge between browser and container is not yet selected. It must carry
-  binary data bidirectionally with low implementation overhead; a local
-  WebSocket is the leading candidate. The selected codec may run in the
-  browser, or the browser may stream PCM to a container-side codec worker.
+- The browser/container boundary is a loopback-only binary WebSocket. FIPS
+  exchanges complete opaque packets through it while the browser exclusively
+  owns microphone and speaker I/O; codec framing, calibration, reliability,
+  and reassembly remain below that boundary.
 - `ggwave` is too slow to be the default FIPS codec at its documented
   8–16 bytes/second. Cyrinx 2 is the primary time-boxed spike because its
   measured wideband PHY operates in the tens-of-kilobits-per-second range, but
@@ -147,18 +149,18 @@ peer link whose only connection to the isolated node is sound.
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Fork `jmcorgan/fips` | Its concrete transport dispatch is closed and a sound transport must participate as a first-class FIPS link | — Pending |
-| Put microphone and speaker I/O in the browser | Browser permissions and Web Audio avoid native, host-specific audio integrations | — Pending |
-| Run FIPS and the bridge in Docker | Makes the FIPS environment reproducible across likely demo laptops | — Pending |
+| Fork `jmcorgan/fips` | Its concrete transport dispatch is closed and a sound transport must participate as a first-class FIPS link | ✓ Pinned fork and first-class SoundTransport shipped in Phase 2 |
+| Put microphone and speaker I/O in the browser | Browser permissions and Web Audio avoid native, host-specific audio integrations | ✓ Browser-owned audio and armed packet boundary shipped in Phases 1–2 |
+| Run FIPS and the bridge in Docker | Makes the FIPS environment reproducible across likely demo laptops | ✓ Loopback-only shared-namespace Compose topology shipped in Phase 2 |
 | Require a real IPv6 ping | Proves the acoustic hop carries actual FIPS mesh traffic rather than a staged application effect | — Pending |
 | Use audible signalling by default | The recognizable modem sound is central to the memeable demo experience | — Pending |
 | Treat near-ultrasonic signalling as opportunistic | It is useful but cannot threaten the one-day core deliverable | — Pending |
 | Fragment only beneath the FIPS transport boundary if needed | FIPS itself does not fragment; acoustic frames need manageable on-air duration and recovery | — Pending |
-| Keep the modem bridge codec-neutral | The one-day implementation must be able to replace a failed PHY spike without rewriting the FIPS fork | — Pending |
+| Keep the modem bridge codec-neutral | The one-day implementation must be able to replace a failed PHY spike without rewriting the FIPS fork | ✓ Complete opaque-packet boundary verified in Phase 2 |
 | Gate Cyrinx for 90 minutes before selection | Its measured throughput fits FIPS, but its live browser and two-laptop path is not yet qualified | — Pending |
-| Advertise a minimum 1357-byte sound MTU | FIPS subtracts 77 bytes from its transport MTU and IPv6 requires an effective 1280-byte path | — Pending |
+| Advertise a minimum 1357-byte sound MTU | FIPS subtracts 77 bytes from its transport MTU and IPv6 requires an effective 1280-byte path | ✓ Enforced and runtime-verified in Phase 2 |
 | Use one role argument for the complete demo | Demo-day reliability depends on eliminating manual configuration and launch choreography | — Pending |
-| Centralize disposable A/B identities and settings | Demo nsecs may be hard-coded, but must be replaceable in one place and never printed | — Pending |
+| Centralize disposable A/B identities and settings | Demo nsecs may be hard-coded, but must be replaceable in one place and never printed | ✓ Secret-safe authority verified in Phase 2 |
 | Bootstrap before adapting | Peers need one known robust control channel before they can measure and negotiate better directional settings | — Pending |
 | Commit a settings digest before FIPS readiness | Both sides must prove they selected the same session configuration before admitting network traffic | — Pending |
 | Make the primary UI stateful and no-scroll | Two visible laptop screens must explain discovery, calibration, connection, and traffic to an audience at a glance | — Pending |
@@ -181,4 +183,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-23 after high-throughput codec decision*
+*Last updated: 2026-07-24 after Phase 2*

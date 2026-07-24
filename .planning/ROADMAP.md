@@ -22,7 +22,7 @@ stateful no-scroll demo interface.
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [ ] **Phase 1: Qualify the Demo Substrate** - Resolve codec, browser-audio, Docker/TUN, and sound-MTU viability on the exact demo laptops.
-- [ ] **Phase 2: Configure and Establish the Codec-Neutral FIPS Bridge** - Centralize role configuration and make complete FIPS packets safely exchangeable with the browser modem through a first-class sound transport.
+- [x] **Phase 2: Configure and Establish the Codec-Neutral FIPS Bridge** - Centralize role configuration and make complete FIPS packets safely exchangeable with the browser modem through a first-class sound transport. (completed 2026-07-24)
 - [ ] **Phase 3: Negotiate and Deliver Reliable Acoustic Packets** - Bootstrap, calibrate, negotiate, and provide bounded deterministic half-duplex sound delivery beneath the FIPS boundary.
 - [ ] **Phase 4: Prove the Sound-Only FIPS Ping** - Connect an otherwise isolated node to the wider mesh solely through the acoustic FIPS link.
 - [ ] **Phase 5: Present, Freeze, and Rehearse the Demo** - Provide the one-command A/B experience, stateful no-scroll interface, evidence, diagnostics, and repeatable recovery.
@@ -149,7 +149,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Qualify the Demo Substrate | 9/10 | In Progress|  |
-| 2. Configure and Establish the Codec-Neutral FIPS Bridge | 7/7 | In Progress|  |
+| 2. Configure and Establish the Codec-Neutral FIPS Bridge | 7/7 | Complete    | 2026-07-24 |
 | 3. Negotiate and Deliver Reliable Acoustic Packets | 0/TBD | Not started | - |
 | 4. Prove the Sound-Only FIPS Ping | 0/TBD | Not started | - |
 | 5. Present, Freeze, and Rehearse the Demo | 0/TBD | Not started | - |
