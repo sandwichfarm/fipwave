@@ -53,7 +53,7 @@ test('production Quiet route performs verified RESET, arm, teardown, and re-arm 
 
   const firstReport = await canonicalFallback();
 
-  await page.getByRole('button', { name: 'Reset / re-arm' }).click();
+  await page.getByRole('button', { name: 'Reset and reconnect' }).click();
   await expect(page.getByText('Audio preflight passed on this laptop.')).toBeVisible({ timeout: 30_000 });
   // Quiet is already runner-selected, so the intermediate reset/arm epoch may
   // advance immediately to its Quiet-owned epoch before the DOM can render it.

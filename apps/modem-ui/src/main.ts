@@ -46,6 +46,7 @@ let quietCorpusSendState: QuietCorpusSendState = 'unavailable';
 let quietFailureReportedEpoch: number | undefined;
 let runnerConfig: Readonly<RunnerConfig> | undefined;
 let configFailure = '';
+let resetFailure = '';
 function requestedPlaybackGain(): number {
   const raw = new URLSearchParams(window.location.hash.replace(/^#/, '')).get('playbackGain');
   if (raw === null || raw.trim() === '') return 1;
@@ -125,6 +126,42 @@ const bodyCopy: Record<UiState, string> = {
   failed: '',
   disconnected: 'Local bridge disconnected. Qualification is paused; no result is being inferred.',
 };
+
+function safeUiReason(reason: unknown, fallback: string): string {
+  const raw = reason instanceof Error ? reason.message : typeof reason === 'string' ? reason : '';
+  const normalized = raw.replace(/\s+/g, ' ').trim();
+  if (
+    normalized.length === 0
+    || normalized.length > 240
+    || /(?:nsec1|(?:https?|wss?):\/\/|[?&][a-z0-9_-]+=)/i.test(normalized)
+  ) return fallback;
+  return normalized;
+}
+
+function safeConfigReason(reason: unknown): string {
+  const normalized = safeUiReason(reason, '');
+  if (normalized === 'runner qualification configuration is invalid') return normalized;
+  if (normalized === 'runner qualification configuration is unavailable') return normalized;
+  return 'runner qualification configuration is unavailable';
+}
+
+function localBridgeCopy(state: BridgeState | undefined): string {
+  if (!state) return 'Local bridge: not connected';
+  if (state.status === 'ready') return `Local bridge ready · epoch ${state.epoch}`;
+  if (state.status === 'resetting') return 'Resetting local session…';
+  if (state.status === 'disconnected') return 'Local bridge disconnected. Reset and reconnect to start a new local session.';
+  if (state.status === 'overflow') return 'Bridge queue limit reached; the frame was rejected. Reset and reconnect before continuing.';
+  if (state.status === 'rejected') return 'Bridge rejected an invalid frame. Reset and reconnect before continuing.';
+  return 'Local bridge: not connected';
+}
+
+function completePacketCopy(state: BridgeState | undefined): string {
+  if (!state) return 'Unknown';
+  const prefix = state.stale ? `Previous epoch: ${state.epoch}` : `Epoch ${state.epoch}`;
+  const txLabel = state.txPackets === 1 ? 'packet' : 'packets';
+  const rxLabel = state.rxPackets === 1 ? 'packet' : 'packets';
+  return `${prefix} · TX complete ${txLabel}: ${state.txPackets} · RX complete ${rxLabel}: ${state.rxPackets}`;
+}
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, text?: string): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
@@ -492,6 +529,7 @@ async function requestBridgeReset(): Promise<number> {
   });
   try { socket.send(encodeControlFrame({ type: 8, epoch: previousEpoch, sequence: bridgeSequence++ })); } catch (error) { failBridge(socket, asError(error, 'Local bridge RESET delivery failed')); }
   const nextEpoch = await accepted;
+  bridgeState = reduceBridgeState(bridgeState, { type: 'reset-ack', epoch: nextEpoch });
   bridgeDelivery = `RESET accepted at epoch ${nextEpoch}`;
   if (bridge === socket) {
     bridge = undefined;
@@ -512,11 +550,15 @@ function render(): void {
   appRoot.replaceChildren();
   const header = element('header');
   header.append(element('h1', 'Modem qualification'));
-  const meta = element('p', `Machine: ${runnerConfig?.machineId ?? 'runner config pending'} · Role: ${runnerConfig?.role ?? 'Unknown'} · Evidence: ${runnerConfig?.evidenceClass ?? 'Unknown'} · Chromium: ${navigator.userAgent} · Local epoch: ${epoch}`);
+  const meta = element('p', runnerConfig
+    ? `Machine: ${runnerConfig.machineId} · Role: ${runnerConfig.role} · Evidence: ${runnerConfig.evidenceClass} · Chromium: ${navigator.userAgent} · Local epoch: ${epoch}`
+    : 'Runner configuration pending');
   meta.className = 'measurements';
   header.append(meta);
-  const badge = element('p', `● ${labels[uiState]}`);
+  const badge = element('p', `● ${labels[uiState]} · ${localBridgeCopy(bridgeState)}`);
   badge.className = `status status-${uiState}`;
+  badge.setAttribute('role', uiState === 'failed' || uiState === 'disconnected' ? 'alert' : 'status');
+  badge.setAttribute('aria-live', uiState === 'failed' || uiState === 'disconnected' ? 'assertive' : 'polite');
   header.append(badge);
   appRoot.append(header);
 
@@ -526,28 +568,37 @@ function render(): void {
   operator.className = 'card operator-card';
   operator.append(element('h2', 'Operator control'));
   if (uiState === 'idle') operator.append(element('h3', 'Modem is not armed'));
-  const announcement = element('p', uiState === 'failed'
-    ? `Audio preflight failed: ${failure}. Check the device or browser permission, then Reset / re-arm.`
-    : bodyCopy[uiState]);
+  const announcement = element('p', resetFailure
+    ? `Reset and reconnect failed: ${resetFailure}.`
+    : uiState === 'failed'
+      ? `Audio preflight failed: ${safeUiReason(failure, 'browser audio unavailable')}. Check the device or browser permission, then reset and reconnect.`
+      : bodyCopy[uiState]);
   announcement.id = 'audio-status';
-  announcement.setAttribute('aria-live', uiState === 'failed' ? 'assertive' : 'polite');
+  announcement.setAttribute('aria-live', uiState === 'failed' || uiState === 'disconnected' ? 'assertive' : 'polite');
   operator.append(announcement);
   if (configFailure) operator.append(element('p', `Runner configuration failed: ${configFailure}`));
   operator.append(element('p', `Report target: ${runnerConfig?.reportTarget ?? 'Unknown'} · TUN mode: ${runnerConfig?.tunEvidence ?? 'Unknown'}`));
   operator.append(element('p', `Bridge delivery: ${bridgeDelivery}`));
   operator.append(element('p', quietRuntime));
-  if (uiState === 'idle') operator.append(control('Arm modem', arm, !runnerConfig && !developmentDiagnostic));
-  if (uiState === 'requesting') operator.append(control('Arm modem', arm, true));
+  const resetInFlight = bridgeState?.status === 'resetting';
+  const bridgeNeedsRecovery = bridgeState?.status === 'disconnected' || bridgeState?.status === 'overflow' || bridgeState?.status === 'rejected';
+  const configurationUnavailable = Boolean(configFailure) && !developmentDiagnostic;
+  if (uiState === 'idle' && !configurationUnavailable) operator.append(control('Arm modem', arm, !runnerConfig && !developmentDiagnostic));
+  if (uiState === 'requesting' && !resetInFlight) operator.append(control('Arm modem', arm, true));
   const resetLabel = 'Reset and reconnect';
-  const failedRecoveryLabel = developmentDiagnostic ? 'Reset / re-arm' : resetLabel;
-  if (uiState === 'ready') {
-    if (cyrinxSession.canRequestStart) operator.append(control('Start Cyrinx qualification', startQualification));
-    if (quietCorpusSendState === 'ready' && runnerConfig && cyrinxSession.snapshot.codec === 'quiet') {
+  if (resetInFlight) {
+    const resetControl = control(resetLabel, reset, true, 'secondary');
+    resetControl.setAttribute('aria-busy', 'true');
+    operator.append(resetControl);
+  }
+  if (uiState === 'ready' && !resetInFlight) {
+    if (!bridgeNeedsRecovery && cyrinxSession.canRequestStart) operator.append(control('Start Cyrinx qualification', startQualification));
+    if (!bridgeNeedsRecovery && quietCorpusSendState === 'ready' && runnerConfig && cyrinxSession.snapshot.codec === 'quiet') {
       operator.append(control(`Send Quiet ${directionForRole(runnerConfig.role)} corpus`, sendQuietCorpus));
     }
     operator.append(control(resetLabel, reset, false, 'secondary'));
   }
-  if (uiState === 'failed' || uiState === 'disconnected') operator.append(control(failedRecoveryLabel, reset, false, 'secondary'));
+  if (!resetInFlight && (uiState === 'failed' || uiState === 'disconnected')) operator.append(control(resetLabel, reset, false, 'secondary'));
   if (runnerConfig && uiState === 'idle') operator.append(control(resetLabel, reset, false, 'secondary'));
   operator.append(element('p', 'Starts a new local epoch and clears unsent local bridge data.'));
   grid.append(operator);
@@ -559,13 +610,13 @@ function render(): void {
   const bridgeList = element('dl');
   const bridgeRows: [string, string][] = [
     ['Configuration', configFailure ? 'Configuration unavailable' : runnerConfig ? 'Ready' : 'Loading local configuration…'],
-    ['Browser audio', bridgeStatus?.browserAudio === 'armed' ? 'Armed' : 'Unknown'],
-    ['Local bridge', bridgeStatus?.status === 'ready' ? `Local bridge ready · epoch ${bridgeStatus.epoch}` : bridgeStatus?.status === 'resetting' ? 'Resetting local session…' : 'Local bridge: not connected'],
+    ['Browser audio', bridgeStatus?.browserAudio === 'armed' ? 'Armed' : bridgeStatus?.browserAudio === 'not-armed' ? 'Not armed' : 'Unknown'],
+    ['Local bridge', localBridgeCopy(bridgeStatus)],
     ['FIPS sound transport', bridgeStatus?.soundTransport === 'started' ? 'Started' : bridgeStatus ? 'Waiting for transport' : 'Unknown'],
     ['Epoch', bridgeStatus ? String(bridgeStatus.epoch) : 'Unknown'],
     ['Queue health', bridgeStatus ? `${bridgeStatus.queueHealth[0]!.toUpperCase()}${bridgeStatus.queueHealth.slice(1)} · ${bridgeStatus.queueItems} items · ${bridgeStatus.queueBytes} bytes` : 'Unknown'],
-    ['Last accepted/error', bridgeStatus?.lastError ?? bridgeStatus?.lastEventAt ?? 'Unknown'],
-    ['Complete packets TX/RX', bridgeStatus ? `TX complete packets: ${bridgeStatus.txPackets} · RX complete packets: ${bridgeStatus.rxPackets}` : 'Unknown'],
+    ['Last accepted/error', bridgeStatus?.lastError ? `${bridgeStatus.lastError} · ${bridgeStatus.lastEventAt ?? 'timestamp unavailable'}` : bridgeStatus?.lastEventAt ?? 'Unknown'],
+    ['Complete packets TX/RX', completePacketCopy(bridgeStatus)],
     ['Sound MTU', bridgeStatus?.soundMtu ? `Sound MTU: ${bridgeStatus.soundMtu} bytes · effective IPv6 MTU: ${bridgeStatus.soundMtu - 77} bytes` : 'Unknown'],
   ];
   bridgeRows.forEach(([label, value]) => bridgeList.append(element('dt', label), element('dd', value)));
@@ -574,7 +625,19 @@ function render(): void {
     bridgeCard.append(element('h3', 'No local bridge activity yet'));
     bridgeCard.append(element('p', 'Arm the modem to request microphone access and establish this laptop’s local binary bridge.'));
   }
-  const bridgeAnnouncement = element('p', uiState === 'requesting' ? 'Requesting microphone and connecting local bridge…' : bridgeStatus?.status === 'resetting' ? 'Resetting local session…' : 'Local state only; acoustic peer and ping readiness are not claimed.');
+  const bridgeAnnouncement = element('p', resetFailure
+    ? `Reset and reconnect failed: ${resetFailure}.`
+    : bridgeStatus?.status === 'resetting'
+      ? 'Resetting local session…'
+      : bridgeStatus?.status === 'overflow'
+        ? 'Bridge queue limit reached; the frame was rejected. Reset and reconnect before continuing.'
+        : bridgeStatus?.status === 'rejected'
+          ? 'Bridge rejected an invalid frame. Reset and reconnect before continuing.'
+          : bridgeStatus?.status === 'disconnected'
+            ? 'Local bridge disconnected. Reset and reconnect to start a new local session.'
+            : uiState === 'requesting'
+              ? 'Requesting microphone and connecting local bridge…'
+              : 'Local state only; acoustic peer and ping readiness are not claimed.');
   bridgeAnnouncement.setAttribute('aria-live', failure ? 'assertive' : 'polite');
   if (uiState === 'requesting' || bridgeStatus?.status === 'resetting') bridgeAnnouncement.setAttribute('aria-busy', 'true');
   bridgeCard.append(bridgeAnnouncement);
@@ -652,7 +715,7 @@ function control(label: string, action: () => void | Promise<void>, disabled = f
 
 async function arm(): Promise<void> {
   if (uiState === 'requesting') return;
-  uiState = 'requesting'; failure = ''; quietRuntime = 'Not armed'; render();
+  uiState = 'requesting'; failure = ''; resetFailure = ''; quietRuntime = 'Not armed'; render();
   try {
     evidence = await armAudio(epoch);
     await reportToBridge(evidence);
@@ -778,17 +841,16 @@ async function appendQuietEvidence(received: ReceiveCaseEvidence): Promise<void>
 
 async function reset(): Promise<void> {
   if (uiState === 'requesting') return;
-  uiState = 'requesting'; failure = ''; render();
+  bridgeState = reduceBridgeState(bridgeState, { type: 'reset-start' });
+  uiState = 'requesting'; failure = ''; resetFailure = ''; render();
   try {
     fipsPackets.invalidate(); browserPacketReady = false; packetGeneration += 1;
-    bridgeState = reduceBridgeState(bridgeState, { type: 'reset-start' });
     clearCyrinxCase();
     for (const incomplete of quiet.flushIncomplete()) await appendQuietEvidence(incomplete);
     const nextEpoch = await requestBridgeReset();
     await quiet.reset();
     await resetAudio();
     epoch = nextEpoch;
-    bridgeState = reduceBridgeState(bridgeState, { type: 'reset-ack', epoch: nextEpoch });
     evidence = undefined;
     // Reset only changes audio/epoch. Cyrinx remains irreversible once the
     // runner started it; re-arm therefore cannot restart the primary path.
@@ -800,12 +862,14 @@ async function reset(): Promise<void> {
     await arm();
     if (cyrinxSession.snapshot.codec === 'quiet') void startQuietFallback();
   } catch (error) {
-    const message = asError(error, 'Reset / re-arm failed').message;
+    const message = safeUiReason(error, 'local bridge reset was unavailable');
+    bridgeState = reduceBridgeState(bridgeState, { type: 'reset-failed', reason: message });
     uiState = message.includes('bridge') || message.includes('RESET') ? 'disconnected' : 'failed';
     failure = message;
+    resetFailure = message;
     render();
   }
 }
 
 render();
-void fetchRunnerConfig().then((config) => { runnerConfig = config; syncBridgeState(); render(); }, (error: unknown) => { configFailure = error instanceof Error ? error.message : 'unknown configuration error'; render(); });
+void fetchRunnerConfig().then((config) => { runnerConfig = config; syncBridgeState(); render(); }, (error: unknown) => { configFailure = safeConfigReason(error); render(); });

@@ -42,7 +42,7 @@ test('blocks qualification for incompatible applied settings and gives one reset
   await page.getByRole('button', { name: 'Arm modem' }).click();
   await expect(page.getByText(/Audio preflight failed: input-device channel count is 3, not 1 or 2/)).toBeVisible();
   await expect(page.getByRole('button', { name: 'Start Cyrinx qualification' })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Reset / re-arm' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Reset and reconnect' })).toBeVisible();
 });
 
 test('preserves an explicit disconnected state and keeps long device labels usable at 320px', async ({ page }) => {
@@ -52,7 +52,7 @@ test('preserves an explicit disconnected state and keeps long device labels usab
   await page.getByRole('button', { name: 'Arm modem' }).click();
   await expect(page.getByText('Local bridge disconnected. Qualification is paused; no result is being inferred.')).toBeVisible();
   await expect(page.locator('img')).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Reset / re-arm' })).toBeVisible();
-  const bounds = await page.getByRole('button', { name: 'Reset / re-arm' }).boundingBox();
+  await expect(page.getByRole('button', { name: 'Reset and reconnect' })).toBeVisible();
+  const bounds = await page.getByRole('button', { name: 'Reset and reconnect' }).boundingBox();
   expect(bounds?.width).toBeGreaterThanOrEqual(250);
 });
