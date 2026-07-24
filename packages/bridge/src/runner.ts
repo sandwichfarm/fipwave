@@ -25,7 +25,7 @@ function findProjectRoot(from: string): string {
 const PROJECT_ROOT = findProjectRoot(path.dirname(fileURLToPath(import.meta.url)));
 interface BuildIdentity { commit: string; os: string; architecture: string; dirty: boolean; }
 export interface ProductionRunnerOptions {
-  machineId: string; role?: 'A' | 'B'; port?: number; report: string; tunEvidence: string;
+  machineId: string; role?: 'A' | 'B'; port?: number; host?: typeof LOOPBACK_HOST | '0.0.0.0'; report: string; tunEvidence: string;
   demoConfig?: DemoConfig;
   evidenceMode?: 'Fixture' | 'Loopback'; physicalOpenAir?: boolean; uiDir?: string; codecAssetDir?: string; codecAssets?: readonly CodecAsset[];
   buildIdentityForTests?: BuildIdentity;
@@ -158,7 +158,7 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
     }
   });
   const bridgeOptions = {
-    host: LOOPBACK_HOST, port: runtimePort, artifactDir: path.join(PROJECT_ROOT, '.artifacts', 'qualification'),
+    host: options.host ?? LOOPBACK_HOST, port: runtimePort, artifactDir: path.join(PROJECT_ROOT, '.artifacts', 'qualification'),
     uiDir: options.uiDir ?? path.join(PROJECT_ROOT, 'dist', 'modem-ui'), qualificationConfig: config,
     reportAuthority: { tunEvidence, build: { commit: build.commit, os: build.os, architecture: build.architecture } },
     codecAssetDir, codecAssets,
@@ -187,11 +187,13 @@ function parseCli(argv: string[]): ProductionRunnerOptions {
   const values = new Map<string, string>(); let physicalOpenAir = false;
   for (let index = 0; index < argv.length; index += 1) {
     const key = argv[index]!; if (key === '--physical-open-air') { physicalOpenAir = true; continue; }
-    const value = argv[index + 1]; if (!['--machine-id', '--role', '--port', '--report', '--tun-evidence', '--evidence-mode', '--fips-config'].includes(key) || !value) fail('usage: --machine-id ID --role A|B --port PORT --report PATH --tun-evidence PATH [--evidence-mode Fixture|Loopback] [--fips-config PATH] [--physical-open-air]');
+    const value = argv[index + 1]; if (!['--machine-id', '--role', '--port', '--report', '--tun-evidence', '--evidence-mode', '--fips-config', '--bind-host'].includes(key) || !value) fail('usage: --machine-id ID --role A|B --port PORT --report PATH --tun-evidence PATH [--evidence-mode Fixture|Loopback] [--fips-config PATH] [--bind-host 127.0.0.1|0.0.0.0] [--physical-open-air]');
     values.set(key, value); index += 1;
   }
   const evidenceMode = values.get('--evidence-mode') as 'Fixture' | 'Loopback' | undefined; if (evidenceMode && evidenceMode !== 'Fixture' && evidenceMode !== 'Loopback') fail('deterministic evidence mode must be Fixture or Loopback');
-  const parsed: ProductionRunnerOptions = { machineId: values.get('--machine-id') ?? '', role: values.get('--role') as 'A' | 'B', port: Number(values.get('--port')), report: values.get('--report') ?? '', tunEvidence: values.get('--tun-evidence') ?? '', physicalOpenAir };
+  const host = values.get('--bind-host');
+  if (host !== undefined && host !== LOOPBACK_HOST && host !== '0.0.0.0') fail('bind host is invalid');
+  const parsed: ProductionRunnerOptions = { machineId: values.get('--machine-id') ?? '', role: values.get('--role') as 'A' | 'B', port: Number(values.get('--port')), report: values.get('--report') ?? '', tunEvidence: values.get('--tun-evidence') ?? '', physicalOpenAir, ...(host ? { host } : {}) };
   if (evidenceMode !== undefined) parsed.evidenceMode = evidenceMode;
   const fipsConfigOutput = values.get('--fips-config');
   if (fipsConfigOutput !== undefined) parsed.fipsConfigOutput = fipsConfigOutput;

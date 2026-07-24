@@ -10,7 +10,7 @@ services:
       - sh
       - -ec
       - >-
-        exec node dist/server/packages/bridge/src/runner.js --machine-id ${MACHINE_ID:-fipwave-a} --role ${ROLE:-A} --port 4310 --report /tmp/loopback-report.json --tun-evidence none --evidence-mode Loopback --fips-config /runtime/fips.yaml
+        exec node dist/server/packages/bridge/src/runner.js --machine-id ${MACHINE_ID:-fipwave-a} --role ${ROLE:-A} --bind-host 0.0.0.0 --port 4310 --report /tmp/loopback-report.json --tun-evidence none --evidence-mode Loopback --fips-config /runtime/fips.yaml
     ports:
       - "127.0.0.1:${BROWSER_PORT:-4310}:4310"
     security_opt:

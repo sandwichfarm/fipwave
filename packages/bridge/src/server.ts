@@ -106,7 +106,8 @@ export interface CyrinxDigitalContext {
   signal: AbortSignal;
 }
 export interface BridgeServerOptions {
-  host: typeof LOOPBACK_HOST;
+  /** Docker may require an all-interface listener inside its private namespace; host publication remains loopback-only. */
+  host: typeof LOOPBACK_HOST | '0.0.0.0';
   port: number;
   artifactDir: string;
   uiDir?: string;
@@ -295,7 +296,7 @@ function p95(values: number[]): number {
 }
 
 export async function createBridgeServer(options: BridgeServerOptions): Promise<BridgeServer> {
-  if (options.host !== LOOPBACK_HOST) fail(`bridge host must be ${LOOPBACK_HOST}`);
+  if (options.host !== LOOPBACK_HOST && options.host !== '0.0.0.0') fail('bridge host must be 127.0.0.1 or 0.0.0.0');
   if (!Number.isInteger(options.port) || options.port < 0 || options.port > 65_535) fail('bridge port must be an integer between 0 and 65535');
   await mkdir(options.artifactDir, { recursive: true });
   const config = options.qualificationConfig && immutableConfig(options.qualificationConfig);
@@ -1210,7 +1211,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       processing = processing.then(() => handleFrame(socket, rawData, isBinary, lastSequence, connection));
     });
   });
-  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(options.port, LOOPBACK_HOST, () => { server.off('error', reject); resolve(); }); });
+  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(options.port, options.host, () => { server.off('error', reject); resolve(); }); });
   const address = server.address(); if (!address || typeof address === 'string') { await closeServer(server, webSocketServer); fail('bridge did not bind a TCP loopback address'); }
   return {
     port: address.port,

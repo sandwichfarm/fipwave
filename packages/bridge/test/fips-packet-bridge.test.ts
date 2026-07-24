@@ -116,6 +116,19 @@ describe('FIPS packet bridge', () => {
     }));
   });
 
+  it('accepts a private-container all-interface listener while host publication stays loopback-only', async () => {
+    const bridge = await createBridgeServer({
+      host: '0.0.0.0',
+      port: 0,
+      artifactDir: await mkdtemp(path.join(tmpdir(), 'fipwave-fips-packet-')),
+    });
+    servers.push(bridge);
+
+    const response = await fetch(`http://127.0.0.1:${bridge.port}/bridge-status`);
+    expect(response.ok).toBe(true);
+    expect(await response.json()).toEqual(expect.objectContaining({ configuration: 'ready' }));
+  });
+
   it('rejects text, wrong-role, stale, and unavailable-destination input before accepted delivery counters change', async () => {
     const bridge = await createBridge();
     const browser = await openEndpoint(bridge.port, 'browser');
