@@ -286,6 +286,50 @@ describe('AcousticSession packet, fragment, reassembly, retry, duplicate, and tu
     expect(data.filter((unit) => unit.fragmentIndex >= 4)).toHaveLength(11);
     expect(a.snapshot.counters.retries).toBeGreaterThan(0);
   });
+
+  it('ignores a held prior-session/packet ACK while a new packet has its own active turn', async () => {
+    const timers = new FakeTimers(); const clock = new ManualClock();
+    const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
+    const receivedA: Uint8Array[] = []; const receivedB: Uint8Array[] = []; let heldAck: Uint8Array | undefined; let heldCurrentAck: Uint8Array | undefined; let hold = true; let holdCurrent = false;
+    bModem.shouldDeliver = (raw) => {
+      const unit = decodeFas1(raw);
+      if (unit.type === Fas1UnitType.Ack && hold && !heldAck) { heldAck = raw.slice(); return false; }
+      if (unit.type === Fas1UnitType.Ack && holdCurrent && !heldCurrentAck) { heldCurrentAck = raw.slice(); return false; }
+      return true;
+    };
+    const a = new AcousticSession({ ...options('A', aModem), clock, timers, onPacket: (packet) => receivedA.push(packet) });
+    const b = new AcousticSession({ ...options('B', bModem), clock, timers, onPacket: (packet) => receivedB.push(packet) });
+    a.start(); await settlePair(a, b);
+
+    expect(a.enqueuePacket(Uint8Array.of(1), 'ordinary').accepted).toBe(true);
+    for (let round = 0; round < 4; round += 1) timers.runAll();
+    expect(heldAck).toBeDefined();
+    hold = false;
+    for (let round = 0; round < 16; round += 1) timers.runAll();
+    expect(receivedB).toEqual([Uint8Array.of(1)]);
+
+    // B owns the next turn after A's acknowledged packet; give it one packet
+    // so that A owns a fresh turn before queuing A's next packet.
+    expect(b.enqueuePacket(Uint8Array.of(2), 'ordinary').accepted).toBe(true);
+    for (let round = 0; round < 16; round += 1) timers.runAll();
+    expect(receivedA).toEqual([Uint8Array.of(2)]);
+
+    holdCurrent = true;
+    expect(a.enqueuePacket(Uint8Array.of(3), 'ordinary').accepted).toBe(true);
+    a.receive(heldAck!); // old packet ID/session ACK is deliberately reordered.
+    expect(heldCurrentAck).toBeDefined();
+    for (let round = 0; round < 4; round += 1) timers.runAll();
+    expect(a.snapshot.counters.retries).toBeGreaterThan(0);
+    expect(aModem.sent.map(decodeFas1).filter((unit) => unit.type === Fas1UnitType.Data && unit.packetId === 2)).toHaveLength(2);
+    holdCurrent = false;
+    a.receive(heldCurrentAck!);
+    expect(receivedB).toEqual([Uint8Array.of(1), Uint8Array.of(3)]);
+
+    const oldSessionAck = heldAck!.slice();
+    a.reset(2); b.reset(2);
+    a.receive(oldSessionAck);
+    expect(a.snapshot).toMatchObject({ epoch: 2, ready: false, state: 'Idle' });
+  });
 });
 
 describe('AcousticSession priority, backpressure, heartbeat, degraded recovery, and concurrency', () => {
