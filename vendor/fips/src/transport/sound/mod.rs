@@ -10,7 +10,11 @@ use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{
+    client::IntoClientRequest,
+    http::{header::ORIGIN, HeaderValue},
+    Message,
+};
 
 use crate::config::SoundConfig;
 use crate::transport::{
@@ -117,7 +121,20 @@ impl SoundTransport {
             return Err(TransportError::AlreadyStarted);
         }
         self.runtime.lock().expect("sound runtime").state = TransportState::Starting;
-        let (stream, _) = connect_async(&self.config.bridge_url)
+        let mut request = self
+            .config
+            .bridge_url
+            .clone()
+            .into_client_request()
+            .map_err(|_| self.start_failed("sound_bridge_request_invalid"))?;
+        let authority = request
+            .uri()
+            .authority()
+            .ok_or_else(|| self.start_failed("sound_bridge_request_invalid"))?;
+        let origin = HeaderValue::from_str(&format!("http://{authority}"))
+            .map_err(|_| self.start_failed("sound_bridge_request_invalid"))?;
+        request.headers_mut().insert(ORIGIN, origin);
+        let (stream, _) = connect_async(request)
             .await
             .map_err(|_| self.start_failed("sound_bridge_connect_failed"))?;
         let (mut writer, mut reader) = stream.split();
