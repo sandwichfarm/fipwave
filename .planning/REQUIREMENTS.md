@@ -17,7 +17,7 @@ Requirements for the Sovereign Engineering demo-day proof of concept.
       complete opaque packets from the sound transport through its normal
       transport lifecycle.
 
-- [ ] **FIPS-03**: Sound transport reports a link MTU of at least 1357 bytes so
+- [x] **FIPS-03**: Sound transport reports a link MTU of at least 1357 bytes so
       FIPS exposes an effective IPv6 MTU of at least 1280 bytes.
 
 - [ ] **FIPS-04**: Two statically configured sound peers complete the normal
@@ -30,7 +30,7 @@ Requirements for the Sovereign Engineering demo-day proof of concept.
 
 ### Codec Selection
 
-- [ ] **CODEC-01**: The FIPS-facing modem boundary can exchange complete packets
+- [x] **CODEC-01**: The FIPS-facing modem boundary can exchange complete packets
       without depending on a particular acoustic codec implementation.
 
 - [x] **CODEC-02**: Operator can run a time-boxed Cyrinx qualification on both
@@ -88,11 +88,11 @@ Requirements for the Sovereign Engineering demo-day proof of concept.
       and visibly fails preflight when the selected codec's required audio
       format is unavailable.
 
-- [ ] **WEB-04**: Browser and local container exchange binary WebSocket
+- [x] **WEB-04**: Browser and local container exchange binary WebSocket
       messages carrying complete packets or timestamped PCM chunks as required
       by the selected codec, without base64 or JSON encoding of bulk data.
 
-- [ ] **WEB-05**: The bridge validates message type and size, bounds all queues,
+- [x] **WEB-05**: The bridge validates message type and size, bounds all queues,
       and exposes ready, disconnected, overflow, and last-error states.
 
 - [ ] **WEB-06**: Operator can reset and reconnect the browser, modem state,
@@ -154,7 +154,7 @@ Requirements for the Sovereign Engineering demo-day proof of concept.
       stack with `npm run demo -- a` or `npm run demo -- b`; the role is the
       only required argument.
 
-- [ ] **CONFIG-02**: Role identities, disposable demo nsecs, peer mappings,
+- [x] **CONFIG-02**: Role identities, disposable demo nsecs, peer mappings,
       ports, codec capabilities, audio defaults, calibration candidates,
       retries, and heartbeat thresholds have one validated configuration
       authority and are not duplicated across the codebase.
@@ -281,10 +281,10 @@ Roadmap phase mapping is populated during roadmap creation.
 |-------------|-------|--------|
 | FIPS-01 | Phase 2 | Pending |
 | FIPS-02 | Phase 2 | Pending |
-| FIPS-03 | Phase 2 | Pending |
+| FIPS-03 | Phase 2 | Complete |
 | FIPS-04 | Phase 4 | Pending |
 | FIPS-05 | Phase 4 | Pending |
-| CODEC-01 | Phase 2 | Pending |
+| CODEC-01 | Phase 2 | Complete |
 | CODEC-02 | Phase 1 | Complete |
 | CODEC-03 | Phase 1 | Complete |
 | CODEC-04 | Phase 1 | Complete |
@@ -300,8 +300,8 @@ Roadmap phase mapping is populated during roadmap creation.
 | WEB-01 | Phase 1 | Complete |
 | WEB-02 | Phase 1 | Complete |
 | WEB-03 | Phase 1 | Complete |
-| WEB-04 | Phase 2 | Pending |
-| WEB-05 | Phase 2 | Pending |
+| WEB-04 | Phase 2 | Complete |
+| WEB-05 | Phase 2 | Complete |
 | WEB-06 | Phase 2 | Pending |
 | WEB-07 | Phase 1 | Complete |
 | DEPLOY-01 | Phase 5 | Pending |
@@ -318,7 +318,7 @@ Roadmap phase mapping is populated during roadmap creation.
 | DEMO-07 | Phase 5 | Pending |
 | DEMO-08 | Phase 5 | Pending |
 | CONFIG-01 | Phase 5 | Pending |
-| CONFIG-02 | Phase 2 | Pending |
+| CONFIG-02 | Phase 2 | Complete |
 | CONFIG-03 | Phase 5 | Pending |
 | CONFIG-04 | Phase 4 | Pending |
 | NEG-01 | Phase 3 | Pending |
