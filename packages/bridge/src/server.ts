@@ -443,8 +443,10 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       try {
         target.send(encodeFrame(entry.frame));
       } catch {
-        queue.frames.unshift(entry); queue.bytes += entry.frame.payload.byteLength + HEADER_BYTES;
+        // A bridge delivery failure is terminal for this packet. Retaining it
+        // would replay stale FIPS traffic when an endpoint reconnects.
         state.lastError = safeBridgeError(new BridgeInputError('fips_destination_unavailable'));
+        (direction === 'browser-to-fips' ? state.packetQueues.browserToFips : state.packetQueues.fipsToBrowser).health = 'rejected';
         refreshState();
         return;
       }

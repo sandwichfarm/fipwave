@@ -179,6 +179,26 @@ describe('FIPS packet bridge', () => {
     expect(packetBridgeState(controlBridge).packetQueues.browserToFips.items).toBe(0);
   });
 
+  it('drops an unavailable delivery instead of replaying it after the endpoint reconnects', async () => {
+    const bridge = await createBridge();
+    const browser = await openEndpoint(bridge.port, 'browser');
+    browser.send(packet(1, 1n, Buffer.from([1, 2, 3])));
+    await drainBridge();
+    expect(packetBridgeState(bridge)).toMatchObject({
+      packetCounters: { browserToFips: 0, fipsToBrowser: 0 },
+      packetQueues: { browserToFips: { items: 0, bytes: 0 } },
+      lastError: { code: 'fips_destination_unavailable' },
+    });
+
+    const fips = await openEndpoint(bridge.port, 'fips');
+    await drainBridge();
+    expect(packetBridgeState(bridge)).toMatchObject({
+      packetCounters: { browserToFips: 0, fipsToBrowser: 0 },
+      packetQueues: { browserToFips: { items: 0, bytes: 0 } },
+    });
+    browser.close(); fips.close();
+  });
+
   it('makes reset the single epoch authority and broadcasts binary acknowledgements to both endpoint roles', async () => {
     const bridge = await createBridge();
     const browser = await openEndpoint(bridge.port, 'browser');
