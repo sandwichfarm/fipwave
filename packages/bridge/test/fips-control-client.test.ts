@@ -7,11 +7,11 @@ import { createFipsControlClient } from '../src/fips-control-client.js';
 class ControlSocket extends Duplex {
   readonly writes: Buffer[] = [];
   constructor(private readonly response: string | null) { super(); }
-  _read(): void {}
-  _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+  override _read(): void {}
+  override _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
     this.writes.push(Buffer.from(chunk)); callback();
   }
-  _final(callback: (error?: Error | null) => void): void {
+  override _final(callback: (error?: Error | null) => void): void {
     if (this.response !== null) this.push(Buffer.from(this.response));
     this.push(null); callback();
   }
@@ -49,9 +49,11 @@ describe('FIPS control client', () => {
     } });
     const active = client.query('peers');
     const queued = client.query('links');
+    const activeRejected = expect(active).rejects.toMatchObject({ code: 'client_closed' });
+    const queuedRejected = expect(queued).rejects.toMatchObject({ code: 'client_closed' });
     await client.close();
-    await expect(active).rejects.toMatchObject({ code: 'client_closed' });
-    await expect(queued).rejects.toMatchObject({ code: 'client_closed' });
+    await activeRejected;
+    await queuedRejected;
     expect(socket?.destroyed).toBe(true);
   });
 });

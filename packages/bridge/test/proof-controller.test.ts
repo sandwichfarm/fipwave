@@ -19,11 +19,11 @@ describe('proof controller', () => {
   });
 
   it.each([
-    ['wrong acoustic epoch', () => ({ epoch: 6, ready: true, observedAtMs: now })],
-    ['failed isolation', () => ({ epoch: 7, accepted: false, observedAtMs: now, targetIpv6: 'fd00::2' })],
-  ])('fails closed and never launches ping for %s', async (_name, mutation) => {
+    ['wrong acoustic epoch', { epoch: 6, ready: true, observedAtMs: now }, { epoch: 7, accepted: true, observedAtMs: now, targetIpv6: 'fd00::2' }],
+    ['failed isolation', { epoch: 7, ready: true, observedAtMs: now }, { epoch: 7, accepted: false, observedAtMs: now, targetIpv6: 'fd00::2' }],
+  ])('fails closed and never launches ping for %s', async (_name, acousticStatus, isolation) => {
     const execFile = vi.fn();
-    const controller = createProofController({ config: resolveDemoConfig('a'), control: { query: async (kind: 'peers' | 'links' | 'transports') => kind === 'peers' ? { peers: [peer] } : kind === 'links' ? { links: [link] } : { transports: [transport] } }, acousticStatus: mutation as never, isolation: async () => mutation() as never, now: () => now, execFile });
+    const controller = createProofController({ config: resolveDemoConfig('a'), control: { query: async (kind: 'peers' | 'links' | 'transports') => kind === 'peers' ? { peers: [peer] } : kind === 'links' ? { links: [link] } : { transports: [transport] } }, acousticStatus: () => acousticStatus, isolation: async () => isolation, now: () => now, execFile });
     await expect(controller.ping()).resolves.toMatchObject({ pingReady: false, reason: expect.any(String), evidenceClass: 'human_needed' });
     expect(execFile).not.toHaveBeenCalled();
   });
