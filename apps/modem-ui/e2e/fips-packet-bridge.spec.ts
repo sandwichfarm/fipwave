@@ -13,7 +13,15 @@ function frame(epoch: number, sequence: bigint, payload: number[]): Buffer {
   return output;
 }
 function opened(socket: WebSocket): Promise<void> { return new Promise((resolve, reject) => { socket.once('open', () => resolve()); socket.once('error', reject); }); }
-function nextBinary(socket: WebSocket): Promise<Buffer> { return new Promise((resolve, reject) => { socket.once('message', (value, binary) => binary ? resolve(Buffer.from(value)) : reject(new Error('expected binary FIPS packet'))); socket.once('error', reject); }); }
+function nextBinary(socket: WebSocket): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    socket.once('message', (value, binary) => {
+      if (!binary) return reject(new Error('expected binary FIPS packet'));
+      resolve(Buffer.isBuffer(value) ? Buffer.from(value) : Array.isArray(value) ? Buffer.concat(value) : Buffer.from(value));
+    });
+    socket.once('error', reject);
+  });
+}
 
 let runner: Awaited<ReturnType<typeof startProductionRunner>>;
 let reportDirectory = '';
