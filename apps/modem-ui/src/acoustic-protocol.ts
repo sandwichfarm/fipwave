@@ -42,6 +42,8 @@ export interface FragmentPacketInput {
   sessionId: bigint;
   sequenceStart: number;
   packetId: number;
+  /** Directional body bound selected during calibration and committed by both peers. */
+  payloadBytes?: number;
 }
 
 /** A profile name is negotiable only when this exact executable modem path exists. */
@@ -141,9 +143,12 @@ function validateUnit(input: Fas1Unit): void {
   }
 
   if (input.type !== Fas1UnitType.Hello && input.sessionId === 0n) fail('only bootstrap HELLO may use session zero');
-  if (input.packetId !== 0 || input.fragmentIndex !== 0 || input.fragmentCount !== 0 || input.packetLength !== 0) {
+  // ACK binds its bitmap (sequence) to the complete packet it acknowledges.
+  // Every other control unit has zero packet geometry.
+  if ((input.type !== Fas1UnitType.Ack && input.packetId !== 0) || input.fragmentIndex !== 0 || input.fragmentCount !== 0 || input.packetLength !== 0) {
     fail('control packet geometry must be zero');
   }
+  if (input.type === Fas1UnitType.Ack && input.packetId === 0) fail('ACK requires a packet ID');
   if (BODYLESS_TYPES.has(input.type)) {
     if (input.body.byteLength !== 0) fail('bodyless control unit has a body');
   } else if (input.body.byteLength === 0) {
@@ -296,7 +301,10 @@ export function fragmentPacket(input: FragmentPacketInput): Fas1Unit[] {
   assertInteger(input.sequenceStart, UINT32_MAX, 'sequence start');
   assertInteger(input.packetId, UINT32_MAX, 'packet ID');
   if (input.packetId === 0) fail('packet requires a packet ID');
-  const fragmentCount = Math.ceil(input.packet.byteLength / FAS1_MAX_BODY_BYTES);
+  const payloadBytes = input.payloadBytes ?? FAS1_MAX_BODY_BYTES;
+  assertInteger(payloadBytes, FAS1_MAX_BODY_BYTES, 'payload bytes');
+  if (payloadBytes < 1) fail('payload bytes are invalid');
+  const fragmentCount = Math.ceil(input.packet.byteLength / payloadBytes);
   if (!Number.isSafeInteger(fragmentCount) || fragmentCount < 1 || fragmentCount > FAS1_MAX_FRAGMENTS) fail('fragment count is invalid');
   if (input.sequenceStart > UINT32_MAX - (fragmentCount - 1)) fail('sequence range overflows');
   return Array.from({ length: fragmentCount }, (_, fragmentIndex) => ({
@@ -308,20 +316,27 @@ export function fragmentPacket(input: FragmentPacketInput): Fas1Unit[] {
     fragmentIndex,
     fragmentCount,
     packetLength: input.packet.byteLength,
-    body: input.packet.slice(fragmentIndex * FAS1_MAX_BODY_BYTES, (fragmentIndex + 1) * FAS1_MAX_BODY_BYTES),
+    body: input.packet.slice(fragmentIndex * payloadBytes, (fragmentIndex + 1) * payloadBytes),
   }));
 }
 
 /** Strict pure helper for deterministic geometry tests and later reassembly. */
-export function reassemblePacket(fragments: readonly Fas1Unit[]): Uint8Array {
+export function reassemblePacket(fragments: readonly Fas1Unit[], payloadBytes = FAS1_MAX_BODY_BYTES): Uint8Array {
   if (!Array.isArray(fragments) || fragments.length < 1 || fragments.length > FAS1_MAX_FRAGMENTS) fail('fragment collection is invalid');
   const first = fragments[0]!;
+  assertInteger(payloadBytes, FAS1_MAX_BODY_BYTES, 'payload bytes');
+  if (payloadBytes < 1) fail('payload bytes are invalid');
   validateUnit(first);
-  if (first.type !== Fas1UnitType.Data || first.fragmentCount !== fragments.length) fail('fragment collection geometry is invalid');
+  const expectedCount = Math.ceil(first.packetLength / payloadBytes);
+  if (first.type !== Fas1UnitType.Data || first.fragmentCount !== fragments.length || first.fragmentCount !== expectedCount) fail('fragment collection geometry is invalid');
   const byIndex = new Map<number, Fas1Unit>();
   for (const fragment of fragments) {
     validateUnit(fragment);
     if (fragment.type !== Fas1UnitType.Data || fragment.sessionId !== first.sessionId || fragment.packetId !== first.packetId || fragment.packetLength !== first.packetLength || fragment.fragmentCount !== first.fragmentCount) fail('fragment collection does not match');
+    const expectedLength = fragment.fragmentIndex === expectedCount - 1
+      ? first.packetLength - payloadBytes * (expectedCount - 1)
+      : payloadBytes;
+    if (fragment.body.byteLength !== expectedLength) fail('fragment collection body geometry is invalid');
     if (byIndex.has(fragment.fragmentIndex)) fail('fragment collection has a duplicate index');
     byIndex.set(fragment.fragmentIndex, fragment);
   }

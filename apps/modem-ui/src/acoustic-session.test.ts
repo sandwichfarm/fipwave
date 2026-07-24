@@ -168,19 +168,16 @@ describe('AcousticSession bootstrap handshake', () => {
 });
 
 describe('AcousticSession calibration, selection, and commitment', () => {
-  it('executes four numbered A-to-B probes before four numbered B-to-A probes and waits for a heartbeat after COMMIT_ACK', async () => {
+  it('executes four numbered A-to-B probes before four numbered B-to-A probes and automatically reaches readiness after COMMIT_ACK', async () => {
     const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
     const a = new AcousticSession(options('A', aModem)); const b = new AcousticSession(options('B', bModem));
     a.start();
     await settlePair(a, b);
-    expect({ a: a.snapshot, b: b.snapshot }).toMatchObject({ a: { state: 'AwaitingHeartbeat' }, b: { state: 'AwaitingHeartbeat' } });
+    expect({ a: a.snapshot, b: b.snapshot }).toMatchObject({ a: { state: 'Ready', ready: true }, b: { state: 'Ready', ready: true } });
     const probes = [...aModem.sent, ...bModem.sent].map((raw) => decodeFas1(raw)).filter((unit) => unit.type === Fas1UnitType.Probe);
     expect(probes).toHaveLength(8);
     expect(probes.slice(0, 4).map((probe) => probe.body[0])).toEqual([1, 1, 1, 1]);
     expect(probes.slice(4).map((probe) => probe.body[0])).toEqual([2, 2, 2, 2]);
-    b.heartbeat();
-    expect(a.snapshot.ready).toBe(true);
-    expect(b.snapshot.ready).toBe(true);
   });
 
   it('selects directionally, preferring byte correctness, timing, then lower gain', async () => {
@@ -229,24 +226,24 @@ describe('AcousticSession calibration, selection, and commitment', () => {
 });
 
 describe('AcousticSession packet, fragment, reassembly, retry, duplicate, and turn delivery', () => {
-  it('round-trips one byte-identical 1357-byte packet in each direction exactly once through seven bounded fragments', async () => {
+  it('round-trips one byte-identical 1357-byte packet in each direction exactly once through fifteen committed-size fragments', async () => {
     const timers = new FakeTimers(); const clock = new ManualClock();
     const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
     const receivedA: Uint8Array[] = []; const receivedB: Uint8Array[] = [];
     const a = new AcousticSession({ ...options('A', aModem), clock, timers, onPacket: (packet) => receivedA.push(packet) });
     const b = new AcousticSession({ ...options('B', bModem), clock, timers, onPacket: (packet) => receivedB.push(packet) });
-    a.start(); await settlePair(a, b); b.heartbeat();
+    a.start(); await settlePair(a, b);
 
     const aPacket = Uint8Array.from({ length: 1_357 }, (_, index) => index & 0xff);
     const bPacket = Uint8Array.from({ length: 1_357 }, (_, index) => (255 - index) & 0xff);
     expect(a.enqueuePacket(aPacket, 'ordinary').accepted).toBe(true);
-    timers.runAll(); timers.runAll(); timers.runAll(); timers.runAll();
+    for (let round = 0; round < 16; round += 1) timers.runAll();
     expect(receivedB).toHaveLength(1);
     expect(receivedB[0]).toEqual(aPacket);
-    expect(aModem.sent.map(decodeFas1).filter((unit) => unit.type === Fas1UnitType.Data)).toHaveLength(7);
+    expect(aModem.sent.map(decodeFas1).filter((unit) => unit.type === Fas1UnitType.Data)).toHaveLength(15);
 
     expect(b.enqueuePacket(bPacket, 'ordinary').accepted).toBe(true);
-    timers.runAll(); timers.runAll(); timers.runAll(); timers.runAll();
+    for (let round = 0; round < 16; round += 1) timers.runAll();
     expect(receivedA).toHaveLength(1);
     expect(receivedA[0]).toEqual(bPacket);
   });
@@ -267,13 +264,13 @@ describe('AcousticSession packet, fragment, reassembly, retry, duplicate, and tu
     };
     const a = new AcousticSession({ ...options('A', aModem), clock, timers });
     const b = new AcousticSession({ ...options('B', bModem), clock, timers, onPacket: (packet) => received.push(packet) });
-    a.start(); await settlePair(a, b); b.heartbeat();
+    a.start(); await settlePair(a, b);
     expect(a.enqueuePacket(new Uint8Array(1_357).fill(7), 'ordinary').accepted).toBe(true);
-    for (let round = 0; round < 12; round += 1) timers.runAll();
+    for (let round = 0; round < 32; round += 1) timers.runAll();
     expect(received).toHaveLength(1);
     const data = aModem.sent.map(decodeFas1).filter((unit) => unit.type === Fas1UnitType.Data);
     expect(data.filter((unit) => unit.fragmentIndex === 2).length).toBeGreaterThan(1);
-    expect(data.filter((unit) => unit.fragmentIndex >= 4)).toHaveLength(3);
+    expect(data.filter((unit) => unit.fragmentIndex >= 4)).toHaveLength(11);
     expect(a.snapshot.counters.retries).toBeGreaterThan(0);
   });
 });

@@ -26,7 +26,7 @@ function validUnit(type: Fas1UnitType) {
     flags: 0,
     sessionId: type === Fas1UnitType.Hello ? 0n : SESSION,
     sequence: 7,
-    packetId: type === Fas1UnitType.Data ? 99 : 0,
+    packetId: type === Fas1UnitType.Data || type === Fas1UnitType.Ack ? 99 : 0,
     fragmentIndex: 0,
     fragmentCount: type === Fas1UnitType.Data ? 1 : 0,
     packetLength: type === Fas1UnitType.Data ? 1 : 0,
