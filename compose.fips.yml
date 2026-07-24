@@ -16,6 +16,9 @@ services:
     security_opt:
       - no-new-privileges:true
     privileged: false
+    # Docker initializes a named volume as root. The bridge is the sole writer
+    # of the generated demo config; it has no added Linux capabilities.
+    user: "0:0"
     volumes:
       - fips-runtime:/runtime
 
