@@ -46,7 +46,13 @@ export enum MessageType {
   ACOUSTIC_READY = 12,
   /** Browser projection that the current acoustic session is no longer usable. */
   ACOUSTIC_DISARM = 13,
+  /** Browser acknowledgement that it admitted one FIPS packet into its acoustic queue. */
+  FIPS_PACKET_ADMISSION = 14,
 }
+
+export const FIPS_PACKET_ADMISSION_ACCEPTED = 1;
+export const FIPS_PACKET_ADMISSION_QUEUE_FULL = 2;
+export type FipsPacketAdmission = typeof FIPS_PACKET_ADMISSION_ACCEPTED | typeof FIPS_PACKET_ADMISSION_QUEUE_FULL;
 
 export enum PcmEncoding {
   NONE = 0,
@@ -122,7 +128,14 @@ function fail(message: string): never {
 }
 
 function isMessageType(value: number): value is MessageType {
-  return value >= MessageType.HELLO && value <= MessageType.ACOUSTIC_DISARM;
+  return value >= MessageType.HELLO && value <= MessageType.FIPS_PACKET_ADMISSION;
+}
+
+export function decodeFipsPacketAdmission(payload: Buffer): FipsPacketAdmission {
+  if (payload.byteLength !== 1) fail('FIPS packet admission must contain exactly one result byte');
+  const result = payload[0];
+  if (result !== FIPS_PACKET_ADMISSION_ACCEPTED && result !== FIPS_PACKET_ADMISSION_QUEUE_FULL) fail('FIPS packet admission result is unsupported');
+  return result;
 }
 
 /** Runtime guard shared by the bridge and browser packet boundary. */
@@ -167,6 +180,10 @@ function validateFrame(frame: FwavFrame): Required<Pick<FwavFrame, 'flags' | 'sa
   }
   if (frame.type === MessageType.ACOUSTIC_DISARM && frame.payload.byteLength !== ACOUSTIC_DISARM_CAPABILITY_BYTES) {
     fail('acoustic disarm capability size is invalid');
+  }
+  if (frame.type === MessageType.FIPS_PACKET_ADMISSION) {
+    if ((frame.flags ?? 0) !== 0) fail('FIPS packet admission must not declare flags');
+    decodeFipsPacketAdmission(frame.payload);
   }
   validateInteger(sampleRate, 'sample rate', 0xffff_ffff);
   validateInteger(channels, 'channel count', 0xffff);

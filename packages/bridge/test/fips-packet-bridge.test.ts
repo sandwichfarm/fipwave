@@ -105,6 +105,16 @@ function packet(
   return encodeFrame({ type: MessageType.FIPS_PACKET, epoch, sequence, trafficClass, payload });
 }
 
+function admitFipsPacket(browser: WebSocket, frame: WebSocket.RawData, result = 1): void {
+  const packetFrame = decodeFrame(Buffer.from(frame as Buffer));
+  browser.send(encodeFrame({
+    type: MessageType.FIPS_PACKET_ADMISSION,
+    epoch: packetFrame.epoch,
+    sequence: packetFrame.sequence,
+    payload: Buffer.of(result),
+  }));
+}
+
 function patternedPacket(): Buffer {
   return Buffer.from(Array.from({ length: 1357 }, (_value, index) => index % 251));
 }
@@ -165,6 +175,8 @@ describe('FIPS packet bridge', () => {
       const returnedDecoded = decodeFrame(Buffer.from(returned as Buffer));
       expect(returnedDecoded.trafficClass).toBe(trafficClass);
       expect(returnedDecoded.payload.equals(payload)).toBe(true);
+      admitFipsPacket(browser, returned);
+      await drainBridge();
     }
 
     browser.close(); fips.close();
@@ -220,6 +232,9 @@ describe('FIPS packet bridge', () => {
     fips.send(packet(1, 1n, payload));
     const [toBrowser] = await receivedByBrowser;
     expect(decodeFrame(Buffer.from(toBrowser as Buffer)).payload.equals(payload)).toBe(true);
+    admitFipsPacket(browser, toBrowser);
+
+    await drainBridge();
 
     expect(bridge.state().packetCounters).toEqual({ browserToFips: 1, fipsToBrowser: 1 });
     expect(packetBridgeState(bridge)).toMatchObject({
@@ -227,6 +242,52 @@ describe('FIPS packet bridge', () => {
       lastAcceptedAtMs: expect.any(Number),
     });
     expect(bridge.state()).toMatchObject({ evidenceClass: 'Loopback', acousticReady: false, peerConnected: false, pingReady: false });
+    browser.close(); fips.close();
+  });
+
+  it('keeps a fifth acoustic-queue rejection pending until the owning browser later admits it', async () => {
+    const bridge = await createBridge();
+    const browser = await openEndpoint(bridge.port, 'browser');
+    const fips = await openEndpoint(bridge.port, 'fips');
+
+    for (let sequence = 1; sequence <= 4; sequence += 1) {
+      const delivered = once(browser, 'message');
+      fips.send(packet(1, BigInt(sequence), Buffer.of(sequence)));
+      const [frame] = await delivered;
+      const admittedByFips = once(fips, 'message');
+      admitFipsPacket(browser, frame);
+      const [admission] = await admittedByFips;
+      expect(decodeFrame(Buffer.from(admission as Buffer))).toMatchObject({ type: MessageType.FIPS_PACKET_ADMISSION, sequence: BigInt(sequence), payload: Buffer.of(1) });
+      await drainBridge();
+    }
+
+    const rejectedDelivery = once(browser, 'message');
+    fips.send(packet(1, 5n, Buffer.of(5)));
+    const [fifth] = await rejectedDelivery;
+    expect(decodeFrame(Buffer.from(fifth as Buffer))).toMatchObject({ type: MessageType.FIPS_PACKET, sequence: 5n });
+    const rejectedByFips = once(fips, 'message');
+    admitFipsPacket(browser, fifth, 2);
+    const [rejection] = await rejectedByFips;
+    expect(decodeFrame(Buffer.from(rejection as Buffer))).toMatchObject({ type: MessageType.FIPS_PACKET_ADMISSION, sequence: 5n, payload: Buffer.of(2) });
+    await drainBridge();
+    expect(packetBridgeState(bridge)).toMatchObject({
+      packetCounters: { fipsToBrowser: 4 },
+      packetQueues: { fipsToBrowser: { items: 1, health: 'waiting' } },
+      lastError: null,
+    });
+
+    const retriedDelivery = once(browser, 'message');
+    const [retried] = await retriedDelivery;
+    expect(decodeFrame(Buffer.from(retried as Buffer))).toMatchObject({ type: MessageType.FIPS_PACKET, sequence: 5n });
+    const acceptedByFips = once(fips, 'message');
+    admitFipsPacket(browser, retried);
+    const [accepted] = await acceptedByFips;
+    expect(decodeFrame(Buffer.from(accepted as Buffer))).toMatchObject({ type: MessageType.FIPS_PACKET_ADMISSION, sequence: 5n, payload: Buffer.of(1) });
+    await drainBridge();
+    expect(packetBridgeState(bridge)).toMatchObject({
+      packetCounters: { fipsToBrowser: 5 },
+      packetQueues: { fipsToBrowser: { items: 0, bytes: 0, health: 'ready' } },
+    });
     browser.close(); fips.close();
   });
 
@@ -362,7 +423,9 @@ describe('FIPS packet bridge', () => {
     await initialToFips;
     const initialToBrowser = once(browser, 'message');
     fips.send(packet(1, 1n, Buffer.alloc(8, 2)));
-    await initialToBrowser;
+    const [initialBrowserFrame] = await initialToBrowser;
+    admitFipsPacket(browser, initialBrowserFrame);
+    await drainBridge();
     expect(bridge.state().packetCounters).toEqual({ browserToFips: 1, fipsToBrowser: 1 });
 
     const browserAck = once(browser, 'message');
@@ -388,7 +451,9 @@ describe('FIPS packet bridge', () => {
     await afterResetToFips;
     const afterResetToBrowser = once(browser, 'message');
     fips.send(packet(2, 1n, Buffer.alloc(8, 4)));
-    await afterResetToBrowser;
+    const [afterResetBrowserFrame] = await afterResetToBrowser;
+    admitFipsPacket(browser, afterResetBrowserFrame);
+    await drainBridge();
     expect(bridge.state().packetCounters).toEqual({ browserToFips: 1, fipsToBrowser: 1 });
 
     browser.send(encodeFrame({ type: MessageType.RESET, flags: RESET_ACK_FLAG, epoch: 2, sequence: 2n, payload: Buffer.alloc(0) }));

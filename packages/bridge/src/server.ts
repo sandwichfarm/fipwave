@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
 import manifest from '../../../fixtures/corpus/manifest.json' with { type: 'json' };
 import type { CyrinxCase, CyrinxCaseMode, CyrinxResult } from './cyrinx-worker.js';
-import { ACOUSTIC_DISARM_CAPABILITY_BYTES, ACOUSTIC_READINESS_FRESHNESS_MS, decodeAcousticReadinessProof, decodeFrame, encodeFrame, MessageType, RESET_ACK_FLAG, type FwavFrame } from './protocol.js';
+import { ACOUSTIC_DISARM_CAPABILITY_BYTES, ACOUSTIC_READINESS_FRESHNESS_MS, FIPS_PACKET_ADMISSION_ACCEPTED, FIPS_PACKET_ADMISSION_QUEUE_FULL, decodeAcousticReadinessProof, decodeFipsPacketAdmission, decodeFrame, encodeFrame, MessageType, RESET_ACK_FLAG, type FwavFrame } from './protocol.js';
 import {
   CyrinxQualificationSession,
   type CyrinxSessionSnapshot,
@@ -277,6 +277,7 @@ export async function readQualificationReport(reportPath: string): Promise<Quali
 function closeServer(server: Server, webSocketServer: WebSocketServer): Promise<void> { return new Promise((resolve, reject) => webSocketServer.close((webSocketError) => webSocketError ? reject(webSocketError) : server.close((serverError) => serverError ? reject(serverError) : resolve()))); }
 interface QueueEntry { frame: FwavFrame; enqueuedAt: number; }
 interface Queue { frames: QueueEntry[]; bytes: number; overflowed: boolean; }
+interface PendingBrowserAdmission { entry: QueueEntry; owner: WebSocket; attempts: number; retryTimer: ReturnType<typeof setTimeout> | undefined; }
 interface BrowserConnectionState {
   mustResetBeforeUse: boolean;
   errorOrigins: Map<bigint, 'cyrinx' | 'quiet' | 'other'>;
@@ -376,6 +377,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   let audio: BrowserAudio | undefined; let generation = 1; let writeTail: Promise<unknown> = Promise.resolve();
   let results = new Map<string, BrowserResult>(); let failureReasons = new Set<string>(); let localAudioPreflight = false;
   let owner: WebSocket | undefined; let fipsOwner: WebSocket | undefined; let epochClaimed = false; let reconnectAllowed = false; let reconnectRequiresReset = false;
+  let pendingBrowserAdmission: PendingBrowserAdmission | undefined;
   let acousticReadinessProof: Buffer | undefined;
   let operationGeneration = 1; let operationAbort = new AbortController(); let settleAbort: AbortController | undefined; let shuttingDown = false;
   let cyrinxExpiryTimer: unknown;
@@ -419,7 +421,11 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       target.bytes = queue.bytes;
     }
   };
-  const clearQueues = () => { for (const queue of [...queues.values(), ...packetQueues.values()]) { queue.frames = []; queue.bytes = 0; queue.overflowed = false; } refreshState(); };
+  const clearPendingBrowserAdmission = (): void => {
+    if (pendingBrowserAdmission?.retryTimer) clearTimeout(pendingBrowserAdmission.retryTimer);
+    pendingBrowserAdmission = undefined;
+  };
+  const clearQueues = () => { clearPendingBrowserAdmission(); for (const queue of [...queues.values(), ...packetQueues.values()]) { queue.frames = []; queue.bytes = 0; queue.overflowed = false; } refreshState(); };
   const enqueue = (frame: FwavFrame): void => {
     const queue = queues.get(frame.type); if (!queue) return;
     const now = options.now?.() ?? Date.now();
@@ -455,6 +461,26 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     const target = direction === 'browser-to-fips' ? fipsOwner : owner;
     if (!target || target.readyState !== target.OPEN) return;
     const queue = packetQueues.get(direction)!;
+    if (direction === 'fips-to-browser') {
+      if (pendingBrowserAdmission) return;
+      const entry = queue.frames[0];
+      if (!entry) { refreshState(); return; }
+      const acceptedGeneration = generation;
+      const acceptedEpoch = state.epoch;
+      try {
+        target.send(encodeFrame(entry.frame));
+      } catch {
+        state.lastError = safeBridgeError(new BridgeInputError('browser_destination_unavailable'));
+        state.packetQueues.fipsToBrowser.health = 'rejected';
+        refreshState();
+        return;
+      }
+      if (acceptedGeneration !== generation || acceptedEpoch !== state.epoch || owner !== target) return;
+      pendingBrowserAdmission = { entry, owner: target, attempts: 1, retryTimer: undefined };
+      state.packetQueues.fipsToBrowser.health = 'waiting';
+      refreshState();
+      return;
+    }
     while (queue.frames.length) {
       const entry = queue.frames.shift()!;
       queue.bytes -= entry.frame.payload.byteLength + HEADER_BYTES;
@@ -476,6 +502,63 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       state.lastAcceptedAtMs = options.now?.() ?? Date.now();
       (direction === 'browser-to-fips' ? state.packetQueues.browserToFips : state.packetQueues.fipsToBrowser).health = 'ready';
     }
+    refreshState();
+  };
+  const retryBrowserAdmission = (): void => {
+    const pending = pendingBrowserAdmission;
+    if (!pending || pending.owner !== owner || pending.entry.frame.epoch !== state.epoch) return;
+    pending.retryTimer = undefined;
+    if (pending.owner.readyState !== pending.owner.OPEN) return;
+    try {
+      pending.owner.send(encodeFrame(pending.entry.frame));
+    } catch {
+      state.lastError = safeBridgeError(new BridgeInputError('browser_destination_unavailable'));
+      state.packetQueues.fipsToBrowser.health = 'rejected';
+      refreshState();
+    }
+  };
+  const notifyFipsPacketAdmission = (packet: FwavFrame, result: number): void => {
+    if (!fipsOwner || fipsOwner.readyState !== fipsOwner.OPEN) return;
+    try {
+      fipsOwner.send(encodeFrame({
+        type: MessageType.FIPS_PACKET_ADMISSION,
+        epoch: packet.epoch,
+        sequence: packet.sequence,
+        payload: Buffer.of(result),
+      }));
+    } catch {
+      state.lastError = safeBridgeError(new BridgeInputError('fips_destination_unavailable'));
+    }
+  };
+  const acceptBrowserAdmission = (socket: WebSocket, frame: FwavFrame): void => {
+    const pending = pendingBrowserAdmission;
+    if (!pending || pending.owner !== socket || owner !== socket || frame.epoch !== state.epoch || frame.sequence !== pending.entry.frame.sequence) fail('fips_packet_admission_stale_or_unowned');
+    const result = decodeFipsPacketAdmission(frame.payload);
+    if (result === FIPS_PACKET_ADMISSION_ACCEPTED) {
+      const queue = packetQueues.get('fips-to-browser')!;
+      if (queue.frames[0] !== pending.entry) fail('fips_packet_admission_queue_mismatch');
+      queue.frames.shift(); queue.bytes -= pending.entry.frame.payload.byteLength + HEADER_BYTES;
+      clearPendingBrowserAdmission();
+      state.packetCounters.fipsToBrowser += 1;
+      notifyFipsPacketAdmission(pending.entry.frame, result);
+      state.lastAcceptedAtMs = options.now?.() ?? Date.now();
+      state.packetQueues.fipsToBrowser.health = queue.frames.length ? 'waiting' : 'ready';
+      refreshState();
+      flushPacketQueue('fips-to-browser');
+      return;
+    }
+    if (result !== FIPS_PACKET_ADMISSION_QUEUE_FULL) fail('fips_packet_admission_result_invalid');
+    notifyFipsPacketAdmission(pending.entry.frame, result);
+    if (pending.attempts >= 3) {
+      clearPendingBrowserAdmission();
+      state.packetQueues.fipsToBrowser.health = 'rejected';
+      state.lastError = safeBridgeError(new BridgeInputError('acoustic_queue_full'));
+      refreshState();
+      return;
+    }
+    pending.attempts += 1;
+    pending.retryTimer = setTimeout(retryBrowserAdmission, 50);
+    state.packetQueues.fipsToBrowser.health = 'waiting';
     refreshState();
   };
   const packetDestinationReady = (direction: PacketDirection): boolean => {
@@ -1070,6 +1153,10 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       const acousticControl = frame.type === MessageType.ACOUSTIC_READY || frame.type === MessageType.ACOUSTIC_DISARM;
       if (frame.epoch !== state.epoch) fail('stale_or_duplicate_frame');
       if (connection.mustResetBeforeUse && frame.type !== MessageType.RESET) fail('recovery_reset_required');
+      if (frame.type === MessageType.FIPS_PACKET_ADMISSION) {
+        acceptBrowserAdmission(socket, frame);
+        return;
+      }
       if (acousticControl) {
         if (frame.sequence !== 0n || frame.flags !== 0) fail('acoustic_control_invalid');
         if (frame.type === MessageType.ACOUSTIC_READY) {
@@ -1260,6 +1347,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       sequenceTrackers.delete(lastSequence);
       browserConnections.delete(connection);
       if (owner !== socket) return;
+      clearPendingBrowserAdmission();
       owner = undefined; state.packetEndpoints.browser = 'disconnected'; localAudioPreflight = false; disarmAcousticSession();
       if (shuttingDown) return;
       if (connection.mustResetBeforeUse) {

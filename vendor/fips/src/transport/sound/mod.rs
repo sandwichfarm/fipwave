@@ -29,6 +29,9 @@ const FWAV_TYPE_FIPS_PACKET: u8 = 9;
 const FWAV_TYPE_RESET: u8 = 8;
 const FWAV_TYPE_BROWSER_ARM: u8 = 10;
 const FWAV_TYPE_BROWSER_DISARM: u8 = 11;
+const FWAV_TYPE_FIPS_PACKET_ADMISSION: u8 = 14;
+const FWAV_ADMISSION_ACCEPTED: u8 = 1;
+const FWAV_ADMISSION_QUEUE_FULL: u8 = 2;
 const FWAV_READINESS_PROOF_BYTES: usize = 64;
 const FWAV_DISARM_CAPABILITY_BYTES: usize = 16;
 const RECONNECT_INITIAL_DELAY: Duration = Duration::from_millis(100);
@@ -513,6 +516,43 @@ async fn inject_inbound(
         }
         return Ok(());
     }
+    // The local bridge only reports this after the owning browser has either
+    // admitted the exact FIPS frame into AcousticSession or explicitly found
+    // its bounded acoustic queue full.  It is not a packet from the peer and
+    // must never reach FIPS' receive channel.
+    if kind == FWAV_TYPE_FIPS_PACKET_ADMISSION {
+        let mut current = runtime.lock().expect("sound runtime");
+        if encoded[6] != 0
+            || payload_len != 1
+            || sequence == 0
+            || current.state != TransportState::Up
+            || current.epoch != epoch
+            || sequence > current.next_sequence
+        {
+            current.counters.rejected += 1;
+            current.last_error = Some("sound_packet_admission_invalid");
+            return Err(());
+        }
+        match encoded[FWAV_HEADER_BYTES] {
+            FWAV_ADMISSION_ACCEPTED => {
+                // Do not manufacture a receive event: this is delivery
+                // evidence for locally-originated traffic only.
+                if current.last_error == Some("sound_browser_queue_full") {
+                    current.last_error = None;
+                }
+            }
+            FWAV_ADMISSION_QUEUE_FULL => {
+                current.counters.rejected += 1;
+                current.last_error = Some("sound_browser_queue_full");
+            }
+            _ => {
+                current.counters.rejected += 1;
+                current.last_error = Some("sound_packet_admission_invalid");
+                return Err(());
+            }
+        }
+        return Ok(());
+    }
     if kind != FWAV_TYPE_FIPS_PACKET
         || TrafficClass::from_wire(encoded[6]).is_none()
         || payload_len > mtu as usize
@@ -710,6 +750,60 @@ mod tests {
         let runtime = sound.runtime.lock().unwrap();
         assert_eq!(runtime.counters.rx_packets, 0);
         assert_eq!(runtime.highest_received_sequence, None);
+    }
+
+    #[tokio::test]
+    async fn sound_transport_honors_exact_browser_packet_admission_without_injecting_a_peer_packet()
+    {
+        let (packet_tx, mut packet_rx) = packet_channel(2);
+        let sound = SoundTransport::new(TransportId::new(8), None, config(), packet_tx).unwrap();
+        {
+            let mut runtime = sound.runtime.lock().unwrap();
+            runtime.state = TransportState::Up;
+            runtime.browser_ready = true;
+            runtime.next_sequence = 1;
+        }
+        let mut admission = vec![0; FWAV_HEADER_BYTES + 1];
+        admission[0..4].copy_from_slice(b"FWAV");
+        admission[4] = 1;
+        admission[5] = FWAV_TYPE_FIPS_PACKET_ADMISSION;
+        admission[8..12].copy_from_slice(&1u32.to_le_bytes());
+        admission[12..16].copy_from_slice(&1u32.to_le_bytes());
+        admission[16..24].copy_from_slice(&1u64.to_le_bytes());
+        admission[FWAV_HEADER_BYTES] = FWAV_ADMISSION_QUEUE_FULL;
+        inject_inbound(
+            &sound.runtime,
+            &sound.packet_tx,
+            sound.transport_id,
+            &sound.configured_peer(),
+            sound.mtu(),
+            &admission,
+        )
+        .await
+        .unwrap();
+        assert!(packet_rx.try_recv().is_err());
+        assert_eq!(
+            sound.transport_stats()["last_error"],
+            "sound_browser_queue_full"
+        );
+        assert_eq!(sound.transport_stats()["rejected"], 1);
+
+        admission[FWAV_HEADER_BYTES] = FWAV_ADMISSION_ACCEPTED;
+        inject_inbound(
+            &sound.runtime,
+            &sound.packet_tx,
+            sound.transport_id,
+            &sound.configured_peer(),
+            sound.mtu(),
+            &admission,
+        )
+        .await
+        .unwrap();
+        assert!(packet_rx.try_recv().is_err());
+        assert_eq!(
+            sound.transport_stats()["last_error"],
+            serde_json::Value::Null
+        );
     }
 
     #[tokio::test]

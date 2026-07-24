@@ -101,6 +101,9 @@ const pendingResults = new Map<string, Pending<void>>();
 
 const FWAV_HEADER_BYTES = 32;
 const FIPS_PACKET_TYPE = 9;
+const FIPS_PACKET_ADMISSION_TYPE = 14;
+const FIPS_PACKET_ADMISSION_ACCEPTED = 1;
+const FIPS_PACKET_ADMISSION_QUEUE_FULL = 2;
 function encodeFipsPacket(payload: Uint8Array, trafficClass: FipsTrafficClass): ArrayBuffer {
   if (!browserPacketReady || payload.byteLength === 0 || payload.byteLength > 256 * 1024 - FWAV_HEADER_BYTES) throw new Error('FIPS packet adapter is not ready for this packet');
   if (!isFipsTrafficClass(trafficClass)) throw new Error('FIPS packet frame traffic class is invalid');
@@ -112,14 +115,18 @@ function encodeFipsPacket(payload: Uint8Array, trafficClass: FipsTrafficClass): 
   bytes.set(payload, FWAV_HEADER_BYTES);
   return output;
 }
-function decodeFipsPacket(input: ArrayBuffer): FipsPacketEnvelope {
+function decodeFipsPacket(input: ArrayBuffer): FipsPacketEnvelope & { sequence: bigint } {
   if (input.byteLength <= FWAV_HEADER_BYTES || input.byteLength > 256 * 1024) throw new Error('FIPS packet frame size is invalid');
   const bytes = new Uint8Array(input); const view = new DataView(input);
   if (String.fromCharCode(...bytes.slice(0, 4)) !== 'FWAV' || view.getUint8(4) !== 1 || view.getUint8(5) !== FIPS_PACKET_TYPE) throw new Error('FIPS packet frame identity is invalid');
   const trafficClass = view.getUint8(6);
   if (view.getUint32(8, true) !== input.byteLength - FWAV_HEADER_BYTES || view.getUint8(7) !== 0 || !isFipsTrafficClass(trafficClass) || view.getUint32(24, true) !== 0 || view.getUint16(28, true) !== 0 || view.getUint16(30, true) !== 0) throw new Error('FIPS packet frame header is invalid');
   if (view.getUint32(12, true) !== epoch) throw new Error('FIPS packet frame is stale');
-  return Object.freeze({ bytes: bytes.slice(FWAV_HEADER_BYTES), trafficClass });
+  return Object.freeze({ bytes: bytes.slice(FWAV_HEADER_BYTES), trafficClass, sequence: view.getBigUint64(16, true) });
+}
+function sendFipsPacketAdmission(socket: WebSocket, packetEpoch: number, sequence: bigint, accepted: boolean): void {
+  const payload = Uint8Array.of(accepted ? FIPS_PACKET_ADMISSION_ACCEPTED : FIPS_PACKET_ADMISSION_QUEUE_FULL);
+  socket.send(encodeControlFrame({ type: FIPS_PACKET_ADMISSION_TYPE, epoch: packetEpoch, sequence, payload }));
 }
 let fipsPackets = createFipsPacketAdapter({
   onPacket(envelope) {
@@ -492,6 +499,7 @@ function handleBridgeMessage(socket: WebSocket, generation: number, event: Messa
       if (type === FIPS_PACKET_TYPE) {
         const envelope = decodeFipsPacket(event.data);
         const accepted = fipsPackets.receive(envelope.bytes, envelope.trafficClass, epoch, packetGeneration);
+        sendFipsPacketAdmission(socket, epoch, envelope.sequence, accepted.accepted);
         if (!accepted.accepted) bridgeDelivery = `FIPS packet rejected — ${accepted.reason}`;
         render();
         return;

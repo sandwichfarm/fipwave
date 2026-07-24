@@ -128,7 +128,7 @@ export function peerRole(role: Role): Role { return role === 'A' ? 'B' : 'A'; }
 
 export function encodeControlFrame(input: { type: number; epoch: number; sequence: bigint; payload?: Uint8Array }): ArrayBuffer {
   const payload = input.payload ?? new Uint8Array();
-  if (!Number.isInteger(input.type) || input.type < 1 || input.type > 13) throw new Error('FWAV control type is invalid');
+  if (!Number.isInteger(input.type) || input.type < 1 || input.type > 14) throw new Error('FWAV control type is invalid');
   if (!Number.isInteger(input.epoch) || input.epoch < 0 || input.epoch > 0xffff_ffff) throw new Error('FWAV control epoch is invalid');
   if (input.sequence < 0n || input.sequence > 0xffff_ffff_ffff_ffffn) throw new Error('FWAV control sequence is invalid');
   if (payload.byteLength > 256 * 1024 - FWAV_HEADER_BYTES) throw new Error('FWAV control payload is too large');
