@@ -47,6 +47,8 @@ export interface AcousticSessionSnapshot {
   readonly ledger: readonly AcousticProbeLedgerEntry[];
   readonly settings?: AcousticSettings;
   readonly settingsDigest?: Uint8Array;
+  /** Local monotonic/clock evidence of the accepted current-session heartbeat. */
+  readonly lastHeartbeatAtMs?: number;
   readonly counters: Readonly<{ retries: number; dropped: number; duplicates: number; queuedPackets: number; queuedBytes: number; deliveredPackets: number; }>;
 }
 
@@ -169,6 +171,7 @@ export class AcousticSession {
   #selected: Partial<Record<'AtoB' | 'BtoA', AcousticCandidate>> = {};
   #settings: AcousticSettings | undefined;
   #settingsDigest: Uint8Array | undefined;
+  #lastHeartbeatAtMs: number | undefined;
   #work: Promise<void> = Promise.resolve();
   #turnOwner: AcousticRole | undefined;
   #packetId = 1;
@@ -206,6 +209,7 @@ export class AcousticSession {
       ...(this.#reason === undefined ? {} : { reason: this.#reason }),
       ...(this.#settings === undefined ? {} : { settings: { aToB: { ...this.#settings.aToB }, bToA: { ...this.#settings.bToA } } }),
       ...(this.#settingsDigest === undefined ? {} : { settingsDigest: this.#settingsDigest.slice() }),
+      ...(this.#lastHeartbeatAtMs === undefined ? {} : { lastHeartbeatAtMs: this.#lastHeartbeatAtMs }),
       counters: Object.freeze({ ...this.#counters, queuedPackets: this.queueLength(), queuedBytes: this.queueBytes() }),
     });
   }
@@ -239,7 +243,7 @@ export class AcousticSession {
     if (this.#timer !== undefined) this.options.timers.clearTimeout(this.#timer);
     if (this.#deliveryTimer !== undefined) this.options.timers.clearTimeout(this.#deliveryTimer);
     this.clearHeartbeatTimers(); this.#generation += 1;
-    this.#timer = undefined; this.#deliveryTimer = undefined; this.#epoch = epoch; this.#sessionId = undefined; this.#localNonce = undefined; this.#peerNonce = undefined; this.#sequence = 1; this.#reason = undefined; this.#ledger = []; this.#sentProbes = { AtoB: 0, BtoA: 0 }; this.#receivedReports = { AtoB: 0, BtoA: 0 }; this.#receivedProbes = { AtoB: 0, BtoA: 0 }; this.#selected = {}; this.#settings = undefined; this.#settingsDigest = undefined; this.#turnOwner = undefined; this.#queues = { control: [], heartbeat: [], ordinary: [] }; this.#active = undefined; this.#inbound = undefined; this.#lastAck = undefined; this.#delivered.clear(); this.#awaitingAck = false; this.#work = Promise.resolve(); this.#state = this.options.role === 'A' ? 'Idle' : 'Listening';
+    this.#timer = undefined; this.#deliveryTimer = undefined; this.#epoch = epoch; this.#sessionId = undefined; this.#localNonce = undefined; this.#peerNonce = undefined; this.#sequence = 1; this.#reason = undefined; this.#ledger = []; this.#sentProbes = { AtoB: 0, BtoA: 0 }; this.#receivedReports = { AtoB: 0, BtoA: 0 }; this.#receivedProbes = { AtoB: 0, BtoA: 0 }; this.#selected = {}; this.#settings = undefined; this.#settingsDigest = undefined; this.#lastHeartbeatAtMs = undefined; this.#turnOwner = undefined; this.#queues = { control: [], heartbeat: [], ordinary: [] }; this.#active = undefined; this.#inbound = undefined; this.#lastAck = undefined; this.#delivered.clear(); this.#awaitingAck = false; this.#work = Promise.resolve(); this.#state = this.options.role === 'A' ? 'Idle' : 'Listening';
   }
 
   dispose(): void { this.reset(this.#epoch); this.#unsubscribe(); }
@@ -543,7 +547,7 @@ export class AcousticSession {
   }
   private onHeartbeat(sessionId: bigint): void {
     if (sessionId !== this.#sessionId || (this.#state !== 'AwaitingHeartbeat' && this.#state !== 'Ready' && this.#state !== 'Recovering')) return;
-    const reply = this.#state === 'AwaitingHeartbeat'; this.#state = 'Ready'; this.armHeartbeatTimers();
+    const reply = this.#state === 'AwaitingHeartbeat'; this.#state = 'Ready'; this.#lastHeartbeatAtMs = this.options.clock.now(); this.armHeartbeatTimers();
     this.#recoveryAttempts = 0;
     if (reply) { this.#turnOwner = 'A'; this.heartbeat(); }
   }

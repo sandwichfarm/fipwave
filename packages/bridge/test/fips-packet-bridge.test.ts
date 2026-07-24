@@ -22,11 +22,23 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => server.close()));
 });
 
-async function openEndpoint(port: number, endpoint: 'browser' | 'fips'): Promise<WebSocket> {
+type BrowserSocket = WebSocket & { readinessCapability?: Buffer };
+
+async function openEndpoint(port: number, endpoint: 'browser' | 'fips'): Promise<BrowserSocket> {
   const socket = new WebSocket(`ws://127.0.0.1:${port}/bridge/${endpoint}`, {
     origin: `http://127.0.0.1:${port}`,
-  });
+  }) as BrowserSocket;
+  const capability = endpoint === 'browser'
+    ? new Promise<Buffer>((resolve) => socket.on('message', (raw) => {
+      if (!Buffer.isBuffer(raw)) return;
+      try {
+        const message = JSON.parse(raw.toString('utf8')) as Record<string, unknown>;
+        if (message.kind === 'acoustic-capability' && typeof message.capability === 'string' && /^[a-f0-9]{32}$/i.test(message.capability)) { socket.readinessCapability = Buffer.from(message.capability, 'hex'); resolve(socket.readinessCapability); }
+      } catch { /* Other bridge messages are irrelevant to this capability. */ }
+    }))
+    : undefined;
   await once(socket, 'open');
+  if (capability) socket.readinessCapability = await capability;
   return socket;
 }
 
@@ -96,6 +108,22 @@ function patternedPacket(): Buffer {
 
 function packetBridgeState(bridge: BridgeServer): PacketBridgeState {
   return bridge.state() as unknown as PacketBridgeState;
+}
+
+function acousticReady(socket: BrowserSocket, epoch: number): Buffer {
+  const capability = socket.readinessCapability;
+  if (!capability) throw new Error('browser readiness capability is missing');
+  const payload = Buffer.alloc(64);
+  payload.writeBigUInt64LE(1n, 0);
+  payload.fill(1, 8, 40);
+  payload.writeBigUInt64LE(BigInt(Date.now()), 40);
+  capability.copy(payload, 48);
+  return encodeFrame({ type: MessageType.ACOUSTIC_READY, epoch, sequence: 0n, payload });
+}
+
+function acousticDisarm(socket: BrowserSocket, epoch: number): Buffer {
+  if (!socket.readinessCapability) throw new Error('browser readiness capability is missing');
+  return encodeFrame({ type: MessageType.ACOUSTIC_DISARM, epoch, sequence: 0n, payload: socket.readinessCapability });
 }
 
 describe('FIPS packet bridge', () => {
@@ -200,14 +228,16 @@ describe('FIPS packet bridge', () => {
     });
 
     const armed = once(fips, 'message');
-    browser.send(encodeFrame({ type: MessageType.ACOUSTIC_READY, epoch: 1, sequence: 0n, payload: Buffer.alloc(0) }));
+    browser.send(acousticReady(browser, 1));
     const [armFrame] = await armed;
-    expect(decodeFrame(Buffer.from(armFrame as Buffer))).toMatchObject({ type: MessageType.BROWSER_ARM, epoch: 1, payload: Buffer.alloc(0) });
+    expect(decodeFrame(Buffer.from(armFrame as Buffer))).toMatchObject({ type: MessageType.BROWSER_ARM, epoch: 1, payload: expect.any(Buffer) });
+    expect(decodeFrame(Buffer.from(armFrame as Buffer)).payload).toHaveLength(64);
 
     const disarmed = once(fips, 'message');
-    browser.send(encodeFrame({ type: MessageType.ACOUSTIC_DISARM, epoch: 1, sequence: 0n, payload: Buffer.alloc(0) }));
+    browser.send(acousticDisarm(browser, 1));
     const [disarmFrame] = await disarmed;
-    expect(decodeFrame(Buffer.from(disarmFrame as Buffer))).toMatchObject({ type: MessageType.BROWSER_DISARM, epoch: 1, payload: Buffer.alloc(0) });
+    expect(decodeFrame(Buffer.from(disarmFrame as Buffer))).toMatchObject({ type: MessageType.BROWSER_DISARM, epoch: 1, payload: expect.any(Buffer) });
+    expect(decodeFrame(Buffer.from(disarmFrame as Buffer)).payload).toHaveLength(16);
 
     const duplicateDisarm = expectNoMessage(fips);
     browser.close();
@@ -358,7 +388,7 @@ describe('FIPS packet bridge', () => {
     const fips = await openEndpoint(bridge.port, 'fips');
 
     const arm = once(fips, 'message');
-    browser.send(encodeFrame({ type: MessageType.ACOUSTIC_READY, epoch: 1, sequence: 0n, payload: Buffer.alloc(0) }));
+    browser.send(acousticReady(browser, 1));
     await arm;
     expect(bridge.state()).toMatchObject({ acousticReady: true });
 
@@ -372,7 +402,8 @@ describe('FIPS packet bridge', () => {
     expect(bridge.state()).toMatchObject({ acousticReady: false });
 
     const rearm = once(fips, 'message');
-    browser.send(encodeFrame({ type: MessageType.ACOUSTIC_READY, epoch: 2, sequence: 0n, payload: Buffer.alloc(0) }));
+    await drainBridge();
+    browser.send(acousticReady(browser, 2));
     await rearm;
     const disarm = once(fips, 'message');
     browser.send(encodeFrame({ type: MessageType.ERROR, epoch: 2, sequence: 1n, payload: Buffer.from('{}') }));
@@ -385,7 +416,7 @@ describe('FIPS packet bridge', () => {
     const bridge = await createBridge();
     const browser = await openEndpoint(bridge.port, 'browser');
     const fips = await openEndpoint(bridge.port, 'fips');
-    browser.send(encodeFrame({ type: MessageType.ACOUSTIC_READY, epoch: 0, sequence: 0n, payload: Buffer.alloc(0) }));
+    browser.send(acousticReady(browser, 0));
     await once(browser, 'close');
     expect(bridge.state()).toMatchObject({ acousticReady: false, rejectedFrames: 1 });
     await expectNoMessage(fips);

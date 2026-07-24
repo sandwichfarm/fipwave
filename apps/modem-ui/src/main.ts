@@ -61,6 +61,7 @@ let quietFailureReportedEpoch: number | undefined;
 let runnerConfig: Readonly<RunnerConfig> | undefined;
 let configFailure = '';
 let resetFailure = '';
+let acousticCapability: Readonly<{ epoch: number; bytes: Uint8Array }> | undefined;
 type MeasuredProbe = Readonly<{ received: true; bytePerfect: true; corrupt: false; missing: false; duplicate: false; discontinuity: boolean; latencyMs: undefined; signalDb: undefined; clipping: undefined; confidence: 1 }>;
 const receivedProbes = new Map<string, MeasuredProbe>();
 function probeReceiptKey(sessionId: bigint, direction: number, candidateIndex: number, probeIndex: number): string {
@@ -135,11 +136,23 @@ let fipsPackets = createFipsPacketAdapter({
   },
 });
 
-function sendAcousticControl(type: 12 | 13, controlEpoch: number): void {
+function readinessPayload(controlEpoch: number): Uint8Array | undefined {
+  const snapshot = acousticSession?.snapshot;
+  if (!snapshot?.ready || snapshot.epoch !== controlEpoch || !snapshot.sessionId || !snapshot.settingsDigest || snapshot.settingsDigest.byteLength !== 32 || snapshot.lastHeartbeatAtMs === undefined || !acousticCapability || acousticCapability.epoch !== controlEpoch || acousticCapability.bytes.byteLength !== 16 || snapshot.lastHeartbeatAtMs < 0) return undefined;
+  const payload = new Uint8Array(64); const view = new DataView(payload.buffer);
+  view.setBigUint64(0, snapshot.sessionId, true);
+  payload.set(snapshot.settingsDigest, 8);
+  view.setBigUint64(40, BigInt(snapshot.lastHeartbeatAtMs), true);
+  payload.set(acousticCapability.bytes, 48);
+  return payload;
+}
+function sendAcousticControl(type: 12 | 13, controlEpoch: number): boolean {
   const socket = bridge;
-  if (!socket || socket.readyState !== WebSocket.OPEN) return;
-  try { socket.send(encodeControlFrame({ type, epoch: controlEpoch, sequence: 0n })); }
-  catch { /* The bridge close handler performs the same fail-closed cleanup. */ }
+  if (!socket || socket.readyState !== WebSocket.OPEN || !acousticCapability || acousticCapability.epoch !== controlEpoch) return false;
+  const payload = type === 12 ? readinessPayload(controlEpoch) : acousticCapability.bytes;
+  if (!payload) return false;
+  try { socket.send(encodeControlFrame({ type, epoch: controlEpoch, sequence: 0n, payload })); return true; }
+  catch { return false; }
 }
 
 /** Builds the only browser composition path: opaque FIPS packet → session → FAS1 unit → Quiet. */
@@ -200,7 +213,7 @@ function configureAcousticSession(config: Readonly<RunnerConfig>): void {
       socket.send(encodeFipsPacket(envelope.bytes, envelope.trafficClass)); acousticTx += 1;
     },
     controls: {
-      ready(controlEpoch) { browserPacketReady = true; packetGeneration = adapter!.generation; sendAcousticControl(12, controlEpoch); syncBridgeState(); },
+      ready(controlEpoch) { browserPacketReady = sendAcousticControl(12, controlEpoch); if (browserPacketReady) packetGeneration = adapter!.generation; syncBridgeState(); },
       disarm(controlEpoch) { browserPacketReady = false; sendAcousticControl(13, controlEpoch); syncBridgeState(); },
     },
   });
@@ -489,6 +502,17 @@ function handleBridgeMessage(socket: WebSocket, generation: number, event: Messa
     }
     if (typeof event.data !== 'string') throw new Error('Local bridge sent an unsupported message');
     const message = JSON.parse(event.data) as Record<string, unknown>;
+    if (message.kind === 'acoustic-capability' && message.epoch === epoch && typeof message.capability === 'string' && /^[a-f0-9]{32}$/i.test(message.capability)) {
+      const bytes = new Uint8Array(message.capability.match(/../g)!.map((byte) => Number.parseInt(byte, 16)));
+      acousticCapability = Object.freeze({ epoch, bytes });
+      // Capability delivery can race initial session establishment.  Retry only
+      // the bound projection; the session itself remains the readiness source.
+      if (acousticSession?.snapshot.ready && acousticAdapter) {
+        browserPacketReady = sendAcousticControl(12, epoch);
+        if (browserPacketReady) packetGeneration = acousticAdapter.generation;
+      }
+      return;
+    }
     if (message.kind === 'qualification-result') {
       const caseId = typeof message.caseId === 'string' ? message.caseId : '';
       const ackEpoch = typeof message.epoch === 'number' ? message.epoch : -1;

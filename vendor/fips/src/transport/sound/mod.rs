@@ -29,6 +29,8 @@ const FWAV_TYPE_FIPS_PACKET: u8 = 9;
 const FWAV_TYPE_RESET: u8 = 8;
 const FWAV_TYPE_BROWSER_ARM: u8 = 10;
 const FWAV_TYPE_BROWSER_DISARM: u8 = 11;
+const FWAV_READINESS_PROOF_BYTES: usize = 64;
+const FWAV_DISARM_CAPABILITY_BYTES: usize = 16;
 const RECONNECT_INITIAL_DELAY: Duration = Duration::from_millis(100);
 const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(1);
 
@@ -46,6 +48,7 @@ struct SoundCounters {
 struct Runtime {
     state: TransportState,
     browser_ready: bool,
+    readiness_proof: Option<[u8; FWAV_READINESS_PROOF_BYTES]>,
     epoch: u32,
     next_sequence: u64,
     highest_received_sequence: Option<u64>,
@@ -65,6 +68,7 @@ impl Default for Runtime {
         Self {
             state: TransportState::Configured,
             browser_ready: false,
+            readiness_proof: None,
             epoch: 1,
             next_sequence: 0,
             highest_received_sequence: None,
@@ -163,6 +167,7 @@ impl SoundTransport {
                     // but same-epoch sequence watermarks do: resetting either
                     // would permit replay against the replacement socket.
                     current.browser_ready = false;
+                    current.readiness_proof = None;
                     current.last_error = None;
                 }
                 let disconnected = loop {
@@ -211,6 +216,7 @@ impl SoundTransport {
                     current.counters.disconnects += 1;
                     current.sender = None;
                     current.browser_ready = false;
+                    current.readiness_proof = None;
                     current.state = TransportState::Starting;
                     current.last_error = Some("sound_bridge_disconnected");
                     current.outbound_bytes = 0;
@@ -259,6 +265,7 @@ impl SoundTransport {
         let mut runtime = self.runtime.lock().expect("sound runtime");
         runtime.sender = None;
         runtime.browser_ready = false;
+        runtime.readiness_proof = None;
         runtime.state = TransportState::Down;
         runtime.outbound_bytes = 0;
         Ok(())
@@ -454,6 +461,7 @@ async fn inject_inbound(
         current.next_sequence = 0;
         current.highest_received_sequence = None;
         current.browser_ready = false;
+        current.readiness_proof = None;
         current.counters = SoundCounters::default();
         current.last_error = None;
         return Ok(());
@@ -461,7 +469,6 @@ async fn inject_inbound(
     if kind == FWAV_TYPE_BROWSER_ARM || kind == FWAV_TYPE_BROWSER_DISARM {
         let mut current = runtime.lock().expect("sound runtime");
         if encoded[6] != 0
-            || payload_len != 0
             || sequence != 0
             || current.state != TransportState::Up
             || current.epoch != epoch
@@ -470,7 +477,40 @@ async fn inject_inbound(
             current.last_error = Some("sound_browser_control_invalid");
             return Err(());
         }
-        current.browser_ready = kind == FWAV_TYPE_BROWSER_ARM;
+        if kind == FWAV_TYPE_BROWSER_ARM {
+            if payload_len != FWAV_READINESS_PROOF_BYTES {
+                current.counters.rejected += 1;
+                current.last_error = Some("sound_browser_arm_proof_invalid");
+                return Err(());
+            }
+            let proof: [u8; FWAV_READINESS_PROOF_BYTES] = encoded[FWAV_HEADER_BYTES..]
+                .try_into()
+                .expect("bounded readiness proof");
+            if proof[0..8].iter().all(|byte| *byte == 0)
+                || proof[8..40].iter().all(|byte| *byte == 0)
+                || proof[48..64].iter().all(|byte| *byte == 0)
+            {
+                current.counters.rejected += 1;
+                current.last_error = Some("sound_browser_arm_proof_invalid");
+                return Err(());
+            }
+            current.readiness_proof = Some(proof);
+            current.browser_ready = true;
+        } else {
+            if payload_len != FWAV_DISARM_CAPABILITY_BYTES
+                || current
+                    .readiness_proof
+                    .as_ref()
+                    .is_none_or(|proof| proof[48..64] != encoded[FWAV_HEADER_BYTES..])
+            {
+                current.counters.rejected += 1;
+                current.last_error = Some("sound_browser_disarm_proof_invalid");
+                return Err(());
+            }
+            current.readiness_proof = None;
+            current.browser_ready = false;
+            current.readiness_proof = None;
+        }
         return Ok(());
     }
     if kind != FWAV_TYPE_FIPS_PACKET
@@ -813,11 +853,15 @@ mod tests {
         );
         assert!(!sound.browser_ready());
 
-        let mut arm = vec![0; FWAV_HEADER_BYTES];
+        let mut arm = vec![0; FWAV_HEADER_BYTES + FWAV_READINESS_PROOF_BYTES];
         arm[0..4].copy_from_slice(b"FWAV");
         arm[4] = 1;
         arm[5] = FWAV_TYPE_BROWSER_ARM;
+        arm[8..12].copy_from_slice(&(FWAV_READINESS_PROOF_BYTES as u32).to_le_bytes());
         arm[12..16].copy_from_slice(&1u32.to_le_bytes());
+        arm[FWAV_HEADER_BYTES] = 1;
+        arm[FWAV_HEADER_BYTES + 8] = 1;
+        arm[FWAV_HEADER_BYTES + 48] = 1;
         inject_inbound(
             &sound.runtime,
             &sound.packet_tx,
@@ -856,6 +900,9 @@ mod tests {
 
         let mut disarm = arm.clone();
         disarm[5] = FWAV_TYPE_BROWSER_DISARM;
+        disarm.truncate(FWAV_HEADER_BYTES + FWAV_DISARM_CAPABILITY_BYTES);
+        disarm[8..12].copy_from_slice(&(FWAV_DISARM_CAPABILITY_BYTES as u32).to_le_bytes());
+        disarm[FWAV_HEADER_BYTES..].copy_from_slice(&arm[FWAV_HEADER_BYTES + 48..FWAV_HEADER_BYTES + 64]);
         inject_inbound(
             &sound.runtime,
             &sound.packet_tx,

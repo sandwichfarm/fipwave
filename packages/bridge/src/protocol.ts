@@ -10,6 +10,10 @@ export const PCM_SAMPLE_INDEX_BYTES = 8;
 export const CYRINX_PCM_PLAYBACK_FLAG = 0x0001;
 /** RESET acknowledgements are bridge-originated and must never be echoed back as requests. */
 export const RESET_ACK_FLAG = 0x0001;
+/** Exact browser → bridge → Rust projection of a committed acoustic session. */
+export const ACOUSTIC_READINESS_PROOF_BYTES = 64;
+export const ACOUSTIC_DISARM_CAPABILITY_BYTES = 16;
+export const ACOUSTIC_READINESS_FRESHNESS_MS = 15_000;
 
 /**
  * Source-authored scheduling metadata for complete opaque FIPS packets.
@@ -60,6 +64,23 @@ export interface FwavFrame {
   channels?: number;
   encoding?: PcmEncoding;
   payload: Buffer;
+}
+
+export interface AcousticReadinessProof {
+  readonly sessionId: bigint;
+  readonly settingsDigest: Buffer;
+  readonly heartbeatAtMs: bigint;
+  readonly capability: Buffer;
+}
+
+export function decodeAcousticReadinessProof(payload: Buffer): AcousticReadinessProof {
+  if (!Buffer.isBuffer(payload) || payload.byteLength !== ACOUSTIC_READINESS_PROOF_BYTES) fail('acoustic readiness proof size is invalid');
+  const sessionId = payload.readBigUInt64LE(0);
+  const settingsDigest = Buffer.from(payload.subarray(8, 40));
+  const heartbeatAtMs = payload.readBigUInt64LE(40);
+  const capability = Buffer.from(payload.subarray(48, 64));
+  if (sessionId === 0n || settingsDigest.every((byte) => byte === 0) || capability.every((byte) => byte === 0)) fail('acoustic readiness proof is invalid');
+  return Object.freeze({ sessionId, settingsDigest, heartbeatAtMs, capability });
 }
 
 export function encodePcmPayload(firstSampleIndex: bigint, samples: Buffer): Buffer {
@@ -138,9 +159,14 @@ function validateFrame(frame: FwavFrame): Required<Pick<FwavFrame, 'flags' | 'sa
   } else if (frame.trafficClass !== undefined) {
     fail('traffic class is only valid for FIPS packets');
   }
-  if (isAcousticReadinessControl
-    && ((frame.flags ?? 0) !== 0 || frame.sequence !== 0n || frame.payload.byteLength !== 0)) {
-    fail('acoustic readiness control must have zero flags, sequence, and payload');
+  if (isAcousticReadinessControl && ((frame.flags ?? 0) !== 0 || frame.sequence !== 0n)) {
+    fail('acoustic readiness control must have zero flags and sequence');
+  }
+  if (frame.type === MessageType.ACOUSTIC_READY) {
+    decodeAcousticReadinessProof(frame.payload);
+  }
+  if (frame.type === MessageType.ACOUSTIC_DISARM && frame.payload.byteLength !== ACOUSTIC_DISARM_CAPABILITY_BYTES) {
+    fail('acoustic disarm capability size is invalid');
   }
   validateInteger(sampleRate, 'sample rate', 0xffff_ffff);
   validateInteger(channels, 'channel count', 0xffff);

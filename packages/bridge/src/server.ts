@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { lstat, mkdir, readFile, realpath, rename, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
 import manifest from '../../../fixtures/corpus/manifest.json' with { type: 'json' };
 import type { CyrinxCase, CyrinxCaseMode, CyrinxResult } from './cyrinx-worker.js';
-import { decodeFrame, encodeFrame, MessageType, RESET_ACK_FLAG, type FwavFrame } from './protocol.js';
+import { ACOUSTIC_DISARM_CAPABILITY_BYTES, ACOUSTIC_READINESS_FRESHNESS_MS, decodeAcousticReadinessProof, decodeFrame, encodeFrame, MessageType, RESET_ACK_FLAG, type FwavFrame } from './protocol.js';
 import {
   CyrinxQualificationSession,
   type CyrinxSessionSnapshot,
@@ -270,6 +270,8 @@ interface BrowserConnectionState {
   preemptedControls: Set<bigint>;
   receivedEpoch: number;
   highestReceivedSequence: bigint;
+  acousticCapability: Buffer;
+  acousticCapabilityUsed: boolean;
 }
 type PacketDirection = 'browser-to-fips' | 'fips-to-browser';
 const DEFAULT_PACKET_QUEUE_LIMITS: PacketQueueLimits = Object.freeze({ maxItems: 32, maxBytes: MAX_MESSAGE_BYTES, maxAgeMs: MAX_QUEUE_AGE_MS });
@@ -361,6 +363,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   let audio: BrowserAudio | undefined; let generation = 1; let writeTail: Promise<unknown> = Promise.resolve();
   let results = new Map<string, BrowserResult>(); let failureReasons = new Set<string>(); let localAudioPreflight = false;
   let owner: WebSocket | undefined; let fipsOwner: WebSocket | undefined; let epochClaimed = false; let reconnectAllowed = false; let reconnectRequiresReset = false;
+  let acousticReadinessProof: Buffer | undefined;
   let operationGeneration = 1; let operationAbort = new AbortController(); let settleAbort: AbortController | undefined; let shuttingDown = false;
   let cyrinxExpiryTimer: unknown;
   const sequenceTrackers = new Set<{ value: bigint }>();
@@ -468,19 +471,30 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   };
   const notifyFipsBrowserState = (armed: boolean): void => {
     if (!fipsOwner || fipsOwner.readyState !== fipsOwner.OPEN) return;
+    const payload = armed
+      ? acousticReadinessProof
+      : acousticReadinessProof?.subarray(acousticReadinessProof.byteLength - ACOUSTIC_DISARM_CAPABILITY_BYTES);
+    if (!payload) return;
     fipsOwner.send(encodeFrame({
       type: armed ? MessageType.BROWSER_ARM : MessageType.BROWSER_DISARM,
       epoch: state.epoch,
       sequence: 0n,
-      payload: Buffer.alloc(0),
+      payload: Buffer.from(payload),
     }));
   };
-  const disarmAcousticSession = (): void => {
+  const issueAcousticCapability = (socket: WebSocket, connection: BrowserConnectionState): void => {
+    connection.acousticCapability = randomBytes(ACOUSTIC_DISARM_CAPABILITY_BYTES);
+    connection.acousticCapabilityUsed = false;
+    if (socket.readyState === socket.OPEN) socket.send(JSON.stringify({ kind: 'acoustic-capability', epoch: state.epoch, capability: connection.acousticCapability.toString('hex') }));
+  };
+  const disarmAcousticSession = (connection?: BrowserConnectionState, socket?: WebSocket): void => {
     if (!state.acousticReady) return;
     state.acousticReady = false;
     notifyFipsBrowserState(false);
+    acousticReadinessProof = undefined;
     state.packetReadiness = { browser: false, fips: false };
     clearQueues();
+    if (connection && socket) issueAcousticCapability(socket, connection);
   };
   const rejectSocket = (socket: WebSocket, error: unknown): void => {
     const safe = safeBridgeError(error);
@@ -781,6 +795,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     await persist(generation);
     const resetFrame = encodeFrame({ type: MessageType.RESET, flags: RESET_ACK_FLAG, epoch: state.epoch, sequence: 0n, payload: Buffer.alloc(0) });
     for (const client of clients) if (client.readyState === client.OPEN) client.send(resetFrame);
+    if (owner) for (const connection of browserConnections) issueAcousticCapability(owner, connection);
     broadcastSession();
     return state.epoch;
   };
@@ -1045,14 +1060,21 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       if (frame.epoch !== state.epoch) fail('stale_or_duplicate_frame');
       if (connection.mustResetBeforeUse && frame.type !== MessageType.RESET) fail('recovery_reset_required');
       if (acousticControl) {
-        if (frame.sequence !== 0n || frame.payload.byteLength !== 0 || frame.flags !== 0) fail('acoustic_control_invalid');
+        if (frame.sequence !== 0n || frame.flags !== 0) fail('acoustic_control_invalid');
         if (frame.type === MessageType.ACOUSTIC_READY) {
+          const proof = decodeAcousticReadinessProof(frame.payload);
+          const nowMs = BigInt(clock());
+          const fresh = proof.heartbeatAtMs <= nowMs && nowMs - proof.heartbeatAtMs <= BigInt(ACOUSTIC_READINESS_FRESHNESS_MS);
+          if (!fresh || connection.acousticCapabilityUsed || !timingSafeEqual(proof.capability, connection.acousticCapability)) fail('acoustic_readiness_proof_invalid');
           if (!state.acousticReady) {
+            connection.acousticCapabilityUsed = true;
+            acousticReadinessProof = Buffer.from(frame.payload);
             state.acousticReady = true;
             notifyFipsBrowserState(true);
           }
         } else {
-          disarmAcousticSession();
+          if (!acousticReadinessProof || !timingSafeEqual(frame.payload, connection.acousticCapability)) fail('acoustic_disarm_capability_invalid');
+          disarmAcousticSession(connection, socket);
         }
         return;
       }
@@ -1206,8 +1228,11 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       preemptedControls: new Set(),
       receivedEpoch: state.epoch,
       highestReceivedSequence: -1n,
+      acousticCapability: Buffer.alloc(ACOUSTIC_DISARM_CAPABILITY_BYTES),
+      acousticCapabilityUsed: false,
     };
     owner = socket; epochClaimed = true; reconnectAllowed = false; clients.add(socket); browserConnections.add(connection); state.packetEndpoints.browser = 'ready';
+    issueAcousticCapability(socket, connection);
     flushPacketQueue('fips-to-browser');
     const lastSequence = { value: -1n }; sequenceTrackers.add(lastSequence); let processing = Promise.resolve();
     void expireCyrinx().then((expired) => {
