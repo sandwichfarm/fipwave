@@ -27,7 +27,16 @@ class FakeTimers {
   #next = 1;
   setTimeout(callback: () => void): ReturnType<typeof setTimeout> { const id = this.#next++; this.#callbacks.set(id, callback); return id as unknown as ReturnType<typeof setTimeout>; }
   clearTimeout(handle: ReturnType<typeof setTimeout>): void { this.#callbacks.delete(handle as unknown as number); }
-  runAll(): void { for (const callback of [...this.#callbacks.values()]) callback(); this.#callbacks.clear(); }
+  runAll(): void {
+    const callbacks = [...this.#callbacks.values()];
+    this.#callbacks.clear();
+    for (const callback of callbacks) callback();
+  }
+}
+
+class ManualClock {
+  nowMs = 0;
+  now(): number { return this.nowMs; }
 }
 
 const candidate = {
@@ -216,5 +225,55 @@ describe('AcousticSession calibration, selection, and commitment', () => {
     c.start(); await settlePair(c, d);
     expect(c.snapshot).toMatchObject({ state: 'Error', ready: false, reason: 'acoustic_commit_digest_mismatch' });
     expect(d.snapshot.ready).toBe(false);
+  });
+});
+
+describe('AcousticSession packet, fragment, reassembly, retry, duplicate, and turn delivery', () => {
+  it('round-trips one byte-identical 1357-byte packet in each direction exactly once through seven bounded fragments', async () => {
+    const timers = new FakeTimers(); const clock = new ManualClock();
+    const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
+    const receivedA: Uint8Array[] = []; const receivedB: Uint8Array[] = [];
+    const a = new AcousticSession({ ...options('A', aModem), clock, timers, onPacket: (packet) => receivedA.push(packet) });
+    const b = new AcousticSession({ ...options('B', bModem), clock, timers, onPacket: (packet) => receivedB.push(packet) });
+    a.start(); await settlePair(a, b); b.heartbeat();
+
+    const aPacket = Uint8Array.from({ length: 1_357 }, (_, index) => index & 0xff);
+    const bPacket = Uint8Array.from({ length: 1_357 }, (_, index) => (255 - index) & 0xff);
+    expect(a.enqueuePacket(aPacket, 'ordinary').accepted).toBe(true);
+    timers.runAll(); timers.runAll(); timers.runAll(); timers.runAll();
+    expect(receivedB).toHaveLength(1);
+    expect(receivedB[0]).toEqual(aPacket);
+    expect(aModem.sent.map(decodeFas1).filter((unit) => unit.type === Fas1UnitType.Data)).toHaveLength(7);
+
+    expect(b.enqueuePacket(bPacket, 'ordinary').accepted).toBe(true);
+    timers.runAll(); timers.runAll(); timers.runAll(); timers.runAll();
+    expect(receivedA).toHaveLength(1);
+    expect(receivedA[0]).toEqual(bPacket);
+  });
+
+  it('retries only missing fragments and duplicate DATA or a lost ACK cannot redeliver a complete packet', async () => {
+    const timers = new FakeTimers(); const clock = new ManualClock();
+    const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
+    const received: Uint8Array[] = []; let dropped = false; let droppedAck = false;
+    aModem.shouldDeliver = (raw) => {
+      const unit = decodeFas1(raw);
+      if (unit.type === Fas1UnitType.Data && unit.fragmentIndex === 2 && !dropped) { dropped = true; return false; }
+      return true;
+    };
+    bModem.shouldDeliver = (raw) => {
+      const unit = decodeFas1(raw);
+      if (unit.type === Fas1UnitType.Ack && !droppedAck) { droppedAck = true; return false; }
+      return true;
+    };
+    const a = new AcousticSession({ ...options('A', aModem), clock, timers });
+    const b = new AcousticSession({ ...options('B', bModem), clock, timers, onPacket: (packet) => received.push(packet) });
+    a.start(); await settlePair(a, b); b.heartbeat();
+    expect(a.enqueuePacket(new Uint8Array(1_357).fill(7), 'ordinary').accepted).toBe(true);
+    for (let round = 0; round < 12; round += 1) timers.runAll();
+    expect(received).toHaveLength(1);
+    const data = aModem.sent.map(decodeFas1).filter((unit) => unit.type === Fas1UnitType.Data);
+    expect(data.filter((unit) => unit.fragmentIndex === 2).length).toBeGreaterThan(1);
+    expect(data.filter((unit) => unit.fragmentIndex >= 4)).toHaveLength(3);
+    expect(a.snapshot.counters.retries).toBeGreaterThan(0);
   });
 });

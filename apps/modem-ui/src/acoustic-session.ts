@@ -1,7 +1,10 @@
-import { decodeFas1, digestSettings, encodeFas1, Fas1UnitType, resolveAcousticProfile, type AcousticSettings, type DirectionalSettings } from './acoustic-protocol.js';
+import { decodeFas1, digestSettings, encodeFas1, Fas1UnitType, fragmentPacket, reassemblePacket, resolveAcousticProfile, type AcousticSettings, type DirectionalSettings, type Fas1Unit } from './acoustic-protocol.js';
 
 export type AcousticRole = 'A' | 'B';
-export type AcousticSessionState = 'Idle' | 'Listening' | 'HelloSent' | 'HelloAckSent' | 'CapsSent' | 'CalibratingAToB' | 'CalibratingBToA' | 'Committing' | 'AwaitingHeartbeat' | 'Ready' | 'Error';
+export type AcousticSessionState = 'Idle' | 'Listening' | 'HelloSent' | 'HelloAckSent' | 'CapsSent' | 'CalibratingAToB' | 'CalibratingBToA' | 'Committing' | 'AwaitingHeartbeat' | 'Ready' | 'Degraded' | 'Recovering' | 'Error';
+export type AcousticTrafficClass = 'control' | 'heartbeat' | 'ordinary';
+export interface AcousticQueueResult { readonly accepted: boolean; readonly reason?: string; readonly packetId?: number; }
+export interface AcousticDeliveryResult { readonly delivered: boolean; readonly reason?: string; readonly packetId?: number; }
 
 export interface AcousticModem {
   send(unit: Uint8Array): void | Promise<void>;
@@ -28,6 +31,7 @@ export interface AcousticSessionOptions {
   readonly candidates: readonly AcousticCandidate[];
   readonly calibration: Readonly<{ probesPerDirection: number; maxCandidates: number; deadlineMs: number }>;
   readonly measureProbe: (probe: AcousticProbe) => AcousticProbeObservation;
+  readonly onPacket?: (packet: Uint8Array, result: AcousticDeliveryResult) => void;
 }
 
 export interface AcousticSessionSnapshot {
@@ -41,7 +45,11 @@ export interface AcousticSessionSnapshot {
   readonly ledger: readonly AcousticProbeLedgerEntry[];
   readonly settings?: AcousticSettings;
   readonly settingsDigest?: Uint8Array;
+  readonly counters: Readonly<{ retries: number; dropped: number; duplicates: number; queuedPackets: number; queuedBytes: number; deliveredPackets: number; }>;
 }
+
+interface PendingPacket { readonly packetId: number; readonly packet: Uint8Array; readonly fragments: readonly Fas1Unit[]; readonly trafficClass: AcousticTrafficClass; readonly expiresAt: number; attempts: number; acknowledged: number; }
+interface InboundAssembly { readonly packetId: number; readonly fragmentCount: number; readonly packetLength: number; readonly fragments: Map<number, Fas1Unit>; readonly expiresAt: number; }
 
 interface Handshake { readonly role: AcousticRole; readonly identity: string; readonly expectedPeer: string; readonly nonce: Uint8Array; readonly echoedNonce?: Uint8Array; readonly profiles: readonly string[]; readonly ranges: AcousticCapabilityRange; readonly epoch: number; readonly sessionId?: bigint; }
 
@@ -59,6 +67,11 @@ const OBS_MISSING = 8;
 const OBS_DUPLICATE = 16;
 const OBS_DISCONTINUITY = 32;
 const OBS_CLIPPING = 64;
+const MAX_QUEUED_PACKETS = 4;
+const MAX_DELIVERED_IDS = 32;
+const MAX_PACKET_AGE_MS = 30_000;
+const MAX_ATTEMPTS = 3;
+const WINDOW_SIZE = 4;
 
 function invalid(message: string): never { throw new Error(`acoustic session ${message}`); }
 function validInteger(value: number, minimum: number, maximum: number): boolean { return Number.isSafeInteger(value) && value >= minimum && value <= maximum; }
@@ -155,6 +168,16 @@ export class AcousticSession {
   #settings: AcousticSettings | undefined;
   #settingsDigest: Uint8Array | undefined;
   #work: Promise<void> = Promise.resolve();
+  #turnOwner: AcousticRole | undefined;
+  #packetId = 1;
+  #queues: Record<AcousticTrafficClass, PendingPacket[]> = { control: [], heartbeat: [], ordinary: [] };
+  #active: PendingPacket | undefined;
+  #inbound: InboundAssembly | undefined;
+  #lastAck: { packetId: number; bitmap: number } | undefined;
+  #delivered = new Map<number, number>();
+  #deliveryTimer: ReturnType<typeof setTimeout> | undefined;
+  #awaitingAck = false;
+  #counters = { retries: 0, dropped: 0, duplicates: 0, deliveredPackets: 0 };
 
   constructor(private readonly options: AcousticSessionOptions) {
     if (!options.identity || !options.expectedPeer || options.identity === options.expectedPeer || !validRange(options.ranges) || options.profiles.length < 1 || options.profiles.length > MAX_PROFILES || options.candidates.length < 1 || options.candidates.length > options.calibration.maxCandidates || !validInteger(options.calibration.probesPerDirection, 1, 4) || !validInteger(options.calibration.deadlineMs, 1, 120_000) || typeof options.measureProbe !== 'function') invalid('options are invalid');
@@ -168,7 +191,7 @@ export class AcousticSession {
   }
 
   get snapshot(): AcousticSessionSnapshot {
-    const turnOwner = this.#state === 'CalibratingAToB' ? 'A' : this.#state === 'CalibratingBToA' ? 'B' : undefined;
+    const turnOwner = this.#state === 'CalibratingAToB' ? 'A' : this.#state === 'CalibratingBToA' ? 'B' : this.#turnOwner;
     return Object.freeze({
       state: this.#state, role: this.options.role, epoch: this.#epoch, ready: this.#state === 'Ready', ledger: this.#ledger.map((entry) => ({ ...entry, candidate: { ...entry.candidate }, observation: { ...entry.observation } })),
       ...(this.#sessionId === undefined ? {} : { sessionId: this.#sessionId }),
@@ -176,7 +199,23 @@ export class AcousticSession {
       ...(this.#reason === undefined ? {} : { reason: this.#reason }),
       ...(this.#settings === undefined ? {} : { settings: { aToB: { ...this.#settings.aToB }, bToA: { ...this.#settings.bToA } } }),
       ...(this.#settingsDigest === undefined ? {} : { settingsDigest: this.#settingsDigest.slice() }),
+      counters: Object.freeze({ ...this.#counters, queuedPackets: this.queueLength(), queuedBytes: this.queueBytes() }),
     });
+  }
+
+  enqueuePacket(packet: Uint8Array, trafficClass: AcousticTrafficClass = 'ordinary'): AcousticQueueResult {
+    this.expireWork();
+    if (this.#state !== 'Ready' || !this.#sessionId) return { accepted: false, reason: 'acoustic_not_ready' };
+    if (!(packet instanceof Uint8Array) || packet.byteLength < 1 || packet.byteLength > 1_357) return { accepted: false, reason: 'acoustic_packet_bounds' };
+    if (!['control', 'heartbeat', 'ordinary'].includes(trafficClass)) return { accepted: false, reason: 'acoustic_class_invalid' };
+    if (this.queueLength() + (this.#active ? 1 : 0) >= MAX_QUEUED_PACKETS) return { accepted: false, reason: 'acoustic_queue_full' };
+    const packetId = this.nextPacketId();
+    const copied = packet.slice();
+    const pending: PendingPacket = { packetId, packet: copied, fragments: fragmentPacket({ sessionId: this.#sessionId, sequenceStart: this.#sequence, packetId, packet: copied }), trafficClass, expiresAt: this.options.clock.now() + MAX_PACKET_AGE_MS, attempts: 0, acknowledged: 0 };
+    this.#sequence += pending.fragments.length;
+    this.#queues[trafficClass].push(pending);
+    this.driveTurn();
+    return { accepted: true, packetId };
   }
 
   start(): boolean {
@@ -191,7 +230,8 @@ export class AcousticSession {
   reset(epoch: number): void {
     if (!validInteger(epoch, 0, 0xffff_ffff)) invalid('epoch is invalid');
     if (this.#timer !== undefined) this.options.timers.clearTimeout(this.#timer);
-    this.#timer = undefined; this.#epoch = epoch; this.#sessionId = undefined; this.#localNonce = undefined; this.#peerNonce = undefined; this.#sequence = 1; this.#reason = undefined; this.#ledger = []; this.#sentProbes = { AtoB: 0, BtoA: 0 }; this.#receivedReports = { AtoB: 0, BtoA: 0 }; this.#receivedProbes = { AtoB: 0, BtoA: 0 }; this.#selected = {}; this.#settings = undefined; this.#settingsDigest = undefined; this.#work = Promise.resolve(); this.#state = this.options.role === 'A' ? 'Idle' : 'Listening';
+    if (this.#deliveryTimer !== undefined) this.options.timers.clearTimeout(this.#deliveryTimer);
+    this.#timer = undefined; this.#deliveryTimer = undefined; this.#epoch = epoch; this.#sessionId = undefined; this.#localNonce = undefined; this.#peerNonce = undefined; this.#sequence = 1; this.#reason = undefined; this.#ledger = []; this.#sentProbes = { AtoB: 0, BtoA: 0 }; this.#receivedReports = { AtoB: 0, BtoA: 0 }; this.#receivedProbes = { AtoB: 0, BtoA: 0 }; this.#selected = {}; this.#settings = undefined; this.#settingsDigest = undefined; this.#turnOwner = undefined; this.#queues = { control: [], heartbeat: [], ordinary: [] }; this.#active = undefined; this.#inbound = undefined; this.#lastAck = undefined; this.#delivered.clear(); this.#awaitingAck = false; this.#work = Promise.resolve(); this.#state = this.options.role === 'A' ? 'Idle' : 'Listening';
   }
 
   dispose(): void { this.reset(this.#epoch); this.#unsubscribe(); }
@@ -210,8 +250,101 @@ export class AcousticSession {
       else if (unit.type === Fas1UnitType.Commit) this.onCommit(unit.sessionId, unit.body);
       else if (unit.type === Fas1UnitType.CommitAck) this.onCommitAck(unit.sessionId, unit.body);
       else if (unit.type === Fas1UnitType.Heartbeat) this.onHeartbeat(unit.sessionId);
+      else if (unit.type === Fas1UnitType.Data) this.onData(unit);
+      else if (unit.type === Fas1UnitType.TurnEnd) this.onTurnEnd(unit.sessionId);
+      else if (unit.type === Fas1UnitType.Ack) this.onAck(unit.sessionId, unit.sequence);
     } catch { /* Ambient/malformed units never mutate a legal state. */ }
   }
+
+  private queueLength(): number { return this.#queues.control.length + this.#queues.heartbeat.length + this.#queues.ordinary.length; }
+  private queueBytes(): number { return [...this.#queues.control, ...this.#queues.heartbeat, ...this.#queues.ordinary].reduce((total, item) => total + item.packet.byteLength, 0) + (this.#active?.packet.byteLength ?? 0); }
+  private nextPacketId(): number { const value = this.#packetId; this.#packetId = this.#packetId === 0xffff_ffff ? 1 : this.#packetId + 1; return value; }
+  private clearDeliveryTimer(): void { if (this.#deliveryTimer !== undefined) this.options.timers.clearTimeout(this.#deliveryTimer); this.#deliveryTimer = undefined; }
+  private schedule(callback: () => void, delayMs: number): void {
+    this.clearDeliveryTimer(); const epoch = this.#epoch; const sessionId = this.#sessionId;
+    this.#deliveryTimer = this.options.timers.setTimeout(() => { this.#deliveryTimer = undefined; if (epoch !== this.#epoch || sessionId !== this.#sessionId) return; callback(); }, delayMs);
+  }
+  private guardMs(): number { return this.#settings ? (this.options.role === 'A' ? this.#settings.aToB.guardMs : this.#settings.bToA.guardMs) : 750; }
+  private ackTimeoutMs(): number { return this.#settings ? (this.options.role === 'A' ? this.#settings.aToB.ackTimeoutMs : this.#settings.bToA.ackTimeoutMs) : 4_000; }
+  private expireWork(): void {
+    const now = this.options.clock.now();
+    for (const priority of ['control', 'heartbeat', 'ordinary'] as const) {
+      const retained = this.#queues[priority].filter((item) => {
+        if (item.expiresAt >= now) return true;
+        this.#counters.dropped += 1; return false;
+      });
+      this.#queues[priority] = retained;
+    }
+    if (this.#active && this.#active.expiresAt < now) { this.#active = undefined; this.#awaitingAck = false; this.#counters.dropped += 1; this.degrade('acoustic_packet_expired'); }
+    if (this.#inbound && this.#inbound.expiresAt < now) { this.#inbound = undefined; this.#counters.dropped += 1; }
+    for (const [packetId, expiresAt] of this.#delivered) if (expiresAt < now) this.#delivered.delete(packetId);
+  }
+  private dequeue(): PendingPacket | undefined { return this.#queues.control.shift() ?? this.#queues.heartbeat.shift() ?? this.#queues.ordinary.shift(); }
+  private driveTurn(): void {
+    this.expireWork();
+    if (this.#state !== 'Ready' || !this.#sessionId || this.#turnOwner !== this.options.role || this.#awaitingAck) return;
+    this.#active ??= this.dequeue();
+    if (!this.#active) {
+      this.send(Fas1UnitType.Heartbeat, this.#sessionId, new Uint8Array());
+      this.send(Fas1UnitType.TurnEnd, this.#sessionId, new Uint8Array());
+      this.#turnOwner = complement(this.options.role);
+      return;
+    }
+    if (this.#active.attempts >= MAX_ATTEMPTS) { this.#counters.dropped += 1; this.#active = undefined; this.degrade('acoustic_retry_exhausted'); return; }
+    const pending = this.#active; const missing = pending.fragments.filter((unit) => (pending.acknowledged & (1 << unit.fragmentIndex)) === 0).slice(0, WINDOW_SIZE);
+    if (missing.length === 0) { this.#active = undefined; this.#turnOwner = complement(this.options.role); this.schedule(() => this.driveTurn(), this.guardMs()); return; }
+    pending.attempts += 1; this.#awaitingAck = true;
+    for (const unit of missing) this.sendUnit(unit);
+    this.send(Fas1UnitType.TurnEnd, this.#sessionId, new Uint8Array());
+    if (this.#awaitingAck && this.#active === pending) this.schedule(() => this.onAckTimeout(pending.packetId, pending.attempts), this.ackTimeoutMs());
+  }
+  private onAckTimeout(packetId: number, attempt: number): void {
+    if (!this.#active || !this.#awaitingAck || this.#active.packetId !== packetId || this.#active.attempts !== attempt) return;
+    this.#awaitingAck = false; this.#counters.retries += 1; this.driveTurn();
+  }
+  private onData(unit: Fas1Unit): void {
+    this.expireWork();
+    if (this.#state !== 'Ready' || unit.sessionId !== this.#sessionId || this.#turnOwner !== complement(this.options.role)) return;
+    if (this.#delivered.has(unit.packetId)) { this.#counters.duplicates += 1; this.#lastAck = { packetId: unit.packetId, bitmap: (1 << unit.fragmentCount) - 1 }; return; }
+    const existing = this.#inbound;
+    if (existing && (existing.packetId !== unit.packetId || existing.fragmentCount !== unit.fragmentCount || existing.packetLength !== unit.packetLength)) { this.#counters.dropped += 1; return; }
+    const inbound = existing ?? { packetId: unit.packetId, fragmentCount: unit.fragmentCount, packetLength: unit.packetLength, fragments: new Map<number, Fas1Unit>(), expiresAt: this.options.clock.now() + MAX_PACKET_AGE_MS };
+    this.#inbound = inbound;
+    if (inbound.fragments.has(unit.fragmentIndex)) { this.#counters.duplicates += 1; }
+    else inbound.fragments.set(unit.fragmentIndex, { ...unit, body: unit.body.slice() });
+    let bitmap = 0; for (const index of inbound.fragments.keys()) bitmap |= 1 << index;
+    this.#lastAck = { packetId: unit.packetId, bitmap };
+    if (inbound.fragments.size !== inbound.fragmentCount) return;
+    let packet: Uint8Array;
+    try { packet = reassemblePacket([...inbound.fragments.values()]); } catch { this.#inbound = undefined; this.#counters.dropped += 1; return; }
+    if (packet.byteLength !== inbound.packetLength || this.#delivered.has(unit.packetId)) return;
+    this.#delivered.set(unit.packetId, this.options.clock.now() + MAX_PACKET_AGE_MS);
+    while (this.#delivered.size > MAX_DELIVERED_IDS) this.#delivered.delete(this.#delivered.keys().next().value!);
+    this.#inbound = undefined; this.#counters.deliveredPackets += 1;
+    this.options.onPacket?.(packet.slice(), { delivered: true, packetId: unit.packetId });
+  }
+  private onTurnEnd(sessionId: bigint): void {
+    if (this.#state !== 'Ready' || sessionId !== this.#sessionId || this.#turnOwner !== complement(this.options.role)) return;
+    this.sendAck(this.#lastAck?.bitmap ?? 0); this.#turnOwner = this.options.role;
+    this.schedule(() => this.driveTurn(), this.guardMs());
+  }
+  private sendAck(bitmap: number): void {
+    if (!this.#sessionId) return;
+    const raw = encodeFas1({ type: Fas1UnitType.Ack, flags: 0, sessionId: this.#sessionId, sequence: bitmap >>> 0, packetId: 0, fragmentIndex: 0, fragmentCount: 0, packetLength: 0, body: new Uint8Array() });
+    void this.options.modem.send(raw);
+  }
+  private onAck(sessionId: bigint, bitmap: number): void {
+    if (this.#state !== 'Ready' || sessionId !== this.#sessionId || !this.#active || !this.#awaitingAck) return;
+    const pending = this.#active; const legalMask = (1 << pending.fragments.length) - 1;
+    if ((bitmap & ~legalMask) !== 0) return;
+    const before = pending.acknowledged; pending.acknowledged |= bitmap;
+    if (pending.acknowledged === before && pending.acknowledged !== legalMask) { this.#counters.duplicates += 1; return; }
+    this.#awaitingAck = false; this.clearDeliveryTimer();
+    if (pending.acknowledged === legalMask) { this.#active = undefined; this.#turnOwner = complement(this.options.role); return; }
+    this.#counters.retries += 1; this.#turnOwner = complement(this.options.role);
+  }
+  private sendUnit(unit: Fas1Unit): void { void this.options.modem.send(encodeFas1(unit)); }
+  private degrade(reason: string): void { if (this.#state === 'Error' || this.#state === 'Degraded') return; this.clearDeliveryTimer(); this.#awaitingAck = false; this.#state = 'Degraded'; this.#reason = reason; }
 
   private onHello(headerSessionId: bigint, body: Uint8Array): void {
     if (this.options.role !== 'B' || this.#state !== 'Listening' || headerSessionId !== 0n) return;
@@ -357,7 +490,7 @@ export class AcousticSession {
   private onHeartbeat(sessionId: bigint): void {
     if (sessionId !== this.#sessionId || (this.#state !== 'AwaitingHeartbeat' && this.#state !== 'Ready')) return;
     const reply = this.#state === 'AwaitingHeartbeat'; this.#state = 'Ready';
-    if (reply) this.heartbeat();
+    if (reply) { this.#turnOwner = this.options.role === 'A' ? 'A' : 'A'; this.heartbeat(); }
   }
   private toSettings(candidate: AcousticCandidate): DirectionalSettings { return { profileId: candidate.profileId, payloadBytes: candidate.payloadBytes, repetition: candidate.repetition, guardMs: candidate.guardMs, playbackGain: candidate.playbackGain, ackTimeoutMs: candidate.ackTimeoutMs }; }
   private fail(reason: string): void { if (this.#timer !== undefined) this.options.timers.clearTimeout(this.#timer); this.#timer = undefined; this.#state = 'Error'; this.#reason = reason; }
