@@ -780,10 +780,12 @@ function demoStatus(value: string, active = false): HTMLParagraphElement {
 
 async function startDemo(): Promise<void> {
   if (uiState === 'idle') await arm();
-  // The runner remains the authority for codec choice. This is the single
-  // audience action that moves an armed node onto its configured path; when
-  // Quiet is runner-authorized it immediately enters startQuietFallback.
-  if (uiState === 'ready' && cyrinxSession.canRequestStart) startQualification();
+  // The production runner's acoustic projection is the fixed demo authority:
+  // enter the already-qualified audible Quiet path immediately instead of
+  // putting an audience run behind the 90-minute Cyrinx qualification gate.
+  // Debug mode retains the full qualification workflow and evidence controls.
+  if (uiState === 'ready' && runnerConfig?.acoustic) await startQuietFallback();
+  else if (uiState === 'ready' && developmentDiagnostic && cyrinxSession.canRequestStart) startQualification();
 }
 
 /** The normal audience surface intentionally projects only scalar, truthful status. */
@@ -841,8 +843,6 @@ function renderDemo(): void {
   const resetInFlight = bridgeState?.status === 'resetting';
   const unavailable = Boolean(configFailure) && !developmentDiagnostic;
   if (uiState === 'idle' && !unavailable) next.append(control('Start / Connect', startDemo, !runnerConfig && !developmentDiagnostic));
-  if (uiState === 'ready' && !resetInFlight && !acoustic?.ready && cyrinxSession.canRequestStart) next.append(control('Start Cyrinx qualification', startQualification));
-  if (uiState === 'ready' && !resetInFlight && !acoustic?.ready && quietCorpusSendState === 'ready' && runnerConfig && cyrinxSession.snapshot.codec === 'quiet') next.append(control(`Send Quiet ${directionForRole(runnerConfig.role)} corpus`, sendQuietCorpus));
   if (acoustic && !acoustic.ready && uiState === 'ready' && !resetInFlight) next.append(control('Recalibrate', reset, false, 'secondary'));
   if (uiState !== 'requesting') next.append(control('Reset', reset, resetInFlight, 'secondary'));
   grid.append(next); shell.append(grid);
