@@ -1,10 +1,13 @@
 import { expect, test } from '@playwright/test';
 
-async function mockBrowserAudio(page: import('@playwright/test').Page, options: { settings?: Record<string, unknown>; bridgeFails?: boolean; label?: string } = {}) {
+async function mockBrowserAudio(page: import('@playwright/test').Page, options: { settings?: Record<string, unknown>; bridgeFails?: boolean; label?: string; audioFailure?: string } = {}) {
   await page.addInitScript((config) => {
     const settings = { sampleRate: 48_000, channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false, ...config.settings };
     const track = { label: config.label ?? 'Built-in microphone', getSettings: () => settings, stop: () => undefined };
-    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => ({ getAudioTracks: () => [track], getTracks: () => [track] }) } });
+    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => {
+      if (config.audioFailure) throw new Error(config.audioFailure);
+      return { getAudioTracks: () => [track], getTracks: () => [track] };
+    } } });
     class FakeAudioContext {
       state = 'suspended'; sampleRate = 48_000; currentTime = 0; destination = {};
       audioWorklet = { addModule: async () => undefined };
@@ -55,4 +58,12 @@ test('preserves an explicit disconnected state and keeps long device labels usab
   await expect(page.getByRole('button', { name: 'Reset and reconnect' })).toBeVisible();
   const bounds = await page.getByRole('button', { name: 'Reset and reconnect' }).boundingBox();
   expect(bounds?.width).toBeGreaterThanOrEqual(250);
+});
+
+test('collapses raw browser error text to an approved operator message', async ({ page }) => {
+  await mockBrowserAudio(page, { audioFailure: 'Error: FWAV frame dump deadbeef at parser' });
+  await page.goto('http://127.0.0.1:5173/');
+  await page.getByRole('button', { name: 'Arm modem' }).click();
+  await expect(page.getByText(/Audio preflight failed: browser audio unavailable\./)).toBeVisible();
+  await expect(page.getByText(/deadbeef|frame dump|at parser/i)).toHaveCount(0);
 });

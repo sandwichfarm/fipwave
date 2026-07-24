@@ -39,7 +39,7 @@ button:focus-visible, input:focus-visible { outline: 3px solid var(--accent); ou
 table { width: 100%; border-collapse: collapse; }
 th, caption, dt { font-size: 14px; font-weight: 700; line-height: 1.3; }
 th, td { border-top: 1px solid #475569; padding: 8px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
-input { min-height: 40px; max-width: 100%; padding: 8px; border: 1px solid #475569; border-radius: 8px; color: #e2e8f0; background: #0f172a; font: inherit; }
+input { min-height: 40px; max-width: 100%; padding: 8px; border: 1px solid #475569; border-radius: 8px; color: #e2e8f0; background: #0f172a; font: 400 14px/1.3 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
 dl { display: grid; grid-template-columns: minmax(9rem, 1fr) minmax(0, 3fr); gap: 8px 16px; }
 dd { margin: 0; overflow-wrap: anywhere; }
 .corpus-card { overflow-x: auto; }

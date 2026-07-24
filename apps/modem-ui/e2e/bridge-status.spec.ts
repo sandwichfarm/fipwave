@@ -42,6 +42,10 @@ test('renders the local-only bridge transport definition list and recovery conse
   await page.route('**/qualification-config', (route) => route.fulfill({ json: { machineId: 'fipwave-a', role: 'A', reportTarget: '/tmp/report.json', tunEvidence: 'none', evidenceMode: 'Loopback', evidenceClass: 'Loopback' } }));
   await page.goto('http://127.0.0.1:5173/');
 
+  const liveStatus = page.getByRole('status');
+  await expect(liveStatus).toHaveAttribute('aria-live', 'polite');
+  await expect(liveStatus).toContainText('Idle · Local bridge: not connected');
+  await expect(page.getByText('Role: A (gateway)', { exact: false })).toBeVisible();
   const card = page.getByRole('heading', { name: 'Bridge and FIPS transport' }).locator('..');
   await expect(card).toBeVisible();
   await expect(card.locator('dl')).toBeVisible();

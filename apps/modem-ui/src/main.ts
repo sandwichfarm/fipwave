@@ -5,6 +5,7 @@ import { createFipsPacketAdapter } from './fips-packet-adapter.js';
 import { reduceBridgeState, validateBridgeSnapshot, type BridgeState } from './bridge-state.js';
 import { CyrinxCaseWatchdog, sameCyrinxBrowserCase, type CyrinxBrowserCase } from './cyrinx-case-watchdog.js';
 import { CyrinxQualificationSession, type CyrinxSessionSnapshot } from './qualification-session.js';
+import { safeConfigReason, safeUiReason } from './ui-errors.js';
 import {
   QUIET_PROFILE,
   QuietClient,
@@ -127,24 +128,6 @@ const bodyCopy: Record<UiState, string> = {
   disconnected: 'Local bridge disconnected. Qualification is paused; no result is being inferred.',
 };
 
-function safeUiReason(reason: unknown, fallback: string): string {
-  const raw = reason instanceof Error ? reason.message : typeof reason === 'string' ? reason : '';
-  const normalized = raw.replace(/\s+/g, ' ').trim();
-  if (
-    normalized.length === 0
-    || normalized.length > 240
-    || /(?:nsec1|(?:https?|wss?):\/\/|[?&][a-z0-9_-]+=)/i.test(normalized)
-  ) return fallback;
-  return normalized;
-}
-
-function safeConfigReason(reason: unknown): string {
-  const normalized = safeUiReason(reason, '');
-  if (normalized === 'runner qualification configuration is invalid') return normalized;
-  if (normalized === 'runner qualification configuration is unavailable') return normalized;
-  return 'runner qualification configuration is unavailable';
-}
-
 function localBridgeCopy(state: BridgeState | undefined): string {
   if (!state) return 'Local bridge: not connected';
   if (state.status === 'ready') return `Local bridge ready · epoch ${state.epoch}`;
@@ -161,6 +144,10 @@ function completePacketCopy(state: BridgeState | undefined): string {
   const txLabel = state.txPackets === 1 ? 'packet' : 'packets';
   const rxLabel = state.rxPackets === 1 ? 'packet' : 'packets';
   return `${prefix} · TX complete ${txLabel}: ${state.txPackets} · RX complete ${rxLabel}: ${state.rxPackets}`;
+}
+
+function roleDescription(role: 'A' | 'B'): string {
+  return role === 'A' ? 'gateway' : 'acoustically isolated node';
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, text?: string): HTMLElementTagNameMap[K] {
@@ -289,9 +276,10 @@ function failBridge(socket: WebSocket, reason: Error): void {
   clearCyrinxCase();
   bridge = undefined;
   rejectPending(reason);
-  bridgeDelivery = `Failed — ${reason.message}`;
+  const safeReason = safeUiReason(reason, 'local bridge message was rejected');
+  bridgeDelivery = `Failed — ${safeReason}`;
   uiState = 'disconnected';
-  failure = reason.message;
+  failure = safeReason;
   bridgeState = reduceBridgeState(bridgeState, { type: 'reset-failed', reason: failure });
   render();
 }
@@ -551,7 +539,7 @@ function render(): void {
   const header = element('header');
   header.append(element('h1', 'Modem qualification'));
   const meta = element('p', runnerConfig
-    ? `Machine: ${runnerConfig.machineId} · Role: ${runnerConfig.role} · Evidence: ${runnerConfig.evidenceClass} · Chromium: ${navigator.userAgent} · Local epoch: ${epoch}`
+    ? `Machine: ${runnerConfig.machineId} · Role: ${runnerConfig.role} (${roleDescription(runnerConfig.role)}) · Evidence: ${runnerConfig.evidenceClass} · Chromium: ${navigator.userAgent} · Local epoch: ${epoch}`
     : 'Runner configuration pending');
   meta.className = 'measurements';
   header.append(meta);
@@ -726,7 +714,7 @@ async function arm(): Promise<void> {
     bridgeDelivery = `Audio settings accepted for epoch ${epoch}`;
     uiState = 'ready';
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'unknown audio error';
+    const message = safeUiReason(error, 'browser audio unavailable');
     uiState = message.includes('bridge') ? 'disconnected' : 'failed';
     failure = message;
   }
@@ -765,8 +753,9 @@ async function sendQuietCorpus(): Promise<void> {
     quietCorpusSendState = 'sent';
     quietRuntime = `Quiet ${direction} corpus sent · receiver remains armed · epoch ${sendEpoch}`;
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Quiet qualification failed';
-    if (message === 'Quiet transmission cancelled by reset' || epoch !== sendEpoch) return;
+    const rawMessage = error instanceof Error ? error.message : '';
+    const message = safeUiReason(error, 'Quiet modem operation was unavailable');
+    if (rawMessage === 'Quiet transmission cancelled by reset' || epoch !== sendEpoch) return;
     quietCorpusSendState = 'unavailable';
     uiState = message.includes('bridge') ? 'disconnected' : 'failed';
     failure = message;
@@ -797,8 +786,9 @@ async function startQuietFallback(): Promise<void> {
     quietRuntime = `Quiet armed and listening · ${QUIET_PROFILE} · send ${directionForRole(runnerConfig.role)} when the operator is ready · epoch ${epoch}`;
     render();
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Quiet qualification failed';
-    if (message === 'Quiet transmission cancelled by reset' || epoch !== quietEpoch) return;
+    const rawMessage = error instanceof Error ? error.message : '';
+    const message = safeUiReason(error, 'Quiet modem operation was unavailable');
+    if (rawMessage === 'Quiet transmission cancelled by reset' || epoch !== quietEpoch) return;
     quietCorpusSendState = 'unavailable';
     uiState = message.includes('bridge') || message.includes('RESET') ? 'disconnected' : 'failed';
     failure = message;
@@ -831,7 +821,7 @@ async function appendQuietEvidence(received: ReceiveCaseEvidence): Promise<void>
   } catch (error) {
     row.result = 'Failed report delivery';
     uiState = 'disconnected';
-    failure = asError(error, 'Local bridge result delivery failed').message;
+    failure = safeUiReason(error, 'local bridge message was rejected');
     bridgeDelivery = `Failed — ${failure}`;
     reportQuietRuntimeFailure(epoch);
     try { cyrinxSession.markQuietFailed(); } catch { /* terminal state is already authoritative */ }

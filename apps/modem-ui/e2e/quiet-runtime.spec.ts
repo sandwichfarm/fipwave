@@ -24,7 +24,7 @@ test('production Quiet route performs verified RESET, arm, teardown, and re-arm 
     if (response.url().includes('/codec-assets/')) assets.set(new URL(response.url()).pathname, response.status());
   });
   await page.goto(`${origin}/`);
-  await expect(page.getByText('Machine: playwright · Role: A · Evidence: Loopback')).toBeVisible();
+  await expect(page.getByText('Machine: playwright · Role: A (gateway) · Evidence: Loopback')).toBeVisible();
   await expect(page.getByText('Report target: .artifacts/qualification/playwright.json')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Arm modem' })).toBeEnabled();
   expect(await page.locator('select').count()).toBe(0);
