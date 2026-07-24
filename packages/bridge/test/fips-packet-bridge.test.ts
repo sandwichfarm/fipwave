@@ -5,7 +5,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
 
-import { decodeFrame, encodeFrame, MAX_MESSAGE_BYTES, MessageType, PcmEncoding } from '../src/protocol.js';
+import { decodeFrame, encodeFrame, MAX_MESSAGE_BYTES, MessageType, PcmEncoding, RESET_ACK_FLAG } from '../src/protocol.js';
 import { createBridgeServer, type BridgeServer, type PacketBridgeState } from '../src/server.js';
 
 const servers: BridgeServer[] = [];
@@ -134,5 +134,47 @@ describe('FIPS packet bridge', () => {
     await drainBridge();
     expect(packetBridgeState(controlBridge).lastError).toMatchObject({ code: 'control_payload_contains_packet_data' });
     expect(packetBridgeState(controlBridge).packetQueues.browserToFips.items).toBe(0);
+  });
+
+  it('makes reset the single epoch authority and broadcasts binary acknowledgements to both endpoint roles', async () => {
+    const bridge = await createBridge();
+    const browser = await openEndpoint(bridge.port, 'browser');
+    const fips = await openEndpoint(bridge.port, 'fips');
+
+    const initialToFips = once(fips, 'message');
+    browser.send(packet(1, 1n, Buffer.alloc(8, 1)));
+    await initialToFips;
+    const initialToBrowser = once(browser, 'message');
+    fips.send(packet(1, 1n, Buffer.alloc(8, 2)));
+    await initialToBrowser;
+    expect(bridge.state().packetCounters).toEqual({ browserToFips: 1, fipsToBrowser: 1 });
+
+    const browserAck = once(browser, 'message');
+    const fipsAck = once(fips, 'message');
+    await expect(bridge.reset()).resolves.toBe(2);
+    const [[browserReset], [fipsReset]] = await Promise.all([browserAck, fipsAck]);
+    for (const reset of [browserReset, fipsReset]) {
+      expect(decodeFrame(Buffer.from(reset as Buffer))).toMatchObject({ type: MessageType.RESET, epoch: 2, sequence: 0n, flags: RESET_ACK_FLAG });
+    }
+    expect(packetBridgeState(bridge)).toMatchObject({
+      epoch: 2,
+      rejectedFrames: 0,
+      packetCounters: { browserToFips: 0, fipsToBrowser: 0 },
+      packetReadiness: { browser: false, fips: false },
+      lastError: null,
+      packetQueues: { browserToFips: { items: 0, bytes: 0 }, fipsToBrowser: { items: 0, bytes: 0 } },
+    });
+
+    const afterResetToFips = once(fips, 'message');
+    browser.send(packet(2, 1n, Buffer.alloc(8, 3)));
+    await afterResetToFips;
+    const afterResetToBrowser = once(browser, 'message');
+    fips.send(packet(2, 1n, Buffer.alloc(8, 4)));
+    await afterResetToBrowser;
+    expect(bridge.state().packetCounters).toEqual({ browserToFips: 1, fipsToBrowser: 1 });
+
+    browser.send(encodeFrame({ type: MessageType.RESET, flags: RESET_ACK_FLAG, epoch: 2, sequence: 2n, payload: Buffer.alloc(0) }));
+    await once(browser, 'close');
+    expect(packetBridgeState(bridge).lastError).toMatchObject({ code: 'reset_ack_not_accepted' });
   });
 });
