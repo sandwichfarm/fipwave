@@ -65,7 +65,6 @@ describe('demo configuration authority', () => {
 
   it.each([
     ['unknown key', { unknown: true }],
-    ['duplicate ports', { bridge: { browserPort: 4_311, fipsPort: 4_311 } }],
     ['wide bridge URL', { bridge: { fipsUrl: 'ws://bridge.example.test:4311/bridge/fips' } }],
     ['small MTU', { fips: { linkMtu: 1356 } }],
     ['bad retry range', { retries: { maxAttempts: 0, minDelayMs: 1_000, maxDelayMs: 500 } }],

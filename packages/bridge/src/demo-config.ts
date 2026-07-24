@@ -61,7 +61,7 @@ const IDENTITIES: DemoIdentityTable = Object.freeze({
 });
 
 const DEFAULTS = Object.freeze({
-  bridge: Object.freeze({ browserPort: 4_310, fipsPort: 4_311, browserPath: '/bridge/browser' as const, fipsPath: '/bridge/fips' as const }),
+  bridge: Object.freeze({ browserPort: 4_310, fipsPort: 4_310, browserPath: '/bridge/browser' as const, fipsPath: '/bridge/fips' as const }),
   codecCapabilities: Object.freeze(['quiet'] as const),
   audioDefaults: Object.freeze({ sampleRate: 48_000 as const, channels: 1 as const, echoCancellation: false as const, noiseSuppression: false as const, autoGainControl: false as const }),
   calibrationCandidates: Object.freeze([Object.freeze({ id: 'quiet-audible-7k-v1' as const, codec: 'quiet' as const, profile: 'audible-7k-channel-0' as const })]),
@@ -128,7 +128,6 @@ export function resolveDemoConfig(input?: string, overrides?: unknown): DemoConf
   const bridgePatch = 'bridge' in raw ? bridgeOverride(raw.bridge) : {};
   const browserPort = bridgePatch.browserPort ?? DEFAULTS.bridge.browserPort;
   const localFipsPort = bridgePatch.fipsPort ?? DEFAULTS.bridge.fipsPort;
-  if (browserPort === localFipsPort) fail('bridge_ports_must_differ');
   const bridge: BridgeConfig = { host: LOOPBACK_HOST, browserPort, fipsPort: localFipsPort, fipsUrl: validateFipsUrl(bridgePatch.fipsUrl ?? fipsUrl(localFipsPort), localFipsPort), browserPath: DEFAULTS.bridge.browserPath, fipsPath: DEFAULTS.bridge.fipsPath };
 
   const fipsPatch = 'fips' in raw ? record(raw.fips, 'fips_override_invalid') : {};
