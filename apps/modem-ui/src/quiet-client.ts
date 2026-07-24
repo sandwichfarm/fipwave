@@ -18,7 +18,7 @@ export interface RunnerConfig {
   tunEvidence: string;
   evidenceMode: EvidenceClass;
   evidenceClass: EvidenceClass;
-  acoustic: Readonly<{
+  acoustic?: Readonly<{
     profiles: readonly ['quiet-audible-7k-v1'];
     ranges: Readonly<{ minPayloadBytes: number; maxPayloadBytes: number }>;
     candidates: readonly Readonly<{ id: string; profileId: 'quiet-audible-7k-v1'; payloadBytes: number; repetition: number; guardMs: number; playbackGain: number; ackTimeoutMs: number }>[];
@@ -89,7 +89,7 @@ export async function fetchRunnerConfig(): Promise<Readonly<RunnerConfig>> {
   const acoustic = value.acoustic;
   const integerBetween = (input: unknown, minimum: number, maximum: number): input is number => Number.isInteger(input) && typeof input === 'number' && input >= minimum && input <= maximum;
   const exactRecord = (input: unknown, keys: readonly string[]): input is Record<string, unknown> => !!input && typeof input === 'object' && !Array.isArray(input) && Object.keys(input).length === keys.length && keys.every((key) => key in input);
-  const validCandidate = (candidate: unknown): candidate is RunnerConfig['acoustic']['candidates'][number] => {
+  const validCandidate = (candidate: unknown): candidate is NonNullable<RunnerConfig['acoustic']>['candidates'][number] => {
     if (!exactRecord(candidate, ['id', 'profileId', 'payloadBytes', 'repetition', 'guardMs', 'playbackGain', 'ackTimeoutMs'])) return false;
     const record = candidate;
     return typeof record.id === 'string' && /^[a-z0-9][a-z0-9-]{2,63}$/.test(record.id)
@@ -114,8 +114,12 @@ export async function fetchRunnerConfig(): Promise<Readonly<RunnerConfig>> {
       && integerBetween(calibration.deadlineMs, 1, 120_000)
       && calibration.maximumPlaybackGain === 2;
   })();
-  if (!value.machineId || (value.role !== 'A' && value.role !== 'B') || !value.reportTarget || !value.tunEvidence || !evidenceClass || !['Fixture', 'Loopback', 'Open air'].includes(evidenceClass) || value.evidenceMode !== evidenceClass || !validAcoustic) throw new Error('runner qualification configuration is invalid');
-  return Object.freeze({ machineId: value.machineId, role: value.role, reportTarget: value.reportTarget, tunEvidence: value.tunEvidence, evidenceMode: evidenceClass, evidenceClass, acoustic: Object.freeze({ profiles: ['quiet-audible-7k-v1'] as ['quiet-audible-7k-v1'], ranges: Object.freeze({ ...(acoustic as RunnerConfig['acoustic']).ranges }), candidates: Object.freeze((acoustic as RunnerConfig['acoustic']).candidates.map((candidate) => Object.freeze({ ...candidate }))), calibration: Object.freeze({ ...(acoustic as RunnerConfig['acoustic']).calibration }) }) });
+  // Local audio preflight/bridge UI predates the acoustic calibration contract
+  // and remains valid without an acoustic peer.  If a runner supplies the
+  // acoustic projection it must still pass the exact fail-closed schema above.
+  if (!value.machineId || (value.role !== 'A' && value.role !== 'B') || !value.reportTarget || !value.tunEvidence || !evidenceClass || !['Fixture', 'Loopback', 'Open air'].includes(evidenceClass) || value.evidenceMode !== evidenceClass || (acoustic !== undefined && !validAcoustic)) throw new Error('runner qualification configuration is invalid');
+  const publicAcoustic = validAcoustic ? Object.freeze({ profiles: ['quiet-audible-7k-v1'] as ['quiet-audible-7k-v1'], ranges: Object.freeze({ ...(acoustic as NonNullable<RunnerConfig['acoustic']>).ranges }), candidates: Object.freeze((acoustic as NonNullable<RunnerConfig['acoustic']>).candidates.map((candidate) => Object.freeze({ ...candidate }))), calibration: Object.freeze({ ...(acoustic as NonNullable<RunnerConfig['acoustic']>).calibration }) }) : undefined;
+  return Object.freeze({ machineId: value.machineId, role: value.role, reportTarget: value.reportTarget, tunEvidence: value.tunEvidence, evidenceMode: evidenceClass, evidenceClass, ...(publicAcoustic ? { acoustic: publicAcoustic } : {}) });
 }
 
 export function directionForRole(role: Role): LiteralDirection { return role === 'A' ? 'A → B' : 'B → A'; }

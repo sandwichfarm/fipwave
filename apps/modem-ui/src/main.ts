@@ -159,6 +159,10 @@ function sendAcousticControl(type: 12 | 13, controlEpoch: number): boolean {
 function configureAcousticSession(config: Readonly<RunnerConfig>): void {
   acousticAdapter?.invalidate();
   acousticSession?.dispose();
+  const acousticConfig = config.acoustic;
+  // Local bridge/audio facts remain usable without a peer or a calibration
+  // projection. Only the acoustic/FIPS path is unavailable in that mode.
+  if (!acousticConfig) { acousticSession = undefined; acousticAdapter = undefined; return; }
   let adapter: AcousticSessionAdapter | undefined;
   let transmit = Promise.resolve();
   const modem = {
@@ -194,11 +198,11 @@ function configureAcousticSession(config: Readonly<RunnerConfig>): void {
   const session = new AcousticSession({
     role: config.role, identity: config.machineId, expectedPeer: config.role === 'A' ? 'fipwave-b' : 'fipwave-a', modem,
     clock: { now: () => Date.now() }, timers: { setTimeout: (callback, delay) => window.setTimeout(callback, delay) as unknown as ReturnType<typeof setTimeout>, clearTimeout: (handle) => window.clearTimeout(handle as unknown as number) },
-    nonce: () => crypto.getRandomValues(new Uint8Array(16)), profiles: config.acoustic.profiles, ranges: config.acoustic.ranges,
+    nonce: () => crypto.getRandomValues(new Uint8Array(16)), profiles: acousticConfig.profiles, ranges: acousticConfig.ranges,
     // Preserve the exact runner allowlist and order.  Warm-start selection is
     // performed by the session only after literal A→B then B→A observations.
-    candidates: config.acoustic.candidates.map((candidate) => ({ ...candidate })),
-    calibration: { ...config.acoustic.calibration },
+    candidates: acousticConfig.candidates.map((candidate) => ({ ...candidate })),
+    calibration: { ...acousticConfig.calibration },
     measureProbe: (probe) => receivedProbes.get(probeReceiptKey(
       acousticSession?.snapshot.sessionId ?? 0n,
       probe.direction === 'AtoB' ? 1 : 2,
@@ -445,11 +449,24 @@ function handleBridgeMessage(socket: WebSocket, generation: number, event: Messa
   // acknowledgements.
   if (bridge !== socket || bridgeGeneration !== generation) return;
   try {
-    if (developmentDiagnostic && pendingSettings && (event.data === undefined || event.data === '{}')) {
-      const pending = pendingSettings;
-      window.clearTimeout(pending.timer);
-      pendingSettings = undefined;
-      pending.resolve();
+    if (developmentDiagnostic && (event.data === undefined || event.data === '{}')) {
+      // Vite's deterministic local bridge fixture acknowledges the capability
+      // request and AUDIO_SETTINGS with the same empty event. A capability
+      // acknowledgement can legitimately arrive before settings are pending;
+      // it is informational and must not tear down local preflight state.
+      const settleSettings = () => {
+        if (!pendingSettings) return;
+        const pending = pendingSettings;
+        window.clearTimeout(pending.timer);
+        pendingSettings = undefined;
+        pending.resolve();
+      };
+      settleSettings();
+      // The fixture's capability acknowledgement can be delivered one
+      // microtask before reportToBridge installs its AUDIO_SETTINGS promise.
+      // Recheck once, without treating an empty diagnostic message as a
+      // bridge error or allowing it to affect a real runner protocol.
+      if (!pendingSettings) queueMicrotask(settleSettings);
       return;
     }
     if (event.data instanceof ArrayBuffer) {
