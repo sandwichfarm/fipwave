@@ -667,20 +667,32 @@ describe('AcousticSession priority, backpressure, heartbeat, degraded recovery, 
     expect(bData.slice(0, 4)).toEqual([2, 3, 1, 4]);
   });
 
-  it('disarms on a missed heartbeat, accepts current-session recovery, and never makes recoverable loss terminal', async () => {
+  it('recovers simultaneous heartbeat loss with an A-initiated probe and a B reply', async () => {
     const timers = new FakeTimers(); const clock = new ManualClock();
     const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
     const a = new AcousticSession({ ...options('A', aModem), clock, timers }); const b = new AcousticSession({ ...options('B', bModem), clock, timers });
     a.start(); await settlePair(a, b); b.heartbeat();
-    a.markHeartbeatMissed(); a.markHeartbeatMissed();
-    expect(a.snapshot).toMatchObject({ state: 'Degraded', ready: false, reason: 'acoustic_heartbeat_missed' });
+    a.markHeartbeatMissed(); b.markHeartbeatMissed();
+    expect({ a: a.snapshot, b: b.snapshot }).toMatchObject({
+      a: { state: 'Degraded', ready: false, reason: 'acoustic_heartbeat_missed' },
+      b: { state: 'Degraded', ready: false, reason: 'acoustic_heartbeat_missed' },
+    });
     timers.runAll();
-    expect(a.snapshot).toMatchObject({ state: 'Recovering', ready: false });
-    bModem.send(encodeFas1({ type: Fas1UnitType.Heartbeat, flags: 0, sessionId: a.snapshot.sessionId!, sequence: 99, packetId: 0, fragmentIndex: 0, fragmentCount: 0, packetLength: 0, body: new Uint8Array() }));
-    expect(a.snapshot).toMatchObject({ state: 'Ready', ready: true });
+    expect({ a: a.snapshot, b: b.snapshot }).toMatchObject({
+      a: { state: 'Ready', ready: true, turnOwner: 'A' },
+      b: { state: 'Ready', ready: true, turnOwner: 'A' },
+    });
+  });
 
-    a.markHeartbeatMissed(); timers.runAll(); a.markHeartbeatMissed(); timers.runAll(); a.markHeartbeatMissed(); timers.runAll();
-    expect(a.snapshot).toMatchObject({ state: 'Recovering', ready: false });
-    expect(a.snapshot.reason).toBeUndefined();
+  it('bounds silent recovery attempts and ends with an actionable terminal reason', async () => {
+    const timers = new FakeTimers(); const clock = new ManualClock();
+    const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
+    const a = new AcousticSession({ ...options('A', aModem), clock, timers }); const b = new AcousticSession({ ...options('B', bModem), clock, timers });
+    a.start(); await settlePair(a, b);
+    aModem.shouldDeliver = () => false; bModem.shouldDeliver = () => false;
+    a.markHeartbeatMissed();
+    for (let turn = 0; turn < 12 && a.snapshot.state !== 'Error'; turn += 1) timers.runAll();
+    expect(a.snapshot).toMatchObject({ state: 'Error', ready: false, reason: 'acoustic_recovery_exhausted' });
+    expect(a.snapshot.counters.retries).toBeGreaterThanOrEqual(3);
   });
 });

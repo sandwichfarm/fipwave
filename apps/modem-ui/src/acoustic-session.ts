@@ -481,9 +481,23 @@ export class AcousticSession {
     this.#awaitingAck = false; this.#counters.retries += 1; this.driveTurn();
   }
   private beginRecovery(): void {
-    if (this.#state !== 'Degraded') return;
-    this.#recoveryAttempts += 1;
+    if (this.#state !== 'Degraded' || !this.#sessionId) return;
+    if (this.#recoveryAttempts >= MAX_ATTEMPTS) { this.fail('acoustic_recovery_exhausted'); return; }
+    this.#recoveryAttempts += 1; this.#counters.retries += 1;
     this.#state = 'Recovering'; this.#reason = undefined;
+    const generation = this.#generation; const sessionId = this.#sessionId;
+    const armTimeout = (): void => {
+      if (generation !== this.#generation || sessionId !== this.#sessionId || this.#state !== 'Recovering') return;
+      this.schedule(() => this.markHeartbeatMissed(), this.ackTimeoutMs());
+    };
+    if (this.options.role === 'A') {
+      const completion = this.send(Fas1UnitType.Heartbeat, sessionId, new Uint8Array());
+      if (completion instanceof Promise) {
+        void completion.then(armTimeout, () => this.fail('acoustic_recovery_playback_failed'));
+      } else {
+        armTimeout();
+      }
+    } else armTimeout();
   }
   private onData(unit: Fas1Unit): void {
     this.expireWork();
@@ -744,15 +758,18 @@ export class AcousticSession {
     this.#state = 'AwaitingHeartbeat'; this.#turnOwner = 'A';
   }
   private onHeartbeat(sessionId: bigint): void {
-    if (sessionId !== this.#sessionId || (this.#state !== 'AwaitingHeartbeat' && this.#state !== 'Ready' && this.#state !== 'Recovering')) return;
-    const reply = this.#state === 'AwaitingHeartbeat'; this.#state = 'Ready'; this.#lastHeartbeatAtMs = this.options.clock.now(); this.armHeartbeatTimers();
+    if (sessionId !== this.#sessionId || (this.#state !== 'AwaitingHeartbeat' && this.#state !== 'Ready' && this.#state !== 'Degraded' && this.#state !== 'Recovering')) return;
+    const recovering = this.#state === 'Degraded' || this.#state === 'Recovering';
+    const reply = this.#state === 'AwaitingHeartbeat' || (recovering && this.options.role === 'B');
+    this.clearDeliveryTimer(); this.#state = 'Ready'; this.#lastHeartbeatAtMs = this.options.clock.now(); this.armHeartbeatTimers();
     this.#recoveryAttempts = 0;
     if (reply && this.options.role === 'B') {
-      // Explicit bootstrap response: B may respond only after receiving A's
-      // committed heartbeat.  Subsequent periodic work must use driveTurn.
+      // A initiates both bootstrap and bounded recovery. B's single response
+      // prevents symmetric recovery waits; normal periodic work still uses
+      // the deterministic turn scheduler.
       this.send(Fas1UnitType.Heartbeat, sessionId, new Uint8Array());
     }
-    if (reply) this.#turnOwner = 'A';
+    if (reply || recovering) this.#turnOwner = 'A';
   }
   private toSettings(candidate: AcousticCandidate): DirectionalSettings { return { profileId: candidate.profileId, payloadBytes: candidate.payloadBytes, repetition: candidate.repetition, guardMs: candidate.guardMs, playbackGain: candidate.playbackGain, ackTimeoutMs: candidate.ackTimeoutMs }; }
   private applyOutboundCandidate(): void {
