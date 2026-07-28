@@ -25,6 +25,12 @@ export enum Fas1UnitType {
   Reset = 12,
 }
 
+/** CRC-bound sender identity for rejecting a laptop's own speaker loopback. */
+export enum Fas1Sender {
+  A = 1,
+  B = 2,
+}
+
 export interface Fas1Unit {
   type: Fas1UnitType;
   flags: number;
@@ -42,6 +48,7 @@ export interface FragmentPacketInput {
   sessionId: bigint;
   sequenceStart: number;
   packetId: number;
+  sender: Fas1Sender;
   /** Directional body bound selected during calibration and committed by both peers. */
   payloadBytes?: number;
 }
@@ -122,7 +129,8 @@ function exactObject(value: unknown, keys: readonly string[], name: string): Rec
 function validateUnit(input: Fas1Unit): void {
   if (!input || typeof input !== 'object') fail('unit is invalid');
   if (!isUnitType(input.type)) fail('type is unsupported');
-  assertInteger(input.flags, 0, 'flags');
+  assertInteger(input.flags, Fas1Sender.B, 'flags');
+  if (input.flags !== Fas1Sender.A && input.flags !== Fas1Sender.B) fail('sender flag is invalid');
   assertSessionId(input.sessionId);
   assertInteger(input.sequence, UINT32_MAX, 'sequence');
   assertInteger(input.packetId, UINT32_MAX, 'packet ID');
@@ -272,7 +280,7 @@ export function decodeFas1(input: Uint8Array): Fas1Unit {
   const typeValue = view.getUint8(5);
   if (!isUnitType(typeValue)) fail('type is unsupported');
   const flags = view.getUint16(6, true);
-  if (flags !== 0) fail('flags are unsupported');
+  if (flags !== Fas1Sender.A && flags !== Fas1Sender.B) fail('sender flag is invalid');
   const bodyLength = view.getUint16(30, true);
   if (bodyLength > FAS1_MAX_BODY_BYTES || input.byteLength !== FAS1_HEADER_BYTES + bodyLength) fail('declared body length is invalid');
   const expectedCrc = view.getUint32(32, true);
@@ -309,7 +317,7 @@ export function fragmentPacket(input: FragmentPacketInput): Fas1Unit[] {
   if (input.sequenceStart > UINT32_MAX - (fragmentCount - 1)) fail('sequence range overflows');
   return Array.from({ length: fragmentCount }, (_, fragmentIndex) => ({
     type: Fas1UnitType.Data,
-    flags: 0,
+    flags: input.sender,
     sessionId: input.sessionId,
     sequence: input.sequenceStart + fragmentIndex,
     packetId: input.packetId,

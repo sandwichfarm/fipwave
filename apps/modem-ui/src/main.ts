@@ -9,6 +9,7 @@ import { AcousticSessionAdapter } from './acoustic-session-adapter.js';
 import { projectAcousticStatus } from './acoustic-status.js';
 import { reduceBridgeState, validateBridgeSnapshot, type BridgeState } from './bridge-state.js';
 import { CyrinxCaseWatchdog, sameCyrinxBrowserCase, type CyrinxBrowserCase } from './cyrinx-case-watchdog.js';
+import { parseFipsPeerStatus, type FipsPeerStatus } from './fips-peer-state.js';
 import { CyrinxQualificationSession, type CyrinxSessionSnapshot } from './qualification-session.js';
 import { safeConfigReason, safeUiReason } from './ui-errors.js';
 import { reduceProofState, type ProofState } from './proof-state.js';
@@ -70,11 +71,13 @@ let configFailure = '';
 let resetFailure = '';
 let proofState: ProofState = reduceProofState(undefined, { type: 'snapshot', value: { state: 'loading', pingReady: false, reason: 'proof_unavailable', result: null } });
 let proofRequest: Promise<void> | undefined;
+let fipsPeerStatus: FipsPeerStatus = Object.freeze({ peerReady: false, reason: 'peer_missing' });
+let fipsPeerRequest: Promise<void> | undefined;
 let acousticCapability: Readonly<{ epoch: number; bytes: Uint8Array }> | undefined;
 let fipsDetailsRevealed = false;
 let imageTransfer: ImageTransferSnapshot = Object.freeze({ transferId: null, width: 0, height: 0, receivedRows: 0, complete: false, revision: 0, bands: Object.freeze([]) });
 let imageTransferSending = false;
-let imageTransferMessage = 'Waiting for the authenticated FIPS link';
+let imageTransferMessage = 'Automatically queued over the authenticated FIPS peer';
 type MeasuredProbe = Readonly<{ received: true; bytePerfect: true; corrupt: false; missing: false; duplicate: false; discontinuity: boolean; latencyMs: undefined; signalDb: undefined; clipping: undefined; confidence: 1 }>;
 const receivedProbes = new Map<string, MeasuredProbe>();
 function probeReceiptKey(sessionId: bigint, direction: number, candidateIndex: number, probeIndex: number): string {
@@ -595,8 +598,16 @@ function handleBridgeMessage(socket: WebSocket, generation: number, event: Messa
       // Capability delivery can race initial session establishment.  Retry only
       // the bound projection; the session itself remains the readiness source.
       if (acousticSession?.snapshot.ready && acousticAdapter) {
-        browserPacketReady = sendAcousticControl(12, epoch);
-        if (browserPacketReady) packetGeneration = acousticAdapter.generation;
+        if (acousticAdapter.ready) {
+          // The adapter reached ready before the capability arrived, so its
+          // first projection could not be sent. Retry that one projection.
+          browserPacketReady = sendAcousticControl(12, epoch);
+          if (browserPacketReady) packetGeneration = acousticAdapter.generation;
+        } else {
+          // Let the adapter own the transition. Sending directly here and then
+          // refreshing emitted the same single-use capability twice.
+          acousticAdapter.refresh();
+        }
       }
       return;
     }
@@ -796,6 +807,24 @@ function appendSetting(table: HTMLTableElement, label: string, value: unknown): 
 }
 
 function proofValue(value: string | number | null | undefined): string { return value === null || value === undefined ? 'Unavailable' : String(value); }
+async function refreshFipsPeerStatus(): Promise<void> {
+  if (fipsPeerRequest) return fipsPeerRequest;
+  fipsPeerRequest = fetch('/peer-status', { cache: 'no-store', credentials: 'same-origin', signal: AbortSignal.timeout(10_000) })
+    .then(async (response) => {
+      if (!response.ok) throw new Error('peer_status_unavailable');
+      const next = parseFipsPeerStatus(await response.json());
+      if (!next) throw new Error('peer_status_invalid');
+      fipsPeerStatus = next;
+    })
+    .catch(() => {
+      fipsPeerStatus = Object.freeze({ peerReady: false, reason: 'peer_missing' });
+    })
+    .finally(() => {
+      fipsPeerRequest = undefined;
+      render();
+    });
+  return fipsPeerRequest;
+}
 async function refreshProofStatus(): Promise<void> {
   if (proofRequest) return proofRequest;
   proofState = reduceProofState(proofState, { type: 'refresh' }); render();
@@ -822,7 +851,7 @@ async function runSoundProofPing(): Promise<void> {
 }
 
 async function sendDemoImage(): Promise<void> {
-  if (runnerConfig?.role !== 'A' || proofState.mode !== 'ready' || proofState.needsRefresh || imageTransferSending) return;
+  if (runnerConfig?.role !== 'A' || !fipsPeerStatus.peerReady || imageTransferSending) return;
   imageTransferSending = true; imageTransferMessage = 'Preparing fixed FIPS image…'; render();
   try {
     const rgba = await demoImageRaster();
@@ -831,24 +860,33 @@ async function sendDemoImage(): Promise<void> {
     view.setUint16(0, DEMO_IMAGE_WIDTH, true); view.setUint16(2, DEMO_IMAGE_HEIGHT, true);
     new Uint8Array(body, 8).set(rgba);
     imageTransferMessage = 'Sending image bands through FIPS…'; render();
-    const response = await fetch('/image-transfer', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body, credentials: 'same-origin' });
+    const response = await fetch('/image-transfer', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body, credentials: 'same-origin', signal: AbortSignal.timeout(10_000) });
     if (!response.ok) throw new Error('image_transfer_failed');
     const result = await response.json() as { bands?: unknown };
     imageTransferMessage = `Image queued over FIPS · ${typeof result.bands === 'number' ? result.bands : '?'} bands`;
   } catch {
     imageTransferMessage = 'Image transfer failed — verify the current FIPS link and retry';
+    // A peer can become authenticated while the slower acoustic queue is still
+    // draining handshake traffic. Let the next authoritative peer-status poll
+    // retry the fixed image instead of permanently consuming the one-shot
+    // automatic-send latch on that transient failure.
   } finally { imageTransferSending = false; render(); }
 }
 
 async function refreshImageTransfer(): Promise<void> {
-  if (runnerConfig?.role !== 'B') return;
+  const role = runnerConfig?.role;
+  if (!role || !fipsPeerStatus.peerReady) return;
   try {
-    const response = await fetch('/image-transfer', { cache: 'no-store', credentials: 'same-origin' });
+    const response = await fetch('/image-transfer', { cache: 'no-store', credentials: 'same-origin', signal: AbortSignal.timeout(10_000) });
     if (!response.ok) return;
     const next = await response.json() as ImageTransferSnapshot;
     if (next.revision !== imageTransfer.revision) {
       imageTransfer = next;
-      imageTransferMessage = next.complete ? 'Image received over FIPS' : `Loading over FIPS · ${next.receivedRows}/${next.height} rows`;
+      imageTransferMessage = role === 'A'
+        ? 'Image queued over the verified FIPS data path'
+        : next.complete
+          ? 'Image received over FIPS'
+          : `Loading over FIPS · ${next.receivedRows}/${next.height} rows`;
       render();
     }
   } catch { /* The normal link status remains the recovery authority. */ }
@@ -882,9 +920,9 @@ function demoStage(): DemoStage {
     CalibratingBToA: { label: 'Calibrating B → A', explanation: 'Testing the return acoustic direction.', tone: 'working' },
     Committing: { label: 'Committing settings', explanation: 'Both computers are agreeing on one modem configuration.', tone: 'working' },
     AwaitingHeartbeat: { label: 'Connecting FIPS', explanation: 'Waiting for the first authenticated acoustic heartbeat.', tone: 'working' },
-    Ready: proofState.mode === 'ready' && !proofState.needsRefresh
-      ? { label: 'Connected', explanation: 'The authenticated FIPS sound link is ready for packets.', tone: 'ready' }
-      : { label: 'Sound link established', explanation: 'Acoustic heartbeats are active. Verifying the authenticated FIPS peer before claiming packet transit.', tone: 'working' },
+    Ready: fipsPeerStatus.peerReady
+      ? { label: 'FIPS peer established', explanation: 'The authenticated FIPS peer is ready for packet transit.', tone: 'ready' }
+      : { label: 'FIPS peer authenticating', explanation: 'The acoustic transport is carrying FIPS handshake packets; peer authentication is not complete yet.', tone: 'working' },
     Degraded: { label: 'Degraded', explanation: 'The acoustic link needs recovery or recalibration.', tone: 'warning' },
     Recovering: { label: 'Recalibrating', explanation: 'Recovering the sound link with bounded retries.', tone: 'warning' },
     Error: { label: 'Error', explanation: `Acoustic negotiation stopped: ${acousticSession?.snapshot.reason ?? (failure || 'unknown reason')}.`, tone: 'error' },
@@ -919,6 +957,7 @@ function renderDemo(): void {
   const stageTiming = syncDemoStageTiming(stage.label);
   const acoustic = acousticSession ? projectAcousticStatus(acousticSession.snapshot, runnerConfig?.evidenceClass ?? 'Fixture', acousticTx, acousticRx) : undefined;
   const proofReady = proofState.mode === 'ready' && !proofState.needsRefresh;
+  const peerReady = fipsPeerStatus.peerReady;
   const profile = acousticSession?.snapshot.settings?.aToB.profileId ?? runnerConfig?.acoustic?.profiles[0] ?? 'Bootstrap profile pending';
   const identity = runnerConfig?.machineId ?? 'Loading local identity…';
   const acousticSnapshot = acousticSession?.snapshot;
@@ -966,18 +1005,18 @@ function renderDemo(): void {
     packetValues.append(tx, rx); packetHero.append(packetLabel, packetValues); primary.append(packetHero);
   }
   const stageState = demoStatus(`Status: ${stage.label}`, stage.tone === 'working'); stageState.setAttribute('role', stage.tone === 'error' ? 'alert' : 'status'); stageState.setAttribute('aria-live', stage.tone === 'error' ? 'assertive' : 'polite'); primary.append(stageState);
-  if (role) {
+  if (role && peerReady && imageTransfer.transferId) {
     const imageCard = element('section'); imageCard.className = 'demo-image-transfer'; imageCard.dataset.testid = 'image-transfer';
     imageCard.append(element('h2', 'Image over FIPS'));
     if (role === 'A') {
       const preview = document.createElement('img'); preview.src = DEMO_IMAGE_DATA_URL; preview.alt = 'FIPS network banner'; preview.dataset.testid = 'image-sender-preview';
       imageCard.append(preview, demoStatus('Full image · local source'));
-      const sendImage = control('Send image over FIPS', sendDemoImage, !proofReady || imageTransferSending);
+      const sendImage = control('Retry image over FIPS', sendDemoImage, !peerReady || imageTransferSending);
       if (imageTransferSending) sendImage.setAttribute('aria-busy', 'true');
       imageCard.append(
         sendImage,
         demoStatus(
-          proofReady ? imageTransferMessage : 'Waiting for authenticated FIPS packet readiness',
+          peerReady ? imageTransferMessage : 'Waiting for authenticated FIPS packet readiness',
           imageTransferSending,
         ),
       );
@@ -1003,7 +1042,7 @@ function renderDemo(): void {
     peer.append(reveal, network);
   }
   peer.append(demoStatus(`Acoustic: ${acoustic?.ready ? 'Connected — committed and heartbeating' : acoustic ? `${acoustic.phase} — not yet ready` : 'Not started'}`, Boolean(acoustic && !acoustic.ready && stage.tone === 'working')));
-  peer.append(demoStatus(`FIPS: ${proofReady ? 'Authenticated Sound peer verified' : acoustic?.ready && browserPacketReady && bridgeState?.soundTransport === 'started' ? 'Readiness sent to local adapter — peer proof pending' : 'Waiting for acoustic readiness'}`));
+  peer.append(demoStatus(`FIPS: ${peerReady ? 'Authenticated Sound peer verified' : acoustic?.ready && browserPacketReady && bridgeState?.soundTransport === 'started' ? 'Readiness sent to local adapter — peer proof pending' : 'Waiting for acoustic readiness'}`));
   grid.append(peer);
 
   const activity = element('section'); activity.className = 'demo-card demo-activity';
@@ -1467,10 +1506,10 @@ void fetchRunnerConfig().then((config) => {
   runnerConfig = config;
   syncBridgeState();
   render();
-  // Quiet's current receiver runs its audio callback on the main thread.
-  // The large Debug DOM must stay quiescent during physical qualification;
-  // proof remains manually refreshable there while the compact demo view polls.
-  if (!developmentDiagnostic && !debugMode) void refreshProofStatus();
+  // Proof/ping remains an explicit operator action. Polling it in the audience
+  // view would create fresh FIPS challenges while the much slower acoustic
+  // queue is still draining the session handshake and image payload.
+  if (!debugMode) void refreshFipsPeerStatus();
 }, (error: unknown) => { configFailure = safeConfigReason(error); render(); });
 // Session state and heartbeats are owned by the acoustic controller. Keep the
 // audience projection fresh even between controller callbacks without exposing
@@ -1483,12 +1522,12 @@ window.setInterval(() => {
     uiState, failure, resetFailure, bridgeState?.status, bridgeState?.epoch,
     acoustic?.state, acoustic?.reason, acoustic?.ready, acoustic?.lastHeartbeatAtMs,
     acoustic?.ledger.length, acoustic?.turnOwner, acoustic?.counters.retries, acoustic?.counters.dropped,
-    acousticTx, acousticRx, acousticFramesTx, acousticFramesRx, proofState.mode, proofState.needsRefresh,
+    acousticTx, acousticRx, acousticFramesTx, acousticFramesRx, proofState.mode, proofState.needsRefresh, fipsPeerStatus.peerReady,
     Math.floor(performance.now() / 1_000),
   ].join('|');
   if (current === observedDemoState) return;
   observedDemoState = current;
   render();
 }, 250);
-window.setInterval(() => { if (!developmentDiagnostic && !debugMode && !proofRequest) void refreshProofStatus(); }, 5_000);
-window.setInterval(() => { if (!developmentDiagnostic && !debugMode) void refreshImageTransfer(); }, 750);
+window.setInterval(() => { if (!debugMode && !fipsPeerRequest) void refreshFipsPeerStatus(); }, 1_500);
+window.setInterval(() => { if (!debugMode) void refreshImageTransfer(); }, 750);

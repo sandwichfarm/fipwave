@@ -2,7 +2,7 @@ import { once } from 'node:events';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
 
 import {
@@ -53,11 +53,15 @@ async function openReplacementBrowser(port: number): Promise<WebSocket> {
   return socket;
 }
 
-async function createBridge(): Promise<BridgeServer> {
+async function createBridge(options: Readonly<{
+  now?: () => number;
+  packetQueueLimits?: { maxItems: number; maxBytes: number; maxAgeMs: number };
+}> = {}): Promise<BridgeServer> {
   const bridge = await createBridgeServer({
     host: '127.0.0.1',
     port: 0,
     artifactDir: await mkdtemp(path.join(tmpdir(), 'fipwave-fips-packet-')),
+    ...options,
   });
   servers.push(bridge);
   return bridge;
@@ -159,9 +163,51 @@ async function requestAcousticCapability(socket: BrowserSocket, epoch: number): 
 }
 
 describe('FIPS packet bridge', () => {
-  it('serves exact local proof routes without adding a listener or allowing Role B ping', async () => {
-    const bridge = await createBridgeServer({ host: '127.0.0.1', port: 0, artifactDir: await mkdtemp(path.join(tmpdir(), 'fipwave-proof-')), proofController: { role: 'A', status: async () => ({ pingReady: false, reason: 'peer_missing' }), ping: async () => ({ pingReady: false, reason: 'peer_missing' }) } });
+  it('rejects image transmission until the FIPS peer is authenticated, independent of ping proof', async () => {
+    let peerReady = false;
+    const send = vi.fn(async () => ({ transferId: '0102030405060708', bands: 1 }));
+    const bridge = await createBridgeServer({
+      host: '127.0.0.1',
+      port: 0,
+      artifactDir: await mkdtemp(path.join(tmpdir(), 'fipwave-image-gate-')),
+      proofController: {
+        role: 'A',
+        peerStatus: async () => ({ peerReady }),
+        status: async () => ({ pingReady: false, reason: 'isolation_failed' }),
+        ping: async () => ({ pingReady: false, reason: 'isolation_failed' }),
+      },
+      imageTransfer: {
+        role: 'A',
+        send,
+        status: () => ({ transferId: null }),
+      },
+    });
     servers.push(bridge);
+    const body = Buffer.alloc(12);
+    body.writeUInt16LE(1, 0);
+    body.writeUInt16LE(1, 2);
+    const request = () => fetch(`http://127.0.0.1:${bridge.port}/image-transfer`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/octet-stream',
+        origin: `http://127.0.0.1:${bridge.port}`,
+      },
+      body,
+    });
+
+    expect((await request()).status).toBe(409);
+    expect(send).not.toHaveBeenCalled();
+    peerReady = true;
+    expect((await request()).status).toBe(202);
+    expect(send).toHaveBeenCalledOnce();
+  });
+
+  it('serves exact local proof routes without adding a listener or allowing Role B ping', async () => {
+    const bridge = await createBridgeServer({ host: '127.0.0.1', port: 0, artifactDir: await mkdtemp(path.join(tmpdir(), 'fipwave-proof-')), proofController: { role: 'A', peerStatus: async () => ({ peerReady: false, reason: 'peer_missing' }), status: async () => ({ pingReady: false, reason: 'peer_missing' }), ping: async () => ({ pingReady: false, reason: 'peer_missing' }) } });
+    servers.push(bridge);
+    const peerStatus = await fetch(`http://127.0.0.1:${bridge.port}/peer-status`);
+    expect(peerStatus.status).toBe(200);
+    expect(await peerStatus.json()).toEqual({ peerReady: false, reason: 'peer_missing' });
     const status = await fetch(`http://127.0.0.1:${bridge.port}/proof-status`);
     expect(status.status).toBe(200);
     expect(await status.json()).toMatchObject({ reason: 'peer_missing' });
@@ -310,6 +356,66 @@ describe('FIPS packet bridge', () => {
     browser.close(); fips.close();
   });
 
+  it('retains acoustic backpressure beyond the old three-retry cutoff', async () => {
+    const bridge = await createBridge();
+    const browser = await openEndpoint(bridge.port, 'browser');
+    const fips = await openEndpoint(bridge.port, 'fips');
+
+    const firstDelivery = once(browser, 'message');
+    fips.send(packet(1, 1n, Buffer.of(1)));
+    let [delivery] = await firstDelivery;
+    for (let rejection = 0; rejection < 4; rejection += 1) {
+      admitFipsPacket(browser, delivery, 2);
+      const retried = once(browser, 'message');
+      [delivery] = await retried;
+      expect(decodeFrame(Buffer.from(delivery as Buffer))).toMatchObject({
+        type: MessageType.FIPS_PACKET,
+        sequence: 1n,
+      });
+    }
+    admitFipsPacket(browser, delivery);
+    await drainBridge();
+
+    expect(packetBridgeState(bridge)).toMatchObject({
+      packetCounters: { fipsToBrowser: 1 },
+      packetQueues: { fipsToBrowser: { items: 0, bytes: 0, health: 'ready' } },
+      lastError: null,
+    });
+    browser.close(); fips.close();
+  });
+
+  it('ignores a late admission after its bounded queue head expires without disconnecting the browser', async () => {
+    let now = 0;
+    const bridge = await createBridge({
+      now: () => now,
+      packetQueueLimits: { maxItems: 32, maxBytes: 256 * 1024, maxAgeMs: 10 },
+    });
+    const browser = await openEndpoint(bridge.port, 'browser');
+    const fips = await openEndpoint(bridge.port, 'fips');
+
+    const firstDelivery = once(browser, 'message');
+    fips.send(packet(1, 1n, Buffer.of(1)));
+    const [first] = await firstDelivery;
+
+    now = 11;
+    const secondDelivery = once(browser, 'message');
+    fips.send(packet(1, 2n, Buffer.of(2)));
+    const [second] = await secondDelivery;
+
+    admitFipsPacket(browser, first);
+    await drainBridge();
+    expect(browser.readyState).toBe(WebSocket.OPEN);
+
+    admitFipsPacket(browser, second);
+    await drainBridge();
+    expect(browser.readyState).toBe(WebSocket.OPEN);
+    expect(packetBridgeState(bridge)).toMatchObject({
+      packetCounters: { fipsToBrowser: 1 },
+      packetQueues: { fipsToBrowser: { items: 0, bytes: 0, health: 'ready' } },
+    });
+    browser.close(); fips.close();
+  });
+
   it('keeps local audio preflight separate from current acoustic readiness', async () => {
     const bridge = await createBridge();
     const browser = await openEndpoint(bridge.port, 'browser');
@@ -326,6 +432,11 @@ describe('FIPS packet bridge', () => {
     const [armFrame] = await armed;
     expect(decodeFrame(Buffer.from(armFrame as Buffer))).toMatchObject({ type: MessageType.BROWSER_ARM, epoch: 1, payload: expect.any(Buffer) });
     expect(decodeFrame(Buffer.from(armFrame as Buffer)).payload).toHaveLength(64);
+
+    browser.send(acousticReady(browser, 1));
+    await expectNoMessage(fips);
+    expect(browser.readyState).toBe(WebSocket.OPEN);
+    expect(bridge.state()).toMatchObject({ acousticReady: true, lastError: null });
 
     const firstCapability = Buffer.from(browser.readinessCapability!);
     const rotatedCapability = new Promise<Buffer>((resolve) => {
@@ -564,10 +675,31 @@ describe('FIPS packet bridge', () => {
     await requestAcousticCapability(browser, 2);
     browser.send(acousticReady(browser, 2));
     await rearm;
+    const usedCapability = Buffer.from(browser.readinessCapability!);
+    const rotatedCapability = new Promise<Buffer>((resolve) => {
+      const onMessage = (raw: WebSocket.RawData) => {
+        try {
+          const message = JSON.parse(Buffer.from(raw as Buffer).toString('utf8')) as Record<string, unknown>;
+          if (message.kind === 'acoustic-capability' && typeof message.capability === 'string') {
+            browser.off('message', onMessage);
+            resolve(Buffer.from(message.capability, 'hex'));
+          }
+        } catch { /* Binary controls are delivered only to the FIPS endpoint. */ }
+      };
+      browser.on('message', onMessage);
+    });
     const disarm = once(fips, 'message');
     browser.send(encodeFrame({ type: MessageType.ERROR, epoch: 2, sequence: 1n, payload: Buffer.from('{}') }));
     expect(decodeFrame(Buffer.from((await disarm)[0] as Buffer))).toMatchObject({ type: MessageType.BROWSER_DISARM, epoch: 2 });
+    browser.readinessCapability = await rotatedCapability;
+    expect(browser.readinessCapability.equals(usedCapability)).toBe(false);
     expect(bridge.state()).toMatchObject({ acousticReady: false });
+
+    const recovered = once(fips, 'message');
+    browser.send(acousticReady(browser, 2));
+    expect(decodeFrame(Buffer.from((await recovered)[0] as Buffer))).toMatchObject({ type: MessageType.BROWSER_ARM, epoch: 2 });
+    expect(browser.readyState).toBe(WebSocket.OPEN);
+    expect(bridge.state()).toMatchObject({ acousticReady: true, lastError: null });
     browser.close(); fips.close();
   });
 

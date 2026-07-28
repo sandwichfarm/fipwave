@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import test from 'node:test';
 
 import { composeInvocation, createDemoPlan, parseDemoArgs, parseMacAudioHardware, waitForStop } from '../scripts/demo.mjs';
-import { createLaunchPlan, parseStaggeredArgs } from '../scripts/demo-staggered.mjs';
+import { createBridgeBuildPlan, createLaunchPlan, parseStaggeredArgs } from '../scripts/demo-staggered.mjs';
 
 test('demo accepts only one literal role or check mode', () => {
   assert.deepEqual(parseDemoArgs(['a']), { mode: 'run', role: 'a' });
@@ -23,6 +23,8 @@ test('staggered demo launches one role, waits, then launches the peer on the oth
   ]);
   assert.throws(() => parseStaggeredArgs(['--first', 'c']), /first role/);
   assert.throws(() => parseStaggeredArgs(['--delay-ms', '200000']), /delay-ms/);
+  assert.deepEqual(createBridgeBuildPlan('a').args, ['compose', '-p', 'fipwave_demo_a', '-f', 'compose.fips.yml', 'build', 'bridge']);
+  assert.deepEqual(createBridgeBuildPlan('b').args, ['compose', '-p', 'fipwave_demo_b', '-f', 'compose.fips.yml', 'build', 'bridge']);
 });
 
 test('demo plans derive every runtime input from the role', () => {

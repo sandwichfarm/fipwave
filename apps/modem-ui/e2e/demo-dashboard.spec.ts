@@ -1,5 +1,10 @@
 import { expect, test } from '@playwright/test';
 
+const readyPeer = {
+  peerReady: true,
+  reason: 'ready',
+};
+
 async function loadDemo(page: import('@playwright/test').Page, role: 'A' | 'B') {
   await page.route('**/qualification-config', (route) => route.fulfill({
     json: {
@@ -31,17 +36,7 @@ test('default audience dashboard fits a 1366×768 laptop viewport without scroll
   await expect(page.getByRole('heading', { name: 'Idle' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Start / Connect' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Debug' })).toBeVisible();
-  await expect(page.getByTestId('image-sender-preview')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Send image over FIPS' })).toBeDisabled();
-  await expect(page.getByText('Waiting for authenticated FIPS packet readiness')).toBeVisible();
-  const imagePlacement = await page.evaluate(() => {
-    const stage = document.querySelector<HTMLElement>('.demo-primary')!.getBoundingClientRect();
-    const image = document.querySelector<HTMLElement>('[data-testid="image-sender-preview"]')!.getBoundingClientRect();
-    return { stage: { left: stage.left, right: stage.right, bottom: stage.bottom, width: stage.width }, image: { left: image.left, right: image.right, bottom: image.bottom } };
-  });
-  expect(imagePlacement.image.left).toBeGreaterThan(imagePlacement.stage.left + imagePlacement.stage.width * 0.45);
-  expect(imagePlacement.image.right).toBeLessThanOrEqual(imagePlacement.stage.right);
-  expect(imagePlacement.image.bottom).toBeLessThanOrEqual(imagePlacement.stage.bottom);
+  await expect(page.getByTestId('image-transfer')).toHaveCount(0);
   const network = page.locator('.demo-network-details');
   await expect(network).toHaveCSS('filter', 'blur(6px)');
   await page.getByRole('button', { name: 'Reveal FIPS details' }).click();
@@ -60,15 +55,68 @@ test('role B names the isolated node, its gateway peer, and truthful waiting sta
   await expect(page.getByText('Node A · Wi-Fi gateway peer')).toBeVisible();
   await expect(page.getByText('Acoustic: Not started')).toBeVisible();
   await expect(page.getByText('FIPS: Waiting for acoustic readiness')).toBeVisible();
-  await expect(page.getByTestId('image-receiver-canvas')).toBeVisible();
-  await expect(page.getByText('Waiting for Node A to send the image')).toBeVisible();
-  const canvasInsideStage = await page.evaluate(() => {
-    const stage = document.querySelector<HTMLElement>('.demo-primary')!.getBoundingClientRect();
-    const canvas = document.querySelector<HTMLCanvasElement>('[data-testid="image-receiver-canvas"]')!.getBoundingClientRect();
-    return canvas.left > stage.left + stage.width * 0.45 && canvas.right <= stage.right && canvas.bottom <= stage.bottom;
-  });
-  expect(canvasInsideStage).toBe(true);
+  await expect(page.getByTestId('image-transfer')).toHaveCount(0);
 });
+
+test('role A retains a manual fixed-image retry after a transient send failure', async ({ page }) => {
+  let imagePosts = 0;
+  await page.route('**/peer-status', (route) => route.fulfill({ json: readyPeer }));
+  await page.route('**/image-transfer', (route) => {
+    if (route.request().method() !== 'POST') {
+      return route.fulfill({ json: { transferId: '0102030405060708', width: 96, height: 34, receivedRows: 34, complete: true, revision: 2, bands: [] } });
+    }
+    imagePosts += 1;
+    return route.fulfill({
+      status: imagePosts === 1 ? 409 : 202,
+      json: imagePosts === 1 ? { error: 'peer_missing' } : { accepted: true, bands: 6 },
+    });
+  });
+  await loadDemo(page, 'A');
+
+  await expect(page.getByText('Image queued over the verified FIPS data path')).toBeVisible();
+  await page.getByRole('button', { name: 'Retry image over FIPS' }).click();
+  await expect(page.getByText('Image transfer failed — verify the current FIPS link and retry')).toBeVisible();
+  await page.getByRole('button', { name: 'Retry image over FIPS' }).click();
+  await expect.poll(() => imagePosts).toBe(2);
+  await expect(page.getByText('Image queued over FIPS · 6 bands')).toBeVisible();
+});
+
+for (const role of ['A', 'B'] as const) {
+  test(`role ${role} reveals its image surface in the stage only after the transfer actually starts`, async ({ page }) => {
+    let imagePosts = 0;
+    let transferStarted = false;
+    await page.route('**/peer-status', (route) => route.fulfill({ json: readyPeer }));
+    await page.route('**/image-transfer', (route) => {
+      if (route.request().method() === 'POST') {
+        imagePosts += 1;
+        return route.fulfill({ json: { accepted: true, bands: 6 } });
+      }
+      if (!transferStarted) return route.fulfill({ json: { transferId: null, width: 0, height: 0, receivedRows: 0, complete: false, revision: 0, bands: [] } });
+      return route.fulfill({
+        json: role === 'A'
+          ? { transferId: '0102030405060708', width: 96, height: 34, receivedRows: 34, complete: true, revision: 2, bands: [] }
+          : { transferId: '0102030405060708', width: 1, height: 2, receivedRows: 1, complete: false, revision: 2, bands: [{ y: 0, rows: 1, rgbaBase64: 'AAAA/w==' }] },
+      });
+    });
+    await loadDemo(page, role);
+
+    await expect(page.getByTestId('image-transfer')).toHaveCount(0);
+    transferStarted = true;
+    const image = role === 'A' ? page.getByTestId('image-sender-preview') : page.getByTestId('image-receiver-canvas');
+    await expect(image).toBeVisible();
+    if (role === 'A') {
+      await expect(page.getByRole('button', { name: 'Retry image over FIPS' })).toBeEnabled();
+      expect(imagePosts).toBe(0);
+    }
+    else await expect(page.getByText('Loading over FIPS · 1/2 rows')).toBeVisible();
+    const insideStage = await image.evaluate((node) => {
+      const stage = document.querySelector<HTMLElement>('.demo-primary')!.getBoundingClientRect();
+      const projection = node.getBoundingClientRect();
+      return projection.left > stage.left + stage.width * 0.45 && projection.right <= stage.right && projection.bottom <= stage.bottom;
+    });
+    expect(insideStage).toBe(true);
+  });
+}
 
 test('Debug mode retains the detailed qualification workflow', async ({ page }) => {
   await page.goto('http://127.0.0.1:5173/?debug=1');

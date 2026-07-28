@@ -97,7 +97,7 @@ export interface PacketQueueSnapshot extends PacketQueueLimits { items: number; 
 export interface BridgeServer {
   port: number; sendPcmPlayback(frame: Buffer): void; startCyrinx(): Promise<{ codec: 'cyrinx' | 'quiet'; reasonCode: string | null; deadlineAtMs: number }>; reset(): Promise<number>; close(): Promise<void>; state(): BridgeState;
 }
-export interface ProofControllerApi { readonly role: 'A' | 'B'; status(): Promise<unknown>; ping(): Promise<unknown>; }
+export interface ProofControllerApi { readonly role: 'A' | 'B'; peerStatus(): Promise<unknown>; status(): Promise<unknown>; ping(): Promise<unknown>; }
 export interface ImageTransferControllerApi {
   readonly role: 'A' | 'B';
   send(width: number, height: number, rgba: Buffer): Promise<unknown>;
@@ -304,7 +304,7 @@ const DEFAULT_PACKET_QUEUE_LIMITS: PacketQueueLimits = Object.freeze({ maxItems:
 function packetLimits(input: BridgeServerOptions['packetQueueLimits']): PacketQueueLimits {
   const limits = { ...DEFAULT_PACKET_QUEUE_LIMITS, ...input };
   for (const [name, value] of Object.entries(limits)) {
-    if (!Number.isSafeInteger(value) || value <= 0 || (name === 'maxBytes' && value > MAX_MESSAGE_BYTES) || (name === 'maxAgeMs' && value > 60_000)) fail(`packet_queue_${name}_invalid`);
+    if (!Number.isSafeInteger(value) || value <= 0 || (name === 'maxBytes' && value > MAX_MESSAGE_BYTES) || (name === 'maxAgeMs' && value > 600_000)) fail(`packet_queue_${name}_invalid`);
   }
   return limits;
 }
@@ -370,6 +370,12 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
         }
         if (request.method !== 'POST' || transfer.role !== 'A' || request.headers['content-type'] !== 'application/octet-stream') { response.writeHead(transfer.role === 'B' ? 403 : 405).end(); return; }
         if (!isSameOriginLoopback(request.headers.origin, address.port)) { response.writeHead(403).end(); return; }
+        const proof = options.proofController;
+        const peerStatus = proof?.role === 'A' ? await proof.peerStatus() : undefined;
+        if (!peerStatus || typeof peerStatus !== 'object' || (peerStatus as { peerReady?: unknown }).peerReady !== true) {
+          response.writeHead(409, { 'cache-control': 'no-store' }).end();
+          return;
+        }
         const chunks: Buffer[] = []; let size = 0;
         request.on('data', (chunk: Buffer) => { size += chunk.byteLength; if (size <= 4 + 96 * 96 * 4) chunks.push(Buffer.from(chunk)); });
         await new Promise<void>((resolve) => request.once('end', resolve));
@@ -385,15 +391,22 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       })().catch(() => { if (!response.headersSent) response.writeHead(503); response.end(); });
       return;
     }
-    if (url.pathname === '/proof-status' || url.pathname === '/proof-ping') {
+    if (url.pathname === '/peer-status' || url.pathname === '/proof-status' || url.pathname === '/proof-ping') {
       void (async () => {
         const address = server.address();
         if (url.search || !address || typeof address === 'string' || request.headers.host !== `${LOOPBACK_HOST}:${address.port}`) { response.writeHead(403).end(); return; }
         const proof = options.proofController;
-        if (!proof) { response.writeHead(503, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ state: 'loading', pingReady: false, reason: 'proof_unavailable', result: null })); return; }
-        if (url.pathname === '/proof-status') {
+        if (!proof) {
+          const unavailable = url.pathname === '/peer-status'
+            ? { peerReady: false, reason: 'peer_missing' }
+            : { state: 'loading', pingReady: false, reason: 'proof_unavailable', result: null };
+          response.writeHead(503, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify(unavailable));
+          return;
+        }
+        if (url.pathname === '/peer-status' || url.pathname === '/proof-status') {
           if (request.method !== 'GET') { response.writeHead(405).end(); return; }
-          response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); response.end(JSON.stringify(await proof.status())); return;
+          const projection = url.pathname === '/peer-status' ? await proof.peerStatus() : await proof.status();
+          response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); response.end(JSON.stringify(projection)); return;
         }
         if (request.method !== 'POST' || proof.role !== 'A' || request.headers['content-type'] !== 'application/json') { response.writeHead(proof.role === 'B' ? 403 : 405).end(); return; }
         if (!isSameOriginLoopback(request.headers.origin, address.port)) { response.writeHead(403).end(); return; }
@@ -505,6 +518,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     const now = options.now?.() ?? Date.now();
     while (queue.frames.length && now - queue.frames[0]!.enqueuedAt > packetQueueLimits.maxAgeMs) {
       const expired = queue.frames.shift()!; queue.bytes -= expired.frame.payload.byteLength + HEADER_BYTES;
+      if (pendingBrowserAdmission?.entry === expired) clearPendingBrowserAdmission();
       state.lastError = safeBridgeError(new BridgeInputError('fips_packet_queue_expired'));
     }
     const frameBytes = frame.payload.byteLength + HEADER_BYTES;
@@ -593,11 +607,24 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   };
   const acceptBrowserAdmission = (socket: WebSocket, frame: FwavFrame): void => {
     const pending = pendingBrowserAdmission;
-    if (!pending || pending.owner !== socket || owner !== socket || frame.epoch !== state.epoch || frame.sequence !== pending.entry.frame.sequence) fail('fips_packet_admission_stale_or_unowned');
+    // Admission responses can arrive after a slow acoustic queue has expired
+    // or advanced its former head. Such a response has no authority once its
+    // exact pending entry is gone, so ignoring it is both safe and recoverable;
+    // disconnecting the browser here stranded the other node mid-session.
+    if (!pending || pending.owner !== socket || owner !== socket || frame.epoch !== state.epoch) return;
+    if (frame.sequence !== pending.entry.frame.sequence) {
+      if (frame.sequence < pending.entry.frame.sequence) return;
+      fail('fips_packet_admission_stale_or_unowned');
+    }
     const result = decodeFipsPacketAdmission(frame.payload);
     if (result === FIPS_PACKET_ADMISSION_ACCEPTED) {
       const queue = packetQueues.get('fips-to-browser')!;
-      if (queue.frames[0] !== pending.entry) fail('fips_packet_admission_queue_mismatch');
+      if (queue.frames[0] !== pending.entry) {
+        clearPendingBrowserAdmission();
+        refreshState();
+        flushPacketQueue('fips-to-browser');
+        return;
+      }
       queue.frames.shift(); queue.bytes -= pending.entry.frame.payload.byteLength + HEADER_BYTES;
       clearPendingBrowserAdmission();
       state.packetCounters.fipsToBrowser += 1;
@@ -609,16 +636,25 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
       return;
     }
     if (result !== FIPS_PACKET_ADMISSION_QUEUE_FULL) fail('fips_packet_admission_result_invalid');
-    notifyFipsPacketAdmission(pending.entry.frame, result);
-    if (pending.attempts >= 3) {
+    // Queue-full is backpressure, not packet failure. The browser owns a
+    // deliberately small acoustic queue while FIPS may produce a short burst
+    // after authentication. Retain the exact head frame and retry it until its
+    // bounded packet-queue age expires instead of dropping it after 150 ms.
+    if (pending.attempts === 1) notifyFipsPacketAdmission(pending.entry.frame, result);
+    const now = options.now?.() ?? Date.now();
+    if (now - pending.entry.enqueuedAt > packetQueueLimits.maxAgeMs) {
+      const queue = packetQueues.get('fips-to-browser')!;
+      if (queue.frames[0] !== pending.entry) fail('fips_packet_admission_queue_mismatch');
+      queue.frames.shift(); queue.bytes -= pending.entry.frame.payload.byteLength + HEADER_BYTES;
       clearPendingBrowserAdmission();
       state.packetQueues.fipsToBrowser.health = 'rejected';
-      state.lastError = safeBridgeError(new BridgeInputError('acoustic_queue_full'));
+      state.lastError = safeBridgeError(new BridgeInputError('fips_packet_queue_expired'));
       refreshState();
+      flushPacketQueue('fips-to-browser');
       return;
     }
     pending.attempts += 1;
-    pending.retryTimer = setTimeout(retryBrowserAdmission, 50);
+    pending.retryTimer = setTimeout(retryBrowserAdmission, 250);
     state.packetQueues.fipsToBrowser.health = 'waiting';
     refreshState();
   };
@@ -1225,6 +1261,16 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
         if (frame.sequence !== 0n || frame.flags !== 0) fail('acoustic_control_invalid');
         if (frame.type === MessageType.ACOUSTIC_READY) {
           const proof = decodeAcousticReadinessProof(frame.payload);
+          // Capability delivery and the session-ready callback can race in the
+          // browser. A replay for the accepted session/settings/capability is
+          // idempotent even if its heartbeat timestamp advanced; a different
+          // authority tuple still has to present a fresh capability below.
+          if (
+            state.acousticReady
+            && acousticReadinessProof
+            && timingSafeEqual(frame.payload.subarray(0, 40), acousticReadinessProof.subarray(0, 40))
+            && timingSafeEqual(frame.payload.subarray(48), acousticReadinessProof.subarray(48))
+          ) return;
           const nowMs = BigInt(clock());
           const fresh = proof.heartbeatAtMs <= nowMs && nowMs - proof.heartbeatAtMs <= BigInt(ACOUSTIC_READINESS_FRESHNESS_MS);
           if (!fresh || connection.acousticCapabilityUsed || !timingSafeEqual(proof.capability, connection.acousticCapability)) fail('acoustic_readiness_proof_invalid');
@@ -1296,6 +1342,11 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
         }
         if (frame.type === MessageType.ERROR) {
           disarmAcousticSession();
+          // An in-place browser recovery keeps this WebSocket and epoch alive.
+          // Rotate the single-use readiness capability immediately; otherwise
+          // the recovered acoustic session replays a consumed capability and
+          // the bridge rejects the healthy retry.
+          issueAcousticCapability(socket, connection);
           const origin = connection.errorOrigins.get(frame.sequence)
             ?? (cyrinxSession?.codec === 'cyrinx' ? 'cyrinx' : cyrinxSession?.codec === 'quiet' ? 'quiet' : 'other');
           connection.errorOrigins.delete(frame.sequence);

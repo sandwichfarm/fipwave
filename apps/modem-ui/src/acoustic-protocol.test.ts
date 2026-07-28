@@ -7,6 +7,7 @@ import {
   FAS1_MAX_BODY_BYTES,
   FAS1_MAX_PACKET_BYTES,
   FAS1_MAX_UNIT_BYTES,
+  Fas1Sender,
   Fas1UnitType,
   crc32c,
   decodeFas1,
@@ -23,7 +24,7 @@ function validUnit(type: Fas1UnitType) {
   const bodyless = [Fas1UnitType.TurnEnd, Fas1UnitType.Ack, Fas1UnitType.Heartbeat, Fas1UnitType.Reset].includes(type);
   return {
     type,
-    flags: 0,
+    flags: Fas1Sender.A,
     sessionId: type === Fas1UnitType.Hello ? 0n : SESSION,
     sequence: 7,
     packetId: type === Fas1UnitType.Data || type === Fas1UnitType.Ack ? 99 : 0,
@@ -76,7 +77,7 @@ describe('FAS1 binary protocol', () => {
       resign(mutate(encoded, 0, 0)),
       resign(mutate(encoded, 4, 2)),
       resign(mutate(encoded, 5, 0xff)),
-      resign(mutate(encoded, 6, 1)),
+      resign(mutate(encoded, 6, 3)),
       resign(mutate(encoded, 8, 0)),
       resign(mutate(encoded, 20, 0)),
       resign(mutate(encoded, 24, 1)),
@@ -107,7 +108,7 @@ describe('FAS1 binary protocol', () => {
 
   it('fragments and exactly reassembles a complete 1357-byte packet in seven maximum-body DATA units', () => {
     const packet = new Uint8Array(FAS1_MAX_PACKET_BYTES).map((_, index) => index & 0xff);
-    const fragments = fragmentPacket({ packet, sessionId: SESSION, sequenceStart: 100, packetId: 42 });
+    const fragments = fragmentPacket({ packet, sessionId: SESSION, sequenceStart: 100, packetId: 42, sender: Fas1Sender.A });
     expect(fragments).toHaveLength(7);
     expect(fragments.every((fragment) => fragment.body.byteLength <= FAS1_MAX_BODY_BYTES)).toBe(true);
     expect(fragments.map((fragment) => fragment.fragmentIndex)).toEqual([0, 1, 2, 3, 4, 5, 6]);
@@ -115,18 +116,18 @@ describe('FAS1 binary protocol', () => {
   });
 
   it('rejects packet and fragment geometry at zero, one-over, and unsafe boundaries', () => {
-    expect(() => fragmentPacket({ packet: new Uint8Array(), sessionId: SESSION, sequenceStart: 0, packetId: 1 })).toThrow();
-    expect(() => fragmentPacket({ packet: new Uint8Array(FAS1_MAX_PACKET_BYTES + 1), sessionId: SESSION, sequenceStart: 0, packetId: 1 })).toThrow();
-    expect(() => fragmentPacket({ packet: Uint8Array.of(1), sessionId: SESSION, sequenceStart: 0x1_0000_0000, packetId: 1 })).toThrow();
+    expect(() => fragmentPacket({ packet: new Uint8Array(), sessionId: SESSION, sequenceStart: 0, packetId: 1, sender: Fas1Sender.A })).toThrow();
+    expect(() => fragmentPacket({ packet: new Uint8Array(FAS1_MAX_PACKET_BYTES + 1), sessionId: SESSION, sequenceStart: 0, packetId: 1, sender: Fas1Sender.A })).toThrow();
+    expect(() => fragmentPacket({ packet: Uint8Array.of(1), sessionId: SESSION, sequenceStart: 0x1_0000_0000, packetId: 1, sender: Fas1Sender.A })).toThrow();
     expect(() => encodeFas1({ ...validUnit(Fas1UnitType.Data), fragmentCount: 17 })).toThrow();
     expect(() => encodeFas1({ ...validUnit(Fas1UnitType.Data), fragmentIndex: 1, fragmentCount: 1 })).toThrow();
-    const fragments = fragmentPacket({ packet: new Uint8Array(218), sessionId: SESSION, sequenceStart: 0, packetId: 1 });
+    const fragments = fragmentPacket({ packet: new Uint8Array(218), sessionId: SESSION, sequenceStart: 0, packetId: 1, sender: Fas1Sender.A });
     expect(() => reassemblePacket([fragments[0]!, fragments[0]!])).toThrow();
   });
 
   it('enforces the committed 96-byte canonical DATA geometry before reassembly', () => {
     const packet = new Uint8Array(FAS1_MAX_PACKET_BYTES).fill(7);
-    const fragments = fragmentPacket({ packet, sessionId: SESSION, sequenceStart: 0, packetId: 9, payloadBytes: 96 });
+    const fragments = fragmentPacket({ packet, sessionId: SESSION, sequenceStart: 0, packetId: 9, sender: Fas1Sender.A, payloadBytes: 96 });
     expect(fragments).toHaveLength(15);
     expect(fragments.slice(0, -1).every((fragment) => fragment.body.byteLength === 96)).toBe(true);
     expect(fragments.at(-1)?.body.byteLength).toBe(13);

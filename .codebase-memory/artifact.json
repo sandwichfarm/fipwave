@@ -1,0 +1,11 @@
+{
+    "schema_version": 2,
+    "commit": "05c5053f1e1e81f230ac90addf167bf2eef4d34c",
+    "indexed_at": "2026-07-28T23:41:38Z",
+    "project": "Users-sandwich-Develop-fipwave",
+    "nodes": 3455,
+    "edges": 7389,
+    "original_size": 9961472,
+    "compressed_size": 1724305,
+    "compression_level": 3
+}

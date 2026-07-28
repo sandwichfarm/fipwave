@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { composeInvocation, createDemoPlan } from './demo.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_DELAY_MS = 8_000;
@@ -43,19 +44,33 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function buildDemo() {
+function runInvocation(invocation, label) {
   return new Promise((resolve, reject) => {
-    const child = spawn('npm', ['run', 'build'], {
-      cwd: ROOT,
+    const child = spawn(invocation.command, invocation.args, {
+      cwd: invocation.cwd,
+      env: { ...process.env, ...invocation.environment },
       stdio: 'inherit',
     });
     child.once('error', reject);
     child.once('exit', (code, signal) => {
-      if (signal) reject(new Error(`demo build stopped by ${signal}`));
-      else if (code !== 0) reject(new Error(`demo build failed with exit code ${code ?? 'unknown'}`));
+      if (signal) reject(new Error(`${label} stopped by ${signal}`));
+      else if (code !== 0) reject(new Error(`${label} failed with exit code ${code ?? 'unknown'}`));
       else resolve();
     });
   });
+}
+
+export function createBridgeBuildPlan(role) {
+  return composeInvocation(createDemoPlan(role), ['build', 'bridge']);
+}
+
+async function buildBridgeImages() {
+  // Compose names images by project, so both role-specific tags must point at
+  // the current source before either child executes `up` without `--build`.
+  for (const role of ['a', 'b']) {
+    process.stdout.write(`Building current bridge image for role ${role.toUpperCase()}...\n`);
+    await runInvocation(createBridgeBuildPlan(role), `role ${role.toUpperCase()} bridge build`);
+  }
 }
 
 function spawnRole({ role, port }) {
@@ -73,8 +88,7 @@ async function main() {
   const children = [];
   let stopping = false;
 
-  process.stdout.write('Building the current modem UI before launching either node...\n');
-  await buildDemo();
+  await buildBridgeImages();
 
   const stopChildren = () => {
     if (stopping) return;

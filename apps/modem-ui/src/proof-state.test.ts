@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { parseProofSnapshot, reduceProofState } from './proof-state.js';
 
-const ready = (overrides: Record<string, unknown> = {}) => ({ pingReady: true, reason: 'ready', evidenceClass: 'Fixture', join: { pingReady: true, reason: 'ready', peer: { npub: 'npub1demopeer', connectivity: 'connected', link_id: 7, transport_type: 'sound', authenticated_at_ms: 1, last_seen_ms: 1 }, link: { link_id: 7, transport_id: 3, state: 'active', created_at_ms: 1, stats: {} }, transport: { transport_id: 3, type: 'sound', state: 'active', mtu: 1357, stats: { worker_up: true, acoustic_ready: true, epoch: 4, complete_tx: 2 } } }, ...overrides });
+const ready = (overrides: Record<string, unknown> = {}) => ({ pingReady: true, reason: 'ready', evidenceClass: 'Fixture', join: { pingReady: true, reason: 'ready', peer: { npub: 'npub1demopeer', connectivity: 'connected', link_id: 7, transport_type: 'sound', authenticated_at_ms: 1, last_seen_ms: 1 }, link: { link_id: 7, transport_id: 3, state: 'connected', created_at_ms: 1, stats: {} }, transport: { transport_id: 3, type: 'sound', state: 'up', mtu: 1357, stats: { worker_up: true, acoustic_ready: true, epoch: 4, complete_tx: 2 } } }, ...overrides });
 
 describe('proof state', () => {
   it('accepts only the bounded ProofExecution projection and keeps unavailable counters honest', () => {

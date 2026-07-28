@@ -1,4 +1,4 @@
-import { decodeFas1, digestSettings, encodeFas1, Fas1UnitType, fragmentPacket, reassemblePacket, resolveAcousticProfile, type AcousticSettings, type DirectionalSettings, type Fas1Unit } from './acoustic-protocol.js';
+import { decodeFas1, digestSettings, encodeFas1, Fas1Sender, Fas1UnitType, fragmentPacket, reassemblePacket, resolveAcousticProfile, type AcousticSettings, type DirectionalSettings, type Fas1Unit } from './acoustic-protocol.js';
 
 export type AcousticRole = 'A' | 'B';
 export type AcousticSessionState = 'Idle' | 'Listening' | 'HelloSent' | 'HelloAckSent' | 'CapsSent' | 'CalibratingAToB' | 'CalibratingBToA' | 'Committing' | 'AwaitingHeartbeat' | 'Ready' | 'Degraded' | 'Recovering' | 'Error';
@@ -73,7 +73,10 @@ const OBS_DISCONTINUITY = 32;
 const OBS_CLIPPING = 64;
 const MAX_QUEUED_PACKETS = 16;
 const MAX_DELIVERED_IDS = 32;
-const MAX_PACKET_AGE_MS = 120_000;
+// A complete FIPS packet can span several audible modem frames, and several
+// complete packets may be queued for the progressive image. Keep the bound
+// finite while allowing that legitimate slow-link work to finish.
+const MAX_PACKET_AGE_MS = 600_000;
 const MAX_ATTEMPTS = 3;
 const WINDOW_SIZE = 4;
 const HANDSHAKE_RETRY_MS = 2_500;
@@ -92,6 +95,7 @@ function nonZero(value: Uint8Array): boolean { return value.some((byte) => byte 
 function roleByte(role: AcousticRole): number { return role === 'A' ? 1 : 2; }
 function parseRole(value: number): AcousticRole { if (value === 1) return 'A'; if (value === 2) return 'B'; return invalid('role is invalid'); }
 function complement(role: AcousticRole): AcousticRole { return role === 'A' ? 'B' : 'A'; }
+function senderFlag(role: AcousticRole): Fas1Sender { return role === 'A' ? Fas1Sender.A : Fas1Sender.B; }
 function toSessionId(nonce: Uint8Array): bigint {
   if (nonce.byteLength !== 16) invalid('nonce must be 128 bits');
   const view = new DataView(nonce.buffer, nonce.byteOffset, nonce.byteLength);
@@ -199,6 +203,7 @@ export class AcousticSession {
   #generation = 0;
   #awaitingAck = false;
   #recoveryAttempts = 0;
+  #retiredSessionIds = new Set<bigint>();
   #counters = { retries: 0, dropped: 0, duplicates: 0, deliveredPackets: 0 };
 
   constructor(private readonly options: AcousticSessionOptions) {
@@ -231,10 +236,24 @@ export class AcousticSession {
     if (this.#state !== 'Ready' || !this.#sessionId) return { accepted: false, reason: 'acoustic_not_ready' };
     if (!(packet instanceof Uint8Array) || packet.byteLength < 1 || packet.byteLength > 1_357) return { accepted: false, reason: 'acoustic_packet_bounds' };
     if (!['control', 'heartbeat', 'ordinary'].includes(trafficClass)) return { accepted: false, reason: 'acoustic_class_invalid' };
+    // FIPS can retry the same handshake/heartbeat datagram before its first
+    // acoustic copy has crossed the room. Coalesce only copies that are still
+    // active or queued; accepting them as the same pending delivery prevents
+    // transport-level retries from filling the much slower acoustic queue.
+    const duplicatePending = [
+      ...(this.#active ? [this.#active] : []),
+      ...this.#queues.control,
+      ...this.#queues.heartbeat,
+      ...this.#queues.ordinary,
+    ].find((entry) => entry.trafficClass === trafficClass && equal(entry.packet, packet));
+    if (duplicatePending) {
+      this.#counters.duplicates += 1;
+      return { accepted: true, packetId: duplicatePending.packetId };
+    }
     if (this.queueLength() + (this.#active ? 1 : 0) >= MAX_QUEUED_PACKETS) return { accepted: false, reason: 'acoustic_queue_full' };
     const packetId = this.nextPacketId();
     const copied = packet.slice();
-    const pending: PendingPacket = { packetId, packet: copied, fragments: fragmentPacket({ sessionId: this.#sessionId, sequenceStart: this.#sequence, packetId, packet: copied, payloadBytes: this.outboundSettings().payloadBytes }), trafficClass, expiresAt: this.options.clock.now() + MAX_PACKET_AGE_MS, attempts: 0, acknowledged: 0 };
+    const pending: PendingPacket = { packetId, packet: copied, fragments: fragmentPacket({ sessionId: this.#sessionId, sequenceStart: this.#sequence, packetId, packet: copied, sender: senderFlag(this.options.role), payloadBytes: this.outboundSettings().payloadBytes }), trafficClass, expiresAt: this.options.clock.now() + MAX_PACKET_AGE_MS, attempts: 0, acknowledged: 0 };
     this.#sequence += pending.fragments.length;
     this.#queues[trafficClass].push(pending);
     this.driveTurn();
@@ -253,13 +272,18 @@ export class AcousticSession {
 
   reset(epoch: number): void {
     if (!validInteger(epoch, 0, 0xffff_ffff)) invalid('epoch is invalid');
+    if (epoch !== this.#epoch) this.#retiredSessionIds.clear();
+    else if (this.#sessionId !== undefined) {
+      this.#retiredSessionIds.add(this.#sessionId);
+      while (this.#retiredSessionIds.size > 8) this.#retiredSessionIds.delete(this.#retiredSessionIds.values().next().value!);
+    }
     if (this.#timer !== undefined) this.options.timers.clearTimeout(this.#timer);
     this.clearHandshakeRetry();
     this.clearProbeRetry();
     this.clearCommitRetry();
     if (this.#deliveryTimer !== undefined) this.options.timers.clearTimeout(this.#deliveryTimer);
     this.clearHeartbeatTimers(); this.#generation += 1;
-    this.#timer = undefined; this.#deliveryTimer = undefined; this.#epoch = epoch; this.#sessionId = undefined; this.#localNonce = undefined; this.#peerNonce = undefined; this.#sequence = 1; this.#reason = undefined; this.#ledger = []; this.#sentProbes = { AtoB: 0, BtoA: 0 }; this.#receivedReports = { AtoB: 0, BtoA: 0 }; this.#receivedProbes = { AtoB: 0, BtoA: 0 }; this.#lastProbeReport = {}; this.#selected = {}; this.#settings = undefined; this.#settingsDigest = undefined; this.#lastHeartbeatAtMs = undefined; this.#turnOwner = undefined; this.#heartbeatDue = false; this.#queues = { control: [], heartbeat: [], ordinary: [] }; this.#active = undefined; this.#inbound = undefined; this.#lastAck = undefined; this.#delivered.clear(); this.#awaitingAck = false; this.#work = Promise.resolve(); this.#state = this.options.role === 'A' ? 'Idle' : 'Listening';
+    this.#timer = undefined; this.#deliveryTimer = undefined; this.#epoch = epoch; this.#sessionId = undefined; this.#localNonce = undefined; this.#peerNonce = undefined; this.#sequence = 1; this.#reason = undefined; this.#ledger = []; this.#sentProbes = { AtoB: 0, BtoA: 0 }; this.#receivedReports = { AtoB: 0, BtoA: 0 }; this.#receivedProbes = { AtoB: 0, BtoA: 0 }; this.#lastProbeReport = {}; this.#selected = {}; this.#settings = undefined; this.#settingsDigest = undefined; this.#lastHeartbeatAtMs = undefined; this.#turnOwner = undefined; this.#heartbeatDue = false; this.#queues = { control: [], heartbeat: [], ordinary: [] }; this.#active = undefined; this.#inbound = undefined; this.#lastAck = undefined; this.#delivered.clear(); this.#awaitingAck = false; this.#recoveryAttempts = 0; this.#work = Promise.resolve(); this.#state = this.options.role === 'A' ? 'Idle' : 'Listening';
   }
 
   dispose(): void { this.reset(this.#epoch); this.#unsubscribe(); }
@@ -283,6 +307,11 @@ export class AcousticSession {
   receive(raw: Uint8Array): void {
     let unit;
     try { unit = decodeFas1(raw); } catch { return; }
+    // Laptop speakers are directly audible to their own microphones. Every
+    // FAS1 unit therefore carries its CRC-bound sender role, and a session
+    // accepts only its configured peer's frames. Without this check a node can
+    // acknowledge its own TURN_END or heartbeat and split the token state.
+    if (unit.flags !== senderFlag(complement(this.options.role))) return;
     try {
       if (unit.type === Fas1UnitType.Hello) this.onHello(unit.sessionId, unit.body);
       else if (unit.type === Fas1UnitType.HelloAck) this.onHelloAck(unit.sessionId, unit.body);
@@ -295,6 +324,11 @@ export class AcousticSession {
       else if (unit.type === Fas1UnitType.Data) this.onData(unit);
       else if (unit.type === Fas1UnitType.TurnEnd) this.onTurnEnd(unit.sessionId);
       else if (unit.type === Fas1UnitType.Ack) this.onAck(unit.sessionId, unit.packetId, unit.sequence);
+      else if (unit.type === Fas1UnitType.Reset) this.onReset(unit.sessionId);
+      // Only a CRC-valid frame from the configured peer and current session
+      // proves acoustic liveness. Queue occupancy and local playback do not:
+      // either can remain non-empty forever after the peer goes silent.
+      if (this.#state === 'Ready' && unit.sessionId === this.#sessionId) this.armHeartbeatTimers();
     } catch { /* Ambient/malformed units never mutate a legal state. */ }
   }
 
@@ -328,11 +362,11 @@ export class AcousticSession {
     );
   }
   private armCommitRetry(): void {
-    if (this.options.role !== 'B' || this.#state !== 'Committing' || !this.#sessionId || !this.#settingsDigest || this.#commitTimer !== undefined) return;
+    if (this.options.role !== 'B' || (this.#state !== 'Committing' && this.#state !== 'AwaitingHeartbeat') || !this.#sessionId || !this.#settingsDigest || this.#commitTimer !== undefined) return;
     const epoch = this.#epoch; const sessionId = this.#sessionId; const generation = this.#generation;
     this.#commitTimer = this.options.timers.setTimeout(() => {
       this.#commitTimer = undefined;
-      if (epoch !== this.#epoch || sessionId !== this.#sessionId || generation !== this.#generation || this.#state !== 'Committing' || !this.#settingsDigest) return;
+      if (epoch !== this.#epoch || sessionId !== this.#sessionId || generation !== this.#generation || (this.#state !== 'Committing' && this.#state !== 'AwaitingHeartbeat') || !this.#settingsDigest) return;
       this.#commitAttempts += 1;
       this.#counters.retries += 1;
       const completion = this.send(Fas1UnitType.Commit, sessionId, this.#settingsDigest);
@@ -393,28 +427,22 @@ export class AcousticSession {
     if (!this.#sessionId || this.#state !== 'Ready') return;
     const epoch = this.#epoch; const sessionId = this.#sessionId; const generation = this.#generation;
     const current = () => epoch === this.#epoch && sessionId === this.#sessionId && generation === this.#generation && this.#state === 'Ready';
-    if (this.#heartbeatTimer === undefined) this.#heartbeatTimer = this.options.timers.setTimeout(() => {
-      this.#heartbeatTimer = undefined;
-      if (!current()) return;
-      this.heartbeat();
-      this.armHeartbeatTimers();
-    }, this.ackTimeoutMs());
+    const scheduleHeartbeat = (): void => {
+      if (this.#heartbeatTimer !== undefined || !current()) return;
+      this.#heartbeatTimer = this.options.timers.setTimeout(() => {
+        this.#heartbeatTimer = undefined;
+        if (!current()) return;
+        this.heartbeat();
+        scheduleHeartbeat();
+      }, this.ackTimeoutMs());
+    };
+    scheduleHeartbeat();
     if (this.#heartbeatDeadline !== undefined) this.options.timers.clearTimeout(this.#heartbeatDeadline);
     const deadlineGeneration = ++this.#heartbeatTimerGeneration;
     this.#heartbeatDeadline = this.options.timers.setTimeout(() => {
       this.#heartbeatDeadline = undefined;
       if (deadlineGeneration !== this.#heartbeatTimerGeneration || !current()) return;
-      // A queued or in-flight FIPS exchange is itself evidence that the modem
-      // is making progress. Keep the ready session armed until the burst has
-      // drained instead of disconnecting one role mid-authentication.
-      if (this.queueLength() > 0 || this.#active || this.#inbound || this.#awaitingAck) {
-        this.armHeartbeatTimers();
-        return;
-      }
       this.markHeartbeatMissed();
-    // A complete maximum-size acoustic ARQ exchange can exceed the packet ACK
-    // timeout, especially while the initial FIPS authentication burst drains.
-    // Do not disarm a healthy, busy modem before it can produce peer liveness.
     }, Math.max(60_000, this.ackTimeoutMs() * 4));
   }
   private outboundSettings(): DirectionalSettings { if (!this.#settings) invalid('settings are not committed'); return this.options.role === 'A' ? this.#settings.aToB : this.#settings.bToA; }
@@ -482,7 +510,7 @@ export class AcousticSession {
   }
   private beginRecovery(): void {
     if (this.#state !== 'Degraded' || !this.#sessionId) return;
-    if (this.#recoveryAttempts >= MAX_ATTEMPTS) { this.fail('acoustic_recovery_exhausted'); return; }
+    if (this.#recoveryAttempts >= MAX_ATTEMPTS) { this.restartSession(); return; }
     this.#recoveryAttempts += 1; this.#counters.retries += 1;
     this.#state = 'Recovering'; this.#reason = undefined;
     const generation = this.#generation; const sessionId = this.#sessionId;
@@ -493,11 +521,30 @@ export class AcousticSession {
     if (this.options.role === 'A') {
       const completion = this.send(Fas1UnitType.Heartbeat, sessionId, new Uint8Array());
       if (completion instanceof Promise) {
-        void completion.then(armTimeout, () => this.fail('acoustic_recovery_playback_failed'));
+        void completion.then(armTimeout, () => this.restartSession());
       } else {
         armTimeout();
       }
     } else armTimeout();
+  }
+  private restartSession(): void {
+    const epoch = this.#epoch;
+    const sessionId = this.#sessionId;
+    const restart = (): void => {
+      if (epoch !== this.#epoch || sessionId !== this.#sessionId) return;
+      this.reset(epoch);
+      if (this.options.role === 'A') this.start();
+    };
+    if (this.options.role !== 'A' || !sessionId) { restart(); return; }
+    const completion = this.send(Fas1UnitType.Reset, sessionId, new Uint8Array());
+    if (completion instanceof Promise) void completion.then(restart, restart);
+    else restart();
+  }
+  private onReset(sessionId: bigint): void {
+    if (sessionId !== this.#sessionId) return;
+    const epoch = this.#epoch;
+    this.reset(epoch);
+    if (this.options.role === 'A') this.start();
   }
   private onData(unit: Fas1Unit): void {
     this.expireWork();
@@ -543,7 +590,7 @@ export class AcousticSession {
   }
   private sendAck(packetId: number, bitmap: number): void {
     if (!this.#sessionId) return;
-    const raw = encodeFas1({ type: Fas1UnitType.Ack, flags: 0, sessionId: this.#sessionId, sequence: bitmap >>> 0, packetId, fragmentIndex: 0, fragmentCount: 0, packetLength: 0, body: new Uint8Array() });
+    const raw = encodeFas1({ type: Fas1UnitType.Ack, flags: senderFlag(this.options.role), sessionId: this.#sessionId, sequence: bitmap >>> 0, packetId, fragmentIndex: 0, fragmentCount: 0, packetLength: 0, body: new Uint8Array() });
     void this.options.modem.send(raw);
   }
   private onAck(sessionId: bigint, packetId: number, bitmap: number): void {
@@ -572,9 +619,14 @@ export class AcousticSession {
   private degrade(reason: string): void { if (this.#state === 'Error' || this.#state === 'Degraded') return; this.clearDeliveryTimer(); this.#awaitingAck = false; this.#state = 'Degraded'; this.#reason = reason; this.schedule(() => this.beginRecovery(), this.guardMs()); }
 
   private onHello(headerSessionId: bigint, body: Uint8Array): void {
-    if (this.options.role !== 'B' || this.#state !== 'Listening' || headerSessionId !== 0n) return;
+    if (this.options.role !== 'B' || headerSessionId !== 0n) return;
     const hello = decodeHandshake(body);
     if (hello.role !== 'A' || hello.identity !== this.options.expectedPeer || hello.expectedPeer !== this.options.identity || hello.epoch !== this.#epoch || !hello.sessionId || !sameProfiles(hello.profiles, this.options.profiles) || !this.mutualRange(hello.ranges)) return;
+    if (this.#retiredSessionIds.has(hello.sessionId)) return;
+    if (this.#state !== 'Listening') {
+      if (hello.sessionId === this.#sessionId) return;
+      this.reset(this.#epoch);
+    }
     this.clearHandshakeRetry();
     const localNonce = this.options.nonce().slice(); if (localNonce.byteLength !== 16) invalid('nonce must be 128 bits');
     this.#sessionId = hello.sessionId; this.#peerNonce = hello.nonce; this.#localNonce = localNonce; this.#state = 'HelloAckSent';
@@ -599,6 +651,14 @@ export class AcousticSession {
     if (this.options.role === 'B' && this.#state === 'HelloAckSent') {
       this.clearHandshakeRetry();
       this.#state = 'CalibratingAToB'; this.armDeadline(); this.send(Fas1UnitType.Caps, sessionId, this.capsBody()); return;
+    }
+    if (this.options.role === 'B' && this.#state === 'CalibratingAToB') {
+      // A remains CapsSent until it receives B's capability reply. If that
+      // reply was lost, A retries its own CAPS while B has already advanced;
+      // replay B's reply so both sides converge on the calibration state.
+      this.#counters.duplicates += 1;
+      this.send(Fas1UnitType.Caps, sessionId, this.capsBody());
+      return;
     }
     if (this.options.role === 'A' && this.#state === 'CapsSent') { this.clearHandshakeRetry(); this.#state = 'CalibratingAToB'; this.armDeadline(); this.driveProbe('AtoB'); }
   }
@@ -751,23 +811,33 @@ export class AcousticSession {
   }
   private onCommitAck(sessionId: bigint, body: Uint8Array): void {
     if (this.options.role !== 'B' || this.#state !== 'Committing' || sessionId !== this.#sessionId || !equal(body, this.#settingsDigest)) return;
-    this.clearCommitRetry();
     // A owns the post-commit bootstrap turn.  B becomes ready only after it
     // receives this bound heartbeat and returns the one explicit bootstrap
-    // reply below; periodic heartbeats never bypass the turn scheduler.
+    // reply below. Keep retrying COMMIT while waiting: A replays COMMIT_ACK
+    // plus the bootstrap heartbeat, so losing that one heartbeat cannot leave
+    // both peers permanently AwaitingHeartbeat.
     this.#state = 'AwaitingHeartbeat'; this.#turnOwner = 'A';
+    this.armCommitRetry();
   }
   private onHeartbeat(sessionId: bigint): void {
     if (sessionId !== this.#sessionId || (this.#state !== 'AwaitingHeartbeat' && this.#state !== 'Ready' && this.#state !== 'Degraded' && this.#state !== 'Recovering')) return;
     const recovering = this.#state === 'Degraded' || this.#state === 'Recovering';
     const reply = this.#state === 'AwaitingHeartbeat' || (recovering && this.options.role === 'B');
+    if (this.options.role === 'B') this.clearCommitRetry();
     this.clearDeliveryTimer(); this.#state = 'Ready'; this.#lastHeartbeatAtMs = this.options.clock.now(); this.armHeartbeatTimers();
     this.#recoveryAttempts = 0;
     if (reply && this.options.role === 'B') {
       // A initiates both bootstrap and bounded recovery. B's single response
-      // prevents symmetric recovery waits; normal periodic work still uses
-      // the deterministic turn scheduler.
-      this.send(Fas1UnitType.Heartbeat, sessionId, new Uint8Array());
+      // prevents symmetric recovery waits. Wait for the negotiated acoustic
+      // guard during recovery so the response cannot overlap A's playback
+      // tail. Bootstrap keeps its existing immediate response contract.
+      if (recovering) {
+        this.schedule(() => {
+          if (this.#state === 'Ready' && this.#sessionId === sessionId) this.send(Fas1UnitType.Heartbeat, sessionId, new Uint8Array());
+        }, this.guardMs());
+      } else {
+        this.send(Fas1UnitType.Heartbeat, sessionId, new Uint8Array());
+      }
     }
     if (reply || recovering) this.#turnOwner = 'A';
   }
@@ -778,5 +848,5 @@ export class AcousticSession {
   }
   private fail(reason: string): void { if (this.#timer !== undefined) this.options.timers.clearTimeout(this.#timer); this.#timer = undefined; this.clearHandshakeRetry(); this.clearProbeRetry(); this.clearCommitRetry(); this.clearHeartbeatTimers(); this.#state = 'Error'; this.#reason = reason; }
   private mutualRange(peer: AcousticCapabilityRange): boolean { return peer.minPayloadBytes <= this.options.ranges.maxPayloadBytes && peer.maxPayloadBytes >= this.options.ranges.minPayloadBytes; }
-  private send(type: Fas1UnitType, sessionId: bigint, body: Uint8Array): void | Promise<void> { const raw = encodeFas1({ type, flags: 0, sessionId, sequence: this.#sequence++, packetId: 0, fragmentIndex: 0, fragmentCount: 0, packetLength: 0, body }); return this.options.modem.send(raw); }
+  private send(type: Fas1UnitType, sessionId: bigint, body: Uint8Array): void | Promise<void> { const raw = encodeFas1({ type, flags: senderFlag(this.options.role), sessionId, sequence: this.#sequence++, packetId: 0, fragmentIndex: 0, fragmentCount: 0, packetLength: 0, body }); return this.options.modem.send(raw); }
 }

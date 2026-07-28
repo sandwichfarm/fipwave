@@ -332,7 +332,7 @@ export async function runDemo(role) {
     await compose(plan, ['down', '--volumes', '--remove-orphans']).catch(() => undefined);
     await checkPortAvailable(plan.browserPort);
     await recorder.event('preflight-passed', preflight);
-    await compose(plan, ['up', '--detach', '--build', '--remove-orphans']);
+    await compose(plan, ['up', '--detach', '--remove-orphans']);
     stackStarted = true;
     await recorder.event('compose-started', { project: plan.project });
     await waitForReady(plan, recorder);

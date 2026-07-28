@@ -13,9 +13,11 @@ import { CyrinxBatchWorker } from './cyrinx-worker.js';
 import { cyrinxDigitalCases } from './qualification-session.js';
 import { CYRINX_DEADLINE_MS, QUIET_CODEC, TUN_EVIDENCE_CHECKS, validateTunEvidence, type MachineReport, type TunEvidence } from './report.js';
 import { createFipsControlClient } from './fips-control-client.js';
-import { createProofController, projectPublicProofExecution } from './proof-controller.js';
+import { createFipsPeerReconciler } from './fips-peer-reconciler.js';
+import { createProofController, projectPublicPeerExecution, projectPublicProofExecution } from './proof-controller.js';
 import { createIsolationResponder, requestIsolationAttestation } from './isolation-attestation.js';
-import { createImageTransfer } from './image-transfer.js';
+import { createImageTransfer, startAuthenticatedImageSender } from './image-transfer.js';
+import { FIXED_DEMO_IMAGE_HEIGHT, FIXED_DEMO_IMAGE_WIDTH, fixedDemoImageRaster } from './demo-image-raster.js';
 
 const execFileAsync = promisify(execFile);
 function findProjectRoot(from: string): string {
@@ -44,6 +46,7 @@ export interface ProductionRunnerOptions {
   cyrinxSettleForTests?: BridgeServerOptions['cyrinxSettle'];
   fipsConfigOutput?: string;
   createBridgeServerForTests?: typeof createBridgeServer;
+  createImageTransferForTests?: typeof createImageTransfer;
   afterBridgeStartedForTests?: () => Promise<void>;
 }
 export interface PublicRunnerConfig extends PublicDemoConfig { readonly reportTarget: string; }
@@ -96,6 +99,28 @@ export function renderFipsConfig(config: DemoConfig): string {
     'node:',
     '  identity:',
     `    nsec: "${config.identity.nsec}"`,
+    // FIPS defaults target ordinary network links (10 s heartbeat, 30 s dead
+    // timeout, 1 s handshake resend). A complete packet can legitimately take
+    // longer than that over the audible stop-and-wait transport, so those
+    // defaults otherwise remove a correctly authenticated peer mid-demo.
+    '  heartbeat_interval_secs: 60',
+    '  link_dead_timeout_secs: 600',
+    // The default 120-second rekey begins while the first slow acoustic data
+    // packet is still crossing the room. Keep rekey enabled, but move its
+    // timer outside the rehearsed demo window so it cannot starve user data.
+    '  rekey:',
+    '    enabled: true',
+    '    after_secs: 3600',
+    '    after_messages: 65536',
+    '  rate_limit:',
+    '    handshake_timeout_secs: 300',
+    '    handshake_resend_interval_ms: 15000',
+    '    handshake_resend_backoff: 2.0',
+    '    handshake_max_resends: 8',
+    '  mmp:',
+    '    mode: minimal',
+    '  session_mmp:',
+    '    mode: minimal',
     '  control:',
     '    enabled: true',
     `    socket_path: "${config.fips.controlSocketPath}"`,
@@ -125,8 +150,8 @@ export function renderFipsConfig(config: DemoConfig): string {
     '    addresses:',
     '      - transport: sound',
     `        addr: "sound-${config.inputRole === 'a' ? 'b' : 'a'}"`,
-    '    connect_policy: auto_connect',
-    '    auto_reconnect: true',
+    `    connect_policy: ${config.role === 'A' ? 'auto_connect' : 'manual'}`,
+    `    auto_reconnect: ${config.role === 'A' ? 'true' : 'false'}`,
     '    via_nostr: false',
     '',
   ].join('\n');
@@ -215,6 +240,14 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
   const bridgeOptions: BridgeServerOptions = {
     host: options.host ?? LOOPBACK_HOST, port: runtimePort, artifactDir: path.join(PROJECT_ROOT, '.artifacts', 'qualification'),
     uiDir: options.uiDir ?? path.join(PROJECT_ROOT, 'dist', 'modem-ui'), qualificationConfig: config,
+    // FIPS can enqueue a short burst while acoustic delivery is intentionally
+    // slow. Keep admitted packets current for the server's maximum bounded
+    // interval instead of applying the generic 5-second media-queue age.
+    // A proof response plus six image bands can arrive as a short FIPS burst
+    // while the browser drains one deliberately slow acoustic packet at a
+    // time. Bound by bytes and age, but do not disconnect the FIPS endpoint
+    // merely because more than 32 small packets are awaiting sound playback.
+    packetQueueLimits: { maxItems: 256, maxBytes: 256 * 1024, maxAgeMs: 600_000 },
     reportAuthority: { tunEvidence, build: { commit: build.commit, os: build.os, architecture: build.architecture } },
     codecAssetDir, codecAssets,
     ...(options.reportWriterForTests ? { reportWriter: options.reportWriterForTests } : {}),
@@ -229,10 +262,10 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
   try {
     const control = createFipsControlClient({ socketPath: demoConfig.fips.controlSocketPath });
     owner.register('fips-control', control.close);
-    const imageTransfer = createImageTransfer({
+    const imageTransfer = (options.createImageTransferForTests ?? createImageTransfer)({
       role: demoConfig.role,
       localIpv6: demoConfig.fips.ipv6Address,
-      peerIpv6: demoConfig.fips.targetIpv6,
+      peerIpv6,
     });
     owner.register('image-transfer', imageTransfer.close);
     let bridge: Awaited<ReturnType<typeof createBridgeServer>> | undefined;
@@ -266,13 +299,42 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
     });
     bridgeOptions.proofController = {
       role: demoConfig.role,
+      peerStatus: async () => projectPublicPeerExecution(await proof.peerStatus()),
       status: async () => projectPublicProofExecution(await proof.status()),
       ping: async () => projectPublicProofExecution(await proof.ping()),
     };
     bridgeOptions.imageTransfer = imageTransfer;
     bridge = await (options.createBridgeServerForTests ?? createBridgeServer)(bridgeOptions);
     owner.register('bridge', bridge.close);
+    // Role A owns the initial acoustic transmit turn. Keep it as the one
+    // reconnect initiator, while Role B's daemon is configured manual/passive.
+    // A second initiator can promote crossed Noise handshakes whose keys do
+    // not match even though both peer tables independently say connected.
+    if (demoConfig.role === 'A') {
+      const peerReconciler = createFipsPeerReconciler({
+        control,
+        peer: {
+          npub: demoConfig.fips.expectedPeerPublicKey,
+          address: 'sound-b',
+          transport: 'sound',
+        },
+        acousticReady: () => bridge?.state().acousticReady ?? false,
+      });
+      owner.register('fips-peer-reconciler', peerReconciler.close);
+    }
     if (options.fipsConfigOutput && fipsConfig) await publishFipsConfig(options.fipsConfigOutput, fipsConfig);
+    if (demoConfig.role === 'A') {
+      const imageSender = startAuthenticatedImageSender({
+        // A connected row for the expected npub is the authenticated FIPS
+        // peer link. End-to-end sessions are send-path state, so the fixed
+        // image must be allowed to create that session.
+        peerReady: async () => (await proof.peerStatus()).peerReady,
+        send: async () => {
+          await imageTransfer.send(FIXED_DEMO_IMAGE_WIDTH, FIXED_DEMO_IMAGE_HEIGHT, fixedDemoImageRaster());
+        },
+      });
+      owner.register('authenticated-image-sender', async () => imageSender.close());
+    }
     if (demoConfig.role === 'B') {
       const responder = createIsolationResponder({
         now: () => Date.now(), host: demoConfig.fips.ipv6Address, port: demoConfig.proof.port,
@@ -284,8 +346,8 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
           const links = (linkData as { links: readonly { link_id: number; transport_id: number; state: string }[] }).links;
           const transports = (transportData as { transports: readonly { transport_id: number; type: string; state: string; stats: Readonly<Record<string, unknown>> }[] }).transports;
           const peer = peers.find((item) => item.npub === demoConfig.fips.expectedPeerPublicKey && item.connectivity === 'connected' && item.transport_type === 'sound');
-          const link = peer && links.find((item) => item.link_id === peer.link_id && item.state === 'active');
-          const transport = link && transports.find((item) => item.transport_id === link.transport_id && item.type === 'sound' && item.state === 'active');
+          const link = peer && links.find((item) => item.link_id === peer.link_id && item.state === 'connected');
+          const transport = link && transports.find((item) => item.transport_id === link.transport_id && item.type === 'sound' && item.state === 'up');
           if (!peer || !link || !transport || transport.stats.worker_up !== true || transport.stats.acoustic_ready !== true || transport.stats.epoch !== state.epoch) throw new Error('snapshot_invalid');
           return { expectedPeerPublicKey: demoConfig.fips.expectedPeerPublicKey, targetIpv6: demoConfig.fips.ipv6Address, build: build.commit, epoch: state.epoch, settingsId, observedAtMs: Date.now(), transport: { transportId: transport.transport_id, type: 'sound' as const, state: 'active' as const, workerUp: true as const, acousticReady: true as const }, link: { linkId: link.link_id, peerPublicKey: peer.npub } };
         },

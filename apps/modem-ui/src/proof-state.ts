@@ -53,8 +53,8 @@ export function parseProofSnapshot(value: unknown): Readonly<{ snapshot?: ProofS
   const stats = transportInput?.stats as Record<string, unknown> | undefined;
   const counter = (key: string): number | null => stats && key in stats ? nullableCount(stats[key]) ?? null : null;
   const peer = Object.freeze({ identity: peerInput ? peerInput.npub as string : 'Waiting for a current snapshot', verified: peerInput?.connectivity === 'connected' && peerInput?.transport_type === 'sound' });
-  const link = Object.freeze({ id: linkInput ? linkInput.link_id as number : null, verified: linkInput?.state === 'active' && peerInput?.link_id === linkInput?.link_id });
-  const transport = Object.freeze({ epoch: counter('epoch'), verified: transportInput?.type === 'sound' && transportInput?.state === 'active' && stats?.worker_up === true && stats?.acoustic_ready === true });
+  const link = Object.freeze({ id: linkInput ? linkInput.link_id as number : null, verified: linkInput?.state === 'connected' && peerInput?.link_id === linkInput?.link_id });
+  const transport = Object.freeze({ epoch: counter('epoch'), verified: transportInput?.type === 'sound' && transportInput?.state === 'up' && stats?.worker_up === true && stats?.acoustic_ready === true });
   const snapshot = Object.freeze({ pingReady: input.pingReady && join.pingReady && input.reason === 'ready' && join.reason === 'ready', reason: input.reason as ProofReason, evidenceClass: input.evidenceClass as ProofEvidenceClass, peer, link, transport, isolationVerified: input.reason === 'ready', counters: Object.freeze({ completeTx: counter('complete_tx'), completeRx: counter('complete_rx'), acousticTx: counter('acoustic_tx'), acousticRx: counter('acoustic_rx'), fragmentsTx: counter('fragments_tx'), fragmentsRx: counter('fragments_rx'), integrityFailures: counter('integrity_failures'), retries: counter('retries') }) });
   return input.result ? Object.freeze({ snapshot, outcome: parseResult(input.result)! }) : Object.freeze({ snapshot });
 }

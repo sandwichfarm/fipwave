@@ -18,13 +18,44 @@ class ControlSocket extends Duplex {
 }
 
 describe('FIPS control client', () => {
-  it('only sends exact allowlisted newline-delimited read-only commands', async () => {
+  it('sends exact allowlisted newline-delimited commands', async () => {
     const socket = new ControlSocket('{"status":"ok","data":{"peers":[]}}\n');
     const client = createFipsControlClient({ socketPath: '/run/fips/control.sock', connect: () => socket });
 
     await expect(client.query('peers')).resolves.toEqual({ peers: [] });
     expect(Buffer.concat(socket.writes).toString('utf8')).toBe('{"command":"show_peers"}\n');
     await expect(client.query('show_status' as never)).rejects.toMatchObject({ code: 'query_invalid' });
+    await client.close();
+  });
+
+  it('reads the authoritative end-to-end FIPS session state', async () => {
+    const session = {
+      npub: 'npub1f49ke5fkzqev4x7j46uajq92f4zan6kcpty5yvm5c3g6wf2dqanqn7qsy2',
+      state: 'established',
+      is_initiator: true,
+    };
+    const socket = new ControlSocket(`{"status":"ok","data":{"sessions":[${JSON.stringify(session)}]}}\n`);
+    const client = createFipsControlClient({ socketPath: '/run/fips/control.sock', connect: () => socket });
+
+    await expect(client.query('sessions')).resolves.toEqual({
+      sessions: [{ npub: session.npub, state: 'established' }],
+    });
+    expect(Buffer.concat(socket.writes).toString('utf8')).toBe('{"command":"show_sessions"}\n');
+    await client.close();
+  });
+
+  it('initiates only the fixed sound peer and validates the echoed authority', async () => {
+    const peer = {
+      npub: 'npub1f49ke5fkzqev4x7j46uajq92f4zan6kcpty5yvm5c3g6wf2dqanqn7qsy2',
+      address: 'sound-b',
+      transport: 'sound',
+    } as const;
+    const socket = new ControlSocket(`{"status":"ok","data":${JSON.stringify(peer)}}\n`);
+    const client = createFipsControlClient({ socketPath: '/run/fips/control.sock', connect: () => socket });
+
+    await expect(client.connectPeer(peer)).resolves.toEqual(peer);
+    expect(Buffer.concat(socket.writes).toString('utf8')).toBe(`${JSON.stringify({ command: 'connect', params: peer })}\n`);
+    await expect(client.connectPeer({ ...peer, address: '127.0.0.1:2121' } as never)).rejects.toMatchObject({ code: 'query_invalid' });
     await client.close();
   });
 

@@ -641,7 +641,11 @@ impl Transport for SoundTransport {
         false
     }
     fn accept_connections(&self) -> bool {
-        false
+        // The bridge can inject packets only from this transport's single
+        // configured peer address. Advertising inbound acceptance lets the
+        // passive node create an inbound FIPS link from that authenticated
+        // Noise msg1 instead of forcing both peers to dial and race.
+        true
     }
 }
 
@@ -1057,7 +1061,7 @@ mod tests {
         assert_eq!(handle.link_mtu(&peer), 1357);
         assert!(handle.discover().unwrap().is_empty());
         assert!(!handle.auto_connect());
-        assert!(!handle.accept_connections());
+        assert!(handle.accept_connections());
         assert!(matches!(
             handle.connection_state(&peer),
             ConnectionState::Failed(ref reason) if reason == "sound browser is not armed"

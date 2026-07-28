@@ -172,6 +172,14 @@ describe('production runner', () => {
     expect(rendered).toContain('transport: sound');
     expect(rendered).toContain('addr: "sound-b"');
     expect(rendered).toContain('connect_policy: auto_connect');
+    expect(rendered).toContain('auto_reconnect: true');
+    expect(rendered).toContain('heartbeat_interval_secs: 60');
+    expect(rendered).toContain('link_dead_timeout_secs: 600');
+    expect(rendered).toContain('after_secs: 3600');
+    expect(rendered).toContain('after_messages: 65536');
+    expect(rendered).toContain('handshake_timeout_secs: 300');
+    expect(rendered).toContain('handshake_resend_interval_ms: 15000');
+    expect(rendered).toContain('mode: minimal');
     expect(rendered).toContain('control:');
     expect(rendered).toContain('socket_path: "/run/fips/control.sock"');
     expect(rendered).not.toContain('peers: []');
@@ -189,6 +197,8 @@ describe('production runner', () => {
     expect(b).not.toContain('  udp:');
     expect(b.match(/^  sound:/gm)).toHaveLength(1);
     expect(b.match(/transport: sound/g)).toHaveLength(1);
+    expect(b).toContain('connect_policy: manual');
+    expect(b).toContain('auto_reconnect: false');
   });
 
   it('consumes a resolved config and closes only the bridge it successfully created', async () => {
@@ -211,6 +221,39 @@ describe('production runner', () => {
     await runner.close();
     await runner.close();
     expect(bridgeClose).toHaveBeenCalledOnce();
+  });
+
+  it('configures Role B image reception to trust Role A rather than its own target address', async () => {
+    const imageClose = vi.fn(async () => {});
+    const createImageTransfer = vi.fn(() => ({
+      role: 'B' as const,
+      send: vi.fn(async () => ({ transferId: '0000000000000000', bands: 0 })),
+      status: () => ({ transferId: null, width: 0, height: 0, receivedRows: 0, complete: false, revision: 0, bands: [] }),
+      close: imageClose,
+    }));
+    const runner = await startProductionRunner({
+      machineId: 'laptop-b',
+      report: await reportPath('image-peer-address'),
+      tunEvidence: 'none',
+      uiDir: await fixtureUi(),
+      demoConfig: resolveDemoConfig('b'),
+      createImageTransferForTests: createImageTransfer,
+      createBridgeServerForTests: async () => ({
+        port: 4_311,
+        sendPcmPlayback: () => {},
+        startCyrinx: async () => ({ codec: 'quiet', reasonCode: null, deadlineAtMs: 1 }),
+        reset: async () => 2,
+        close: async () => {},
+        state: () => ({ epoch: 1, rejectedFrames: 0, overflowedQueues: [], discontinuities: 0, queueCounts: {}, stampedResults: [], packetCounters: { browserToFips: 0, fipsToBrowser: 0 }, evidenceClass: 'Loopback', acousticReady: false, peerConnected: false, pingReady: false }),
+      }),
+    });
+    runners.push(runner);
+
+    expect(createImageTransfer).toHaveBeenCalledWith({
+      role: 'B',
+      localIpv6: resolveDemoConfig('b').fips.ipv6Address,
+      peerIpv6: resolveDemoConfig('a').fips.ipv6Address,
+    });
   });
 
   it('publishes the FIPS config atomically only after the bridge listener is ready', async () => {
@@ -861,6 +904,11 @@ describe('production runner', () => {
     await settling;
     errorInbox.socket.send(frame(MessageType.ERROR, 1, 2n));
     expect(await errorInbox.text()).toMatchObject({
+      kind: 'acoustic-capability',
+      epoch: 1,
+      capability: expect.any(String),
+    });
+    expect(await errorInbox.text()).toMatchObject({
       codec: 'quiet',
       fallback: { state: 'activated', reasonCode: 'cyrinx_cold_a_to_b_failed' },
     });
@@ -1072,6 +1120,11 @@ describe('production runner', () => {
 
     inbox.socket.send(frame(MessageType.ERROR, 1, sequence++));
     releaseFinalWrite();
+    expect(await inbox.text()).toMatchObject({
+      kind: 'acoustic-capability',
+      epoch: 1,
+      capability: expect.any(String),
+    });
     expect(await inbox.text()).toMatchObject({
       codec: 'quiet',
       stage: 'quiet',
