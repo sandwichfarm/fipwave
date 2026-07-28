@@ -34,6 +34,14 @@ test('default audience dashboard fits a 1366×768 laptop viewport without scroll
   await expect(page.getByTestId('image-sender-preview')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Send image over FIPS' })).toBeDisabled();
   await expect(page.getByText('Waiting for authenticated FIPS packet readiness')).toBeVisible();
+  const imagePlacement = await page.evaluate(() => {
+    const stage = document.querySelector<HTMLElement>('.demo-primary')!.getBoundingClientRect();
+    const image = document.querySelector<HTMLElement>('[data-testid="image-sender-preview"]')!.getBoundingClientRect();
+    return { stage: { left: stage.left, right: stage.right, bottom: stage.bottom, width: stage.width }, image: { left: image.left, right: image.right, bottom: image.bottom } };
+  });
+  expect(imagePlacement.image.left).toBeGreaterThan(imagePlacement.stage.left + imagePlacement.stage.width * 0.45);
+  expect(imagePlacement.image.right).toBeLessThanOrEqual(imagePlacement.stage.right);
+  expect(imagePlacement.image.bottom).toBeLessThanOrEqual(imagePlacement.stage.bottom);
   const network = page.locator('.demo-network-details');
   await expect(network).toHaveCSS('filter', 'blur(6px)');
   await page.getByRole('button', { name: 'Reveal FIPS details' }).click();
@@ -54,6 +62,12 @@ test('role B names the isolated node, its gateway peer, and truthful waiting sta
   await expect(page.getByText('FIPS: Waiting for acoustic readiness')).toBeVisible();
   await expect(page.getByTestId('image-receiver-canvas')).toBeVisible();
   await expect(page.getByText('Waiting for Node A to send the image')).toBeVisible();
+  const canvasInsideStage = await page.evaluate(() => {
+    const stage = document.querySelector<HTMLElement>('.demo-primary')!.getBoundingClientRect();
+    const canvas = document.querySelector<HTMLCanvasElement>('[data-testid="image-receiver-canvas"]')!.getBoundingClientRect();
+    return canvas.left > stage.left + stage.width * 0.45 && canvas.right <= stage.right && canvas.bottom <= stage.bottom;
+  });
+  expect(canvasInsideStage).toBe(true);
 });
 
 test('Debug mode retains the detailed qualification workflow', async ({ page }) => {

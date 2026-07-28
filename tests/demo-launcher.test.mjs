@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import test from 'node:test';
 
 import { composeInvocation, createDemoPlan, parseDemoArgs, parseMacAudioHardware, waitForStop } from '../scripts/demo.mjs';
+import { createLaunchPlan, parseStaggeredArgs } from '../scripts/demo-staggered.mjs';
 
 test('demo accepts only one literal role or check mode', () => {
   assert.deepEqual(parseDemoArgs(['a']), { mode: 'run', role: 'a' });
@@ -11,6 +12,17 @@ test('demo accepts only one literal role or check mode', () => {
   for (const args of [[], ['A'], ['c'], ['a', 'b'], ['--role', 'a'], ['--check', 'a']]) {
     assert.throws(() => parseDemoArgs(args), /usage/);
   }
+});
+
+test('staggered demo launches one role, waits, then launches the peer on the other port', () => {
+  assert.deepEqual(parseStaggeredArgs([]), { first: 'b', second: 'a', delayMs: 8_000 });
+  assert.deepEqual(parseStaggeredArgs(['--first', 'a', '--delay-ms', '1200']), { first: 'a', second: 'b', delayMs: 1_200 });
+  assert.deepEqual(createLaunchPlan({ first: 'b', second: 'a', delayMs: 5_000 }), [
+    { role: 'b', port: 4311, delayBeforeMs: 0 },
+    { role: 'a', port: 4310, delayBeforeMs: 5_000 },
+  ]);
+  assert.throws(() => parseStaggeredArgs(['--first', 'c']), /first role/);
+  assert.throws(() => parseStaggeredArgs(['--delay-ms', '200000']), /delay-ms/);
 });
 
 test('demo plans derive every runtime input from the role', () => {
