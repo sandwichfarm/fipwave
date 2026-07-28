@@ -98,6 +98,11 @@ export interface BridgeServer {
   port: number; sendPcmPlayback(frame: Buffer): void; startCyrinx(): Promise<{ codec: 'cyrinx' | 'quiet'; reasonCode: string | null; deadlineAtMs: number }>; reset(): Promise<number>; close(): Promise<void>; state(): BridgeState;
 }
 export interface ProofControllerApi { readonly role: 'A' | 'B'; status(): Promise<unknown>; ping(): Promise<unknown>; }
+export interface ImageTransferControllerApi {
+  readonly role: 'A' | 'B';
+  send(width: number, height: number, rgba: Buffer): Promise<unknown>;
+  status(): unknown;
+}
 export interface CyrinxWorkerRuntime {
   begin(value: CyrinxCase, epoch: number, mode: CyrinxCaseMode): Promise<Buffer | undefined>;
   receiveCapture(encoded: Buffer): Promise<CyrinxResult | undefined>;
@@ -138,6 +143,8 @@ export interface BridgeServerOptions {
   cyrinxSettle?: (delayMs: number) => Promise<void>;
   /** Runner-owned proof surface; absence is explicit 503 rather than inferred readiness. */
   proofController?: ProofControllerApi;
+  /** Runner-owned UDP/IPv6 image transfer through the shared FIPS namespace. */
+  imageTransfer?: ImageTransferControllerApi;
 }
 
 class BridgeInputError extends Error {
@@ -350,6 +357,34 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   };
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? '/', `http://${LOOPBACK_HOST}`);
+    if (url.pathname === '/image-transfer') {
+      void (async () => {
+        const address = server.address();
+        if (url.search || !address || typeof address === 'string' || request.headers.host !== `${LOOPBACK_HOST}:${address.port}`) { response.writeHead(403).end(); return; }
+        const transfer = options.imageTransfer;
+        if (!transfer) { response.writeHead(503).end(); return; }
+        if (request.method === 'GET') {
+          response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+          response.end(JSON.stringify(transfer.status()));
+          return;
+        }
+        if (request.method !== 'POST' || transfer.role !== 'A' || request.headers['content-type'] !== 'application/octet-stream') { response.writeHead(transfer.role === 'B' ? 403 : 405).end(); return; }
+        if (!isSameOriginLoopback(request.headers.origin, address.port)) { response.writeHead(403).end(); return; }
+        const chunks: Buffer[] = []; let size = 0;
+        request.on('data', (chunk: Buffer) => { size += chunk.byteLength; if (size <= 4 + 96 * 96 * 4) chunks.push(Buffer.from(chunk)); });
+        await new Promise<void>((resolve) => request.once('end', resolve));
+        const body = Buffer.concat(chunks);
+        if (size !== body.byteLength || body.byteLength < 8) { response.writeHead(400).end(); return; }
+        const width = body.readUInt16LE(0); const height = body.readUInt16LE(2);
+        if (body.readUInt32LE(4) !== 0) { response.writeHead(400).end(); return; }
+        try {
+          const result = await transfer.send(width, height, body.subarray(8));
+          response.writeHead(202, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+          response.end(JSON.stringify(result));
+        } catch { response.writeHead(400).end(); }
+      })().catch(() => { if (!response.headersSent) response.writeHead(503); response.end(); });
+      return;
+    }
     if (url.pathname === '/proof-status' || url.pathname === '/proof-ping') {
       void (async () => {
         const address = server.address();

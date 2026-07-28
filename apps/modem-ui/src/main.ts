@@ -12,6 +12,7 @@ import { CyrinxCaseWatchdog, sameCyrinxBrowserCase, type CyrinxBrowserCase } fro
 import { CyrinxQualificationSession, type CyrinxSessionSnapshot } from './qualification-session.js';
 import { safeConfigReason, safeUiReason } from './ui-errors.js';
 import { reduceProofState, type ProofState } from './proof-state.js';
+import { DEMO_IMAGE_DATA_URL, DEMO_IMAGE_HEIGHT, DEMO_IMAGE_WIDTH, decodeBand, demoImageRaster, type ImageTransferSnapshot } from './demo-image.js';
 import {
   QUIET_PROFILE,
   QuietClient,
@@ -71,6 +72,9 @@ let proofState: ProofState = reduceProofState(undefined, { type: 'snapshot', val
 let proofRequest: Promise<void> | undefined;
 let acousticCapability: Readonly<{ epoch: number; bytes: Uint8Array }> | undefined;
 let fipsDetailsRevealed = false;
+let imageTransfer: ImageTransferSnapshot = Object.freeze({ transferId: null, width: 0, height: 0, receivedRows: 0, complete: false, revision: 0, bands: Object.freeze([]) });
+let imageTransferSending = false;
+let imageTransferMessage = 'Waiting for the authenticated FIPS link';
 type MeasuredProbe = Readonly<{ received: true; bytePerfect: true; corrupt: false; missing: false; duplicate: false; discontinuity: boolean; latencyMs: undefined; signalDb: undefined; clipping: undefined; confidence: 1 }>;
 const receivedProbes = new Map<string, MeasuredProbe>();
 function probeReceiptKey(sessionId: bigint, direction: number, candidateIndex: number, probeIndex: number): string {
@@ -810,6 +814,51 @@ async function runSoundProofPing(): Promise<void> {
   return proofRequest;
 }
 
+async function sendDemoImage(): Promise<void> {
+  if (runnerConfig?.role !== 'A' || proofState.mode !== 'ready' || proofState.needsRefresh || imageTransferSending) return;
+  imageTransferSending = true; imageTransferMessage = 'Preparing fixed FIPS image…'; render();
+  try {
+    const rgba = await demoImageRaster();
+    const body = new ArrayBuffer(8 + rgba.byteLength);
+    const view = new DataView(body);
+    view.setUint16(0, DEMO_IMAGE_WIDTH, true); view.setUint16(2, DEMO_IMAGE_HEIGHT, true);
+    new Uint8Array(body, 8).set(rgba);
+    imageTransferMessage = 'Sending image bands through FIPS…'; render();
+    const response = await fetch('/image-transfer', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body, credentials: 'same-origin' });
+    if (!response.ok) throw new Error('image_transfer_failed');
+    const result = await response.json() as { bands?: unknown };
+    imageTransferMessage = `Image queued over FIPS · ${typeof result.bands === 'number' ? result.bands : '?'} bands`;
+  } catch {
+    imageTransferMessage = 'Image transfer failed — verify the current FIPS link and retry';
+  } finally { imageTransferSending = false; render(); }
+}
+
+async function refreshImageTransfer(): Promise<void> {
+  if (runnerConfig?.role !== 'B') return;
+  try {
+    const response = await fetch('/image-transfer', { cache: 'no-store', credentials: 'same-origin' });
+    if (!response.ok) return;
+    const next = await response.json() as ImageTransferSnapshot;
+    if (next.revision !== imageTransfer.revision) {
+      imageTransfer = next;
+      imageTransferMessage = next.complete ? 'Image received over FIPS' : `Loading over FIPS · ${next.receivedRows}/${next.height} rows`;
+      render();
+    }
+  } catch { /* The normal link status remains the recovery authority. */ }
+}
+
+function paintReceivedImage(canvas: HTMLCanvasElement): void {
+  if (!imageTransfer.width || !imageTransfer.height) return;
+  canvas.width = imageTransfer.width; canvas.height = imageTransfer.height;
+  const context = canvas.getContext('2d');
+  if (!context) return;
+  context.fillStyle = '#071018'; context.fillRect(0, 0, canvas.width, canvas.height);
+  for (const band of imageTransfer.bands) {
+    const bytes = decodeBand(band.rgbaBase64);
+    context.putImageData(new ImageData(bytes, imageTransfer.width, band.rows), 0, band.y);
+  }
+}
+
 type DemoStage = Readonly<{ label: string; explanation: string; tone: 'idle' | 'working' | 'ready' | 'warning' | 'error' }>;
 function demoStage(): DemoStage {
   if (resetFailure || uiState === 'failed') return { label: 'Error', explanation: 'Check the microphone or browser permission, then reset this node.', tone: 'error' };
@@ -964,6 +1013,24 @@ function renderDemo(): void {
   else for (const entry of stageTiming.completed.slice(-4)) stageLog.append(demoStatus(`${entry.label} · ${formatDemoDuration(entry.durationMs)}`));
   activity.append(stageLog);
   grid.append(activity);
+
+  if (proofReady || imageTransfer.transferId) {
+    const imageCard = element('section'); imageCard.className = 'demo-card demo-image-transfer'; imageCard.dataset.testid = 'image-transfer';
+    imageCard.append(element('h2', 'Image over FIPS'));
+    if (role === 'A') {
+      const preview = document.createElement('img'); preview.src = DEMO_IMAGE_DATA_URL; preview.alt = 'FIPS network banner'; preview.dataset.testid = 'image-sender-preview';
+      imageCard.append(preview, demoStatus('Full image · local source'));
+      const sendImage = control('Send image over FIPS', sendDemoImage, imageTransferSending);
+      if (imageTransferSending) sendImage.setAttribute('aria-busy', 'true');
+      imageCard.append(sendImage, demoStatus(imageTransferMessage, imageTransferSending));
+    } else {
+      const canvas = document.createElement('canvas'); canvas.setAttribute('aria-label', 'FIPS image progressively received over the sound link'); canvas.dataset.testid = 'image-receiver-canvas';
+      paintReceivedImage(canvas);
+      imageCard.append(canvas, demoStatus(imageTransfer.transferId ? imageTransferMessage : 'Waiting for Node A to send the image', Boolean(imageTransfer.transferId && !imageTransfer.complete)));
+      const progress = document.createElement('progress'); progress.max = Math.max(1, imageTransfer.height); progress.value = imageTransfer.receivedRows; progress.setAttribute('aria-label', 'Image transfer progress'); imageCard.append(progress);
+    }
+    grid.append(imageCard);
+  }
 
   const next = element('section'); next.className = 'demo-card demo-next';
   const nextCopyBlock = element('div'); nextCopyBlock.className = 'demo-next-copy'; nextCopyBlock.append(element('h2', 'Next action'));
@@ -1412,3 +1479,4 @@ window.setInterval(() => {
   render();
 }, 250);
 window.setInterval(() => { if (!developmentDiagnostic && !debugMode && !proofRequest) void refreshProofStatus(); }, 5_000);
+window.setInterval(() => { if (!developmentDiagnostic && !debugMode) void refreshImageTransfer(); }, 750);

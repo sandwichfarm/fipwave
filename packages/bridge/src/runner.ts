@@ -15,6 +15,7 @@ import { CYRINX_DEADLINE_MS, QUIET_CODEC, TUN_EVIDENCE_CHECKS, validateTunEviden
 import { createFipsControlClient } from './fips-control-client.js';
 import { createProofController, projectPublicProofExecution } from './proof-controller.js';
 import { createIsolationResponder, requestIsolationAttestation } from './isolation-attestation.js';
+import { createImageTransfer } from './image-transfer.js';
 
 const execFileAsync = promisify(execFile);
 function findProjectRoot(from: string): string {
@@ -228,6 +229,12 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
   try {
     const control = createFipsControlClient({ socketPath: demoConfig.fips.controlSocketPath });
     owner.register('fips-control', control.close);
+    const imageTransfer = createImageTransfer({
+      role: demoConfig.role,
+      localIpv6: demoConfig.fips.ipv6Address,
+      peerIpv6: demoConfig.fips.targetIpv6,
+    });
+    owner.register('image-transfer', imageTransfer.close);
     let bridge: Awaited<ReturnType<typeof createBridgeServer>> | undefined;
     const settingsId = demoConfig.calibrationCandidates[0]?.profileId;
     if (!settingsId) fail('startup failed');
@@ -262,6 +269,7 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
       status: async () => projectPublicProofExecution(await proof.status()),
       ping: async () => projectPublicProofExecution(await proof.ping()),
     };
+    bridgeOptions.imageTransfer = imageTransfer;
     bridge = await (options.createBridgeServerForTests ?? createBridgeServer)(bridgeOptions);
     owner.register('bridge', bridge.close);
     if (options.fipsConfigOutput && fipsConfig) await publishFipsConfig(options.fipsConfigOutput, fipsConfig);
