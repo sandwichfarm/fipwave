@@ -31,6 +31,9 @@ test('default audience dashboard fits a 1366×768 laptop viewport without scroll
   await expect(page.getByRole('heading', { name: 'Idle' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Start / Connect' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Debug' })).toBeVisible();
+  await expect(page.getByTestId('image-sender-preview')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Send image over FIPS' })).toBeDisabled();
+  await expect(page.getByText('Waiting for authenticated FIPS packet readiness')).toBeVisible();
   const network = page.locator('.demo-network-details');
   await expect(network).toHaveCSS('filter', 'blur(6px)');
   await page.getByRole('button', { name: 'Reveal FIPS details' }).click();
@@ -49,6 +52,8 @@ test('role B names the isolated node, its gateway peer, and truthful waiting sta
   await expect(page.getByText('Node A · Wi-Fi gateway peer')).toBeVisible();
   await expect(page.getByText('Acoustic: Not started')).toBeVisible();
   await expect(page.getByText('FIPS: Waiting for acoustic readiness')).toBeVisible();
+  await expect(page.getByTestId('image-receiver-canvas')).toBeVisible();
+  await expect(page.getByText('Waiting for Node A to send the image')).toBeVisible();
 });
 
 test('Debug mode retains the detailed qualification workflow', async ({ page }) => {

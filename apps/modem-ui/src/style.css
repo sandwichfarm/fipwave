@@ -108,12 +108,12 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .demo-stage-log h3 { grid-column: 1 / -1; margin: 0; color: #94a3b8; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
 .demo-stage-log p { margin: 0; color: #cbd5e1; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .demo-next { grid-column: 1 / -1; border-color: #0ea5e9; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 10px 14px; }
-.demo-image-transfer { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 298px) minmax(180px, 1fr); align-items: center; gap: 8px 18px; border-color: #22c55e; }
-.demo-image-transfer h2 { grid-column: 1 / -1; }
+.demo-image-transfer { position: absolute; z-index: 2; right: clamp(18px, 3vw, 44px); bottom: clamp(14px, 2vh, 22px); width: min(47%, 520px); display: grid; grid-template-columns: minmax(0, 298px) minmax(150px, 1fr); align-items: center; gap: 5px 14px; }
+.demo-image-transfer h2 { grid-column: 1 / -1; margin: 0; font-size: 13px; color: #7dd3fc; text-transform: uppercase; letter-spacing: .1em; }
 .demo-image-transfer img, .demo-image-transfer canvas { width: min(100%, 596px); height: auto; aspect-ratio: 149 / 53; border: 1px solid rgba(125, 211, 252, .35); border-radius: 8px; background: #071018; image-rendering: auto; }
 .demo-image-transfer img, .demo-image-transfer canvas { grid-row: span 3; }
 .demo-image-transfer progress { width: 100%; accent-color: #22c55e; }
-.demo-image-transfer button { width: max-content; margin: 0; }
+.demo-image-transfer button { width: max-content; min-height: 32px; margin: 0; padding: 5px 9px; }
 .demo-next-copy { min-width: 0; }
 .demo-next-copy h2 { margin-bottom: 2px; }
 .demo-next-copy > p { margin: 0; color: #dbeafe; font-size: 13px; }
@@ -127,7 +127,7 @@ dd { margin: 0; overflow-wrap: anywhere; }
   .demo-primary, .demo-grid, .demo-footer { margin-top: 12px; }
   .demo-grid { grid-template-columns: 1fr; }
   .demo-next { grid-column: auto; display: block; }
-  .demo-image-transfer { grid-column: auto; display: block; }
+  .demo-image-transfer { position: relative; right: auto; bottom: auto; width: auto; display: block; margin-top: 14px; }
   .demo-image-transfer > * { margin-top: 8px; }
   .demo-next-actions { justify-content: stretch; }
   .demo-next button { width: 100%; margin-left: 0; }

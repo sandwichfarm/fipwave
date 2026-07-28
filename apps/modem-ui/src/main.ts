@@ -202,7 +202,14 @@ function sendAcousticControl(type: 12 | 13, controlEpoch: number): boolean {
   if (!socket || socket.readyState !== WebSocket.OPEN || !acousticCapability || acousticCapability.epoch !== controlEpoch) return false;
   const payload = type === 12 ? readinessPayload(controlEpoch) : acousticCapability.bytes;
   if (!payload) return false;
-  try { socket.send(encodeControlFrame({ type, epoch: controlEpoch, sequence: 0n, payload })); return true; }
+  try {
+    socket.send(encodeControlFrame({ type, epoch: controlEpoch, sequence: 0n, payload }));
+    // DISARM consumes the current capability. The runner asynchronously
+    // returns a replacement; retaining this value lets a fast recovery send
+    // READY with the already-consumed capability and closes the bridge.
+    if (type === 13) acousticCapability = undefined;
+    return true;
+  }
   catch { return false; }
 }
 
@@ -950,7 +957,7 @@ function renderDemo(): void {
   const stageTimer = element('p', `Elapsed ${formatDemoDuration(stageTiming.elapsedMs)}`); stageTimer.className = 'demo-stage-timer'; stageTimer.dataset.testid = 'stage-timer';
   stageHeader.append(stageTitle, stageTimer); primary.append(stageHeader);
   const stageName = element('h2', stage.label); stageName.id = 'demo-stage'; primary.append(stageName, element('p', stage.explanation));
-  if (acoustic?.ready) {
+  if (acoustic?.ready && !role) {
     const packetHero = element('div'); packetHero.className = 'demo-packet-hero'; packetHero.dataset.testid = 'fips-packet-hero';
     const packetLabel = element('p', 'FIPS packets'); packetLabel.className = 'demo-packet-label';
     const packetValues = element('div'); packetValues.className = 'demo-packet-values';
@@ -959,6 +966,29 @@ function renderDemo(): void {
     packetValues.append(tx, rx); packetHero.append(packetLabel, packetValues); primary.append(packetHero);
   }
   const stageState = demoStatus(`Status: ${stage.label}`, stage.tone === 'working'); stageState.setAttribute('role', stage.tone === 'error' ? 'alert' : 'status'); stageState.setAttribute('aria-live', stage.tone === 'error' ? 'assertive' : 'polite'); primary.append(stageState);
+  if (role) {
+    const imageCard = element('section'); imageCard.className = 'demo-image-transfer'; imageCard.dataset.testid = 'image-transfer';
+    imageCard.append(element('h2', 'Image over FIPS'));
+    if (role === 'A') {
+      const preview = document.createElement('img'); preview.src = DEMO_IMAGE_DATA_URL; preview.alt = 'FIPS network banner'; preview.dataset.testid = 'image-sender-preview';
+      imageCard.append(preview, demoStatus('Full image · local source'));
+      const sendImage = control('Send image over FIPS', sendDemoImage, !proofReady || imageTransferSending);
+      if (imageTransferSending) sendImage.setAttribute('aria-busy', 'true');
+      imageCard.append(
+        sendImage,
+        demoStatus(
+          proofReady ? imageTransferMessage : 'Waiting for authenticated FIPS packet readiness',
+          imageTransferSending,
+        ),
+      );
+    } else {
+      const canvas = document.createElement('canvas'); canvas.setAttribute('aria-label', 'FIPS image progressively received over the sound link'); canvas.dataset.testid = 'image-receiver-canvas';
+      paintReceivedImage(canvas);
+      imageCard.append(canvas, demoStatus(imageTransfer.transferId ? imageTransferMessage : 'Waiting for Node A to send the image', Boolean(imageTransfer.transferId && !imageTransfer.complete)));
+      const progress = document.createElement('progress'); progress.max = Math.max(1, imageTransfer.height); progress.value = imageTransfer.receivedRows; progress.setAttribute('aria-label', 'Image transfer progress'); imageCard.append(progress);
+    }
+    primary.append(imageCard);
+  }
   shell.append(primary);
 
   const grid = element('div'); grid.className = 'demo-grid';
@@ -1013,24 +1043,6 @@ function renderDemo(): void {
   else for (const entry of stageTiming.completed.slice(-4)) stageLog.append(demoStatus(`${entry.label} · ${formatDemoDuration(entry.durationMs)}`));
   activity.append(stageLog);
   grid.append(activity);
-
-  if (proofReady || imageTransfer.transferId) {
-    const imageCard = element('section'); imageCard.className = 'demo-card demo-image-transfer'; imageCard.dataset.testid = 'image-transfer';
-    imageCard.append(element('h2', 'Image over FIPS'));
-    if (role === 'A') {
-      const preview = document.createElement('img'); preview.src = DEMO_IMAGE_DATA_URL; preview.alt = 'FIPS network banner'; preview.dataset.testid = 'image-sender-preview';
-      imageCard.append(preview, demoStatus('Full image · local source'));
-      const sendImage = control('Send image over FIPS', sendDemoImage, imageTransferSending);
-      if (imageTransferSending) sendImage.setAttribute('aria-busy', 'true');
-      imageCard.append(sendImage, demoStatus(imageTransferMessage, imageTransferSending));
-    } else {
-      const canvas = document.createElement('canvas'); canvas.setAttribute('aria-label', 'FIPS image progressively received over the sound link'); canvas.dataset.testid = 'image-receiver-canvas';
-      paintReceivedImage(canvas);
-      imageCard.append(canvas, demoStatus(imageTransfer.transferId ? imageTransferMessage : 'Waiting for Node A to send the image', Boolean(imageTransfer.transferId && !imageTransfer.complete)));
-      const progress = document.createElement('progress'); progress.max = Math.max(1, imageTransfer.height); progress.value = imageTransfer.receivedRows; progress.setAttribute('aria-label', 'Image transfer progress'); imageCard.append(progress);
-    }
-    grid.append(imageCard);
-  }
 
   const next = element('section'); next.className = 'demo-card demo-next';
   const nextCopyBlock = element('div'); nextCopyBlock.className = 'demo-next-copy'; nextCopyBlock.append(element('h2', 'Next action'));
