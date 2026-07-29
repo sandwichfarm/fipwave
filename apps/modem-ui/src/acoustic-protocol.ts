@@ -9,6 +9,7 @@ export const FAS1_MAX_BODY_BYTES = 217;
 export const FAS1_MAX_UNIT_BYTES = FAS1_HEADER_BYTES + FAS1_MAX_BODY_BYTES;
 export const FAS1_MAX_PACKET_BYTES = 1357;
 export const FAS1_MAX_FRAGMENTS = 16;
+export const FAS1_PARITY_GROUP_SIZE = 4;
 
 export enum Fas1UnitType {
   Hello = 1,
@@ -23,6 +24,7 @@ export enum Fas1UnitType {
   Ack = 10,
   Heartbeat = 11,
   Reset = 12,
+  Parity = 13,
 }
 
 /** CRC-bound sender identity for rejecting a laptop's own speaker loopback. */
@@ -103,7 +105,7 @@ function fail(message: string): never {
 }
 
 function isUnitType(value: number): value is Fas1UnitType {
-  return Number.isInteger(value) && value >= Fas1UnitType.Hello && value <= Fas1UnitType.Reset;
+  return Number.isInteger(value) && value >= Fas1UnitType.Hello && value <= Fas1UnitType.Parity;
 }
 
 function assertInteger(value: number, maximum: number, name: string): void {
@@ -139,14 +141,16 @@ function validateUnit(input: Fas1Unit): void {
   assertInteger(input.packetLength, 0xffff, 'packet length');
   assertBody(input.body);
 
-  if (input.type === Fas1UnitType.Data) {
-    if (input.sessionId === 0n) fail('DATA requires an active session');
-    if (input.packetId === 0) fail('DATA requires a packet ID');
-    if (input.fragmentCount < 1 || input.fragmentCount > FAS1_MAX_FRAGMENTS) fail('DATA fragment count is invalid');
-    if (input.fragmentIndex >= input.fragmentCount) fail('DATA fragment index is invalid');
-    if (input.packetLength < 1 || input.packetLength > FAS1_MAX_PACKET_BYTES) fail('DATA packet length is invalid');
-    if (input.body.byteLength < 1) fail('DATA body must not be empty');
-    if (input.body.byteLength > input.packetLength) fail('DATA body exceeds declared packet length');
+  if (input.type === Fas1UnitType.Data || input.type === Fas1UnitType.Parity) {
+    const label = input.type === Fas1UnitType.Data ? 'DATA' : 'PARITY';
+    if (input.sessionId === 0n) fail(`${label} requires an active session`);
+    if (input.packetId === 0) fail(`${label} requires a packet ID`);
+    if (input.fragmentCount < 1 || input.fragmentCount > FAS1_MAX_FRAGMENTS) fail(`${label} fragment count is invalid`);
+    if (input.fragmentIndex >= input.fragmentCount) fail(`${label} fragment index is invalid`);
+    if (input.type === Fas1UnitType.Parity && input.fragmentIndex % FAS1_PARITY_GROUP_SIZE !== 0) fail('PARITY group start is invalid');
+    if (input.packetLength < 1 || input.packetLength > FAS1_MAX_PACKET_BYTES) fail(`${label} packet length is invalid`);
+    if (input.body.byteLength < 1) fail(`${label} body must not be empty`);
+    if (input.body.byteLength > input.packetLength) fail(`${label} body exceeds declared packet length`);
     return;
   }
 
@@ -326,6 +330,103 @@ export function fragmentPacket(input: FragmentPacketInput): Fas1Unit[] {
     packetLength: input.packet.byteLength,
     body: input.packet.slice(fragmentIndex * payloadBytes, (fragmentIndex + 1) * payloadBytes),
   }));
+}
+
+function fragmentBodyLength(packetLength: number, fragmentCount: number, fragmentIndex: number, payloadBytes: number): number {
+  const expectedCount = Math.ceil(packetLength / payloadBytes);
+  if (fragmentCount !== expectedCount || fragmentIndex < 0 || fragmentIndex >= fragmentCount) fail('fragment geometry is invalid');
+  return fragmentIndex === expectedCount - 1
+    ? packetLength - payloadBytes * (expectedCount - 1)
+    : payloadBytes;
+}
+
+/**
+ * Adds one XOR erasure unit per four DATA fragments. Quiet's FEC handles
+ * errors within a decoded frame; this parity recovers one entire rejected or
+ * missing FAS1 frame in each group without another acoustic turn.
+ */
+export function createParityUnits(fragments: readonly Fas1Unit[], payloadBytes = FAS1_MAX_BODY_BYTES): Fas1Unit[] {
+  if (!Array.isArray(fragments) || fragments.length < 1 || fragments.length > FAS1_MAX_FRAGMENTS) fail('parity fragment collection is invalid');
+  assertInteger(payloadBytes, FAS1_MAX_BODY_BYTES, 'payload bytes');
+  if (payloadBytes < 1) fail('payload bytes are invalid');
+  const first = fragments[0]!;
+  validateUnit(first);
+  if (first.type !== Fas1UnitType.Data || first.fragmentCount !== fragments.length || first.fragmentCount !== Math.ceil(first.packetLength / payloadBytes)) fail('parity fragment geometry is invalid');
+  const byIndex = new Map<number, Fas1Unit>();
+  for (const fragment of fragments) {
+    validateUnit(fragment);
+    if (fragment.type !== Fas1UnitType.Data || fragment.sessionId !== first.sessionId || fragment.flags !== first.flags || fragment.packetId !== first.packetId || fragment.packetLength !== first.packetLength || fragment.fragmentCount !== first.fragmentCount) fail('parity fragments do not match');
+    if (fragment.body.byteLength !== fragmentBodyLength(first.packetLength, first.fragmentCount, fragment.fragmentIndex, payloadBytes) || byIndex.has(fragment.fragmentIndex)) fail('parity fragment body geometry is invalid');
+    byIndex.set(fragment.fragmentIndex, fragment);
+  }
+  if (byIndex.size !== fragments.length) fail('parity fragment collection is incomplete');
+  const parity: Fas1Unit[] = [];
+  for (let groupStart = 0; groupStart < first.fragmentCount; groupStart += FAS1_PARITY_GROUP_SIZE) {
+    const groupEnd = Math.min(groupStart + FAS1_PARITY_GROUP_SIZE, first.fragmentCount);
+    const parityLength = Math.max(...Array.from({ length: groupEnd - groupStart }, (_, offset) => fragmentBodyLength(first.packetLength, first.fragmentCount, groupStart + offset, payloadBytes)));
+    const body = new Uint8Array(parityLength);
+    for (let index = groupStart; index < groupEnd; index += 1) {
+      const fragment = byIndex.get(index)!;
+      for (let byte = 0; byte < fragment.body.byteLength; byte += 1) body[byte] = body[byte]! ^ fragment.body[byte]!;
+    }
+    parity.push({
+      type: Fas1UnitType.Parity,
+      flags: first.flags,
+      sessionId: first.sessionId,
+      sequence: byIndex.get(groupStart)!.sequence,
+      packetId: first.packetId,
+      fragmentIndex: groupStart,
+      fragmentCount: first.fragmentCount,
+      packetLength: first.packetLength,
+      body,
+    });
+  }
+  return parity;
+}
+
+/**
+ * Recovers exactly one missing DATA fragment covered by a parity group.
+ * Returns undefined when the group is already complete or has multiple
+ * erasures; malformed geometry fails closed.
+ */
+export function recoverFragmentWithParity(fragments: readonly Fas1Unit[], parity: Fas1Unit, payloadBytes = FAS1_MAX_BODY_BYTES): Fas1Unit | undefined {
+  validateUnit(parity);
+  if (parity.type !== Fas1UnitType.Parity) fail('recovery unit is not parity');
+  assertInteger(payloadBytes, FAS1_MAX_BODY_BYTES, 'payload bytes');
+  if (payloadBytes < 1 || parity.fragmentCount !== Math.ceil(parity.packetLength / payloadBytes)) fail('recovery geometry is invalid');
+  const groupStart = parity.fragmentIndex;
+  const groupEnd = Math.min(groupStart + FAS1_PARITY_GROUP_SIZE, parity.fragmentCount);
+  const parityLength = Math.max(...Array.from({ length: groupEnd - groupStart }, (_, offset) => fragmentBodyLength(parity.packetLength, parity.fragmentCount, groupStart + offset, payloadBytes)));
+  if (parity.body.byteLength !== parityLength) fail('recovery parity body geometry is invalid');
+  const byIndex = new Map<number, Fas1Unit>();
+  for (const fragment of fragments) {
+    validateUnit(fragment);
+    if (fragment.type !== Fas1UnitType.Data || fragment.sessionId !== parity.sessionId || fragment.flags !== parity.flags || fragment.packetId !== parity.packetId || fragment.packetLength !== parity.packetLength || fragment.fragmentCount !== parity.fragmentCount) fail('recovery fragments do not match parity');
+    if (fragment.body.byteLength !== fragmentBodyLength(parity.packetLength, parity.fragmentCount, fragment.fragmentIndex, payloadBytes) || byIndex.has(fragment.fragmentIndex)) fail('recovery fragment body geometry is invalid');
+    byIndex.set(fragment.fragmentIndex, fragment);
+  }
+  const missing: number[] = [];
+  for (let index = groupStart; index < groupEnd; index += 1) if (!byIndex.has(index)) missing.push(index);
+  if (missing.length !== 1) return undefined;
+  const missingIndex = missing[0]!;
+  const expectedLength = fragmentBodyLength(parity.packetLength, parity.fragmentCount, missingIndex, payloadBytes);
+  const body = parity.body.slice();
+  for (let index = groupStart; index < groupEnd; index += 1) {
+    const fragment = byIndex.get(index);
+    if (!fragment) continue;
+    for (let byte = 0; byte < fragment.body.byteLength; byte += 1) body[byte] = body[byte]! ^ fragment.body[byte]!;
+  }
+  return {
+    type: Fas1UnitType.Data,
+    flags: parity.flags,
+    sessionId: parity.sessionId,
+    sequence: parity.sequence + (missingIndex - groupStart),
+    packetId: parity.packetId,
+    fragmentIndex: missingIndex,
+    fragmentCount: parity.fragmentCount,
+    packetLength: parity.packetLength,
+    body: body.slice(0, expectedLength),
+  };
 }
 
 /** Strict pure helper for deterministic geometry tests and later reassembly. */

@@ -40,6 +40,18 @@ export interface AppliedQuietSettings {
   autoGainControl: boolean | undefined;
 }
 export interface QuietMetrics { captureHighWaterBytes: number; captureHighWaterMs: number; playbackHighWaterBytes: number; playbackHighWaterMs: number; discontinuities: number; }
+export type QuietUnitMode = 'ceremony' | 'data';
+export interface QuietTransmissionSettings { readonly playbackGain: number; readonly repetition: number; readonly guardMs: number; }
+
+export function resolveQuietTransmissionSettings(candidate: QuietTransmissionSettings, mode: QuietUnitMode): QuietTransmissionSettings {
+  if (!Number.isFinite(candidate.playbackGain) || candidate.playbackGain < 1 || candidate.playbackGain > 2 || !Number.isInteger(candidate.repetition) || candidate.repetition < 1 || candidate.repetition > 3 || !Number.isInteger(candidate.guardMs) || candidate.guardMs < 1 || candidate.guardMs > 5_000) throw new Error('Quiet transmission settings are invalid');
+  if (mode !== 'ceremony' && mode !== 'data') throw new Error('Quiet transmission mode is invalid');
+  return Object.freeze({
+    playbackGain: candidate.playbackGain,
+    repetition: mode === 'ceremony' ? Math.max(2, candidate.repetition) : candidate.repetition,
+    guardMs: mode === 'ceremony' ? Math.max(250, candidate.guardMs) : candidate.guardMs,
+  });
+}
 
 export interface CorpusCase { id: string; direction: LiteralDirection; size: number; pattern: string; sha256: string; }
 export interface QuietFragment { epoch: number; sender: Role; direction: LiteralDirection; caseId: string; caseIndex: number; fragmentIndex: number; fragmentCount: number; declaredLength: number; digestPrefix: Uint8Array; payload: Uint8Array; }
@@ -378,7 +390,6 @@ export class QuietClient {
     this.#playbackGain = candidate.playbackGain;
     this.#acousticRepetition = candidate.repetition;
     this.#acousticGuardMs = candidate.guardMs;
-    for (const gain of this.#outputGains) gain.gain.value = candidate.playbackGain;
   }
 
   /**
@@ -450,18 +461,28 @@ export class QuietClient {
     return applied;
   }
 
-  /** Resolves only after local `onFinish` and the fixed local guard. */
-  sendUnit(unit: Uint8Array, epoch = this.#epoch): Promise<void> {
+  /**
+   * Resolves only after local `onFinish` and the captured local guard.
+   * Ceremony jobs trade airtime for acquisition reliability; data/probe jobs
+   * keep the exact candidate settings that were active when they were queued.
+   */
+  sendUnit(unit: Uint8Array, epoch = this.#epoch, mode: QuietUnitMode = 'data'): Promise<void> {
     const queued = unit.slice();
     const generation = this.#generation;
-    return this.#transmissions.enqueue(() => this.transmitUnitNow(queued, epoch, generation));
+    const settings = resolveQuietTransmissionSettings({
+      playbackGain: this.#playbackGain,
+      repetition: this.#acousticRepetition,
+      guardMs: this.#acousticGuardMs,
+    }, mode);
+    return this.#transmissions.enqueue(() => this.transmitUnitNow(queued, epoch, generation, settings));
   }
 
-  private async transmitUnitNow(unit: Uint8Array, epoch: number | undefined, generation: number): Promise<void> {
+  private async transmitUnitNow(unit: Uint8Array, epoch: number | undefined, generation: number, settings: Readonly<{ playbackGain: number; repetition: number; guardMs: number }>): Promise<void> {
     const runtime = this.#runtimeWindow;
     if (unit.byteLength < 1 || unit.byteLength > QUIET_FRAME_BYTES || generation !== this.#generation || epoch === undefined || epoch !== this.#epoch || !runtime?.Quiet || !this.#receiver) throw new Error('Quiet is not armed');
     const startedAt = performance.now();
     this.#metrics.playbackHighWaterBytes = Math.max(this.#metrics.playbackHighWaterBytes, unit.byteLength);
+    for (const gain of this.#outputGains) gain.gain.value = settings.playbackGain;
     await new Promise<void>((resolve, reject) => {
       let settled = false;
       const finish = (callback: () => void) => { if (settled) return; settled = true; this.#cancelTransmission = undefined; callback(); };
@@ -469,9 +490,9 @@ export class QuietClient {
       this.#transmitter?.destroy();
       this.#transmitter = runtime.Quiet!.transmitter({ profile: QUIET_PROFILE, clampFrame: QUIET_CLAMP_FRAME, onFinish: () => {
         this.#metrics.playbackHighWaterMs = Math.max(this.#metrics.playbackHighWaterMs, performance.now() - startedAt);
-        runtime.setTimeout(() => finish(() => generation === this.#generation && epoch === this.#epoch ? resolve() : reject(new Error('Quiet transmission cancelled by reset'))), this.#acousticGuardMs);
+        runtime.setTimeout(() => finish(() => generation === this.#generation && epoch === this.#epoch ? resolve() : reject(new Error('Quiet transmission cancelled by reset'))), settings.guardMs);
       } });
-      for (let repetition = 0; repetition < this.#acousticRepetition; repetition += 1) this.#transmitter.transmit(unit.slice().buffer);
+      for (let repetition = 0; repetition < settings.repetition; repetition += 1) this.#transmitter.transmit(unit.slice().buffer);
     });
   }
 

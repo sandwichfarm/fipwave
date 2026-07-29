@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { AcousticSession, type AcousticModem, type AcousticSessionOptions } from './acoustic-session.js';
+import { AcousticSession, type AcousticModem, type AcousticSessionOptions, type AcousticTransmitMode } from './acoustic-session.js';
 import { decodeFas1, encodeFas1, Fas1Sender, Fas1UnitType } from './acoustic-protocol.js';
 import { SerialTransmissionQueue } from './quiet-client.js';
 
@@ -8,12 +8,14 @@ class FakeModem implements AcousticModem {
   #handler: ((unit: Uint8Array) => void) | undefined;
   peer: FakeModem | undefined;
   readonly sent: Uint8Array[] = [];
+  readonly sentModes: AcousticTransmitMode[] = [];
   shouldDeliver: ((unit: Uint8Array) => boolean) | undefined;
   transform: ((unit: Uint8Array) => Uint8Array) | undefined;
   readonly appliedCandidates: string[] = [];
 
-  send(unit: Uint8Array): void {
+  send(unit: Uint8Array, mode: AcousticTransmitMode = 'data'): void {
     this.sent.push(unit.slice());
+    this.sentModes.push(mode);
     if (this.shouldDeliver?.(unit) === false) return;
     if (this.peer && this.peer.#handler) this.peer.#handler(this.transform ? this.transform(unit.slice()) : unit.slice());
   }
@@ -30,11 +32,11 @@ class DeferredModem extends FakeModem {
   defer = false;
   readonly pending: Array<{ release(): void; reject(error: Error): void }> = [];
 
-  override send(unit: Uint8Array): void | Promise<void> {
-    if (!this.defer) return super.send(unit);
+  override send(unit: Uint8Array, mode: AcousticTransmitMode = 'data'): void | Promise<void> {
+    if (!this.defer) return super.send(unit, mode);
     return new Promise<void>((resolve, reject) => {
       this.pending.push({
-        release: () => { super.send(unit); resolve(); },
+        release: () => { super.send(unit, mode); resolve(); },
         reject,
       });
     });
@@ -212,6 +214,46 @@ describe('AcousticSession bootstrap handshake', () => {
     expect(b.snapshot.state).toBe('Committing');
     expect(aModem.sent.length).toBeGreaterThan(0);
     expect(bModem.sent.length).toBeGreaterThan(0);
+  });
+
+  it('marks only identity, capability, commitment, and reset units for robust ceremony transmission', async () => {
+    const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
+    const a = new AcousticSession(options('A', aModem)); const b = new AcousticSession(options('B', bModem));
+    a.start(); await settlePair(a, b);
+    const sent = [...aModem.sent.map((raw, index) => ({ unit: decodeFas1(raw), mode: aModem.sentModes[index] })), ...bModem.sent.map((raw, index) => ({ unit: decodeFas1(raw), mode: bModem.sentModes[index] }))];
+    for (const entry of sent) {
+      const ceremony = [Fas1UnitType.Hello, Fas1UnitType.HelloAck, Fas1UnitType.Caps, Fas1UnitType.Commit, Fas1UnitType.CommitAck, Fas1UnitType.Reset].includes(entry.unit.type);
+      expect(entry.mode).toBe(ceremony ? 'ceremony' : 'data');
+    }
+    expect(sent.some((entry) => entry.unit.type === Fas1UnitType.Probe && entry.mode === 'data')).toBe(true);
+  });
+
+  it('re-handshakes but skips calibration on an exact same-epoch proven-settings resume', async () => {
+    const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
+    let aNonce = 1; let bNonce = 20; let measurements = 0;
+    const nonce = (value: number): Uint8Array => { const output = new Uint8Array(16); output[0] = value; output[8] = 0x80; return output; };
+    const a = new AcousticSession({ ...options('A', aModem), nonce: () => nonce(aNonce++), measureProbe: (probe) => { measurements += 1; return options('A', aModem).measureProbe(probe); } });
+    const b = new AcousticSession({ ...options('B', bModem), nonce: () => nonce(bNonce++), measureProbe: (probe) => { measurements += 1; return options('B', bModem).measureProbe(probe); } });
+    a.start(); await settlePair(a, b);
+    expect({ a: a.snapshot.ready, b: b.snapshot.ready, measurements }).toEqual({ a: true, b: true, measurements: 8 });
+    const firstDigest = a.snapshot.settingsDigest;
+
+    a.reset(0); b.reset(0);
+    expect(a.start()).toBe(true);
+    await settlePair(a, b);
+
+    expect({ a: a.snapshot.ready, b: b.snapshot.ready }).toEqual({ a: true, b: true });
+    expect(a.snapshot.settingsDigest).toEqual(firstDigest);
+    expect(a.snapshot.ledger).toHaveLength(0);
+    expect(b.snapshot.ledger).toHaveLength(0);
+    expect(measurements).toBe(8);
+    expect(a.snapshot.counters.warmResumes).toBe(1);
+    expect(b.snapshot.counters.warmResumes).toBe(1);
+
+    a.reset(1); b.reset(1);
+    a.start(); await settlePair(a, b);
+    expect(measurements).toBe(16);
+    expect(a.snapshot.ledger).toHaveLength(8);
   });
 
   it('reset atomically removes session authority and late units cannot revive it', () => {
@@ -531,6 +573,8 @@ describe('AcousticSession packet, fragment, reassembly, retry, duplicate, and tu
     expect(receivedB).toHaveLength(1);
     expect(receivedB[0]).toEqual(aPacket);
     expect(aModem.sent.map(decodeFas1).filter((unit) => unit.type === Fas1UnitType.Data)).toHaveLength(15);
+    expect(aModem.sent.map(decodeFas1).filter((unit) => unit.type === Fas1UnitType.Parity)).toHaveLength(4);
+    expect(bModem.sent.map(decodeFas1).filter((unit) => unit.type === Fas1UnitType.Ack)).toHaveLength(2);
 
     expect(b.enqueuePacket(bPacket, 'ordinary').accepted).toBe(true);
     for (let round = 0; round < 16; round += 1) timers.runAll();
@@ -538,18 +582,13 @@ describe('AcousticSession packet, fragment, reassembly, retry, duplicate, and tu
     expect(receivedA[0]).toEqual(bPacket);
   });
 
-  it('retries only missing fragments and duplicate DATA or a lost ACK cannot redeliver a complete packet', async () => {
+  it('recovers one missing DATA fragment from parity without another acoustic turn', async () => {
     const timers = new FakeTimers(); const clock = new ManualClock();
     const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
-    const received: Uint8Array[] = []; let dropped = false; let droppedAck = false;
+    const received: Uint8Array[] = []; let dropped = false;
     aModem.shouldDeliver = (raw) => {
       const unit = decodeFas1(raw);
       if (unit.type === Fas1UnitType.Data && unit.fragmentIndex === 2 && !dropped) { dropped = true; return false; }
-      return true;
-    };
-    bModem.shouldDeliver = (raw) => {
-      const unit = decodeFas1(raw);
-      if (unit.type === Fas1UnitType.Ack && !droppedAck) { droppedAck = true; return false; }
       return true;
     };
     const a = new AcousticSession({ ...options('A', aModem), clock, timers });
@@ -559,8 +598,33 @@ describe('AcousticSession packet, fragment, reassembly, retry, duplicate, and tu
     for (let round = 0; round < 32; round += 1) timers.runAll();
     expect(received).toHaveLength(1);
     const data = aModem.sent.map(decodeFas1).filter((unit) => unit.type === Fas1UnitType.Data);
-    expect(data.filter((unit) => unit.fragmentIndex === 2).length).toBeGreaterThan(1);
+    expect(data.filter((unit) => unit.fragmentIndex === 2)).toHaveLength(1);
     expect(data.filter((unit) => unit.fragmentIndex >= 4)).toHaveLength(11);
+    expect(b.snapshot.counters.recoveredFragments).toBe(1);
+    expect(a.snapshot.counters.parityFramesTx).toBe(4);
+    expect(a.snapshot.counters.deliveredBytesTx).toBe(1_357);
+    expect(b.snapshot.counters.deliveredBytesRx).toBe(1_357);
+  });
+
+  it('falls back to bitmap retransmission when two DATA frames in one parity group are erased', async () => {
+    const timers = new FakeTimers(); const clock = new ManualClock();
+    const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
+    const received: Uint8Array[] = []; const erased = new Set([1, 2]);
+    aModem.shouldDeliver = (raw) => {
+      const unit = decodeFas1(raw);
+      if (unit.type === Fas1UnitType.Data && erased.delete(unit.fragmentIndex)) return false;
+      return true;
+    };
+    const a = new AcousticSession({ ...options('A', aModem), clock, timers });
+    const b = new AcousticSession({ ...options('B', bModem), clock, timers, onPacket: (packet) => received.push(packet) });
+    a.start(); await settlePair(a, b);
+    expect(a.enqueuePacket(new Uint8Array(400).fill(0x5a), 'ordinary').accepted).toBe(true);
+    for (let round = 0; round < 16; round += 1) timers.runAll();
+    expect(received).toHaveLength(1);
+    const data = aModem.sent.map(decodeFas1).filter((unit) => unit.type === Fas1UnitType.Data);
+    expect(data.filter((unit) => unit.fragmentIndex === 1)).toHaveLength(2);
+    expect(data.filter((unit) => unit.fragmentIndex === 2)).toHaveLength(2);
+    expect(b.snapshot.counters.recoveredFragments).toBe(1);
     expect(a.snapshot.counters.retries).toBeGreaterThan(0);
   });
 
@@ -645,8 +709,10 @@ describe('AcousticSession priority, backpressure, heartbeat, degraded recovery, 
 
     aModem.defer = true;
     expect(a.enqueuePacket(Uint8Array.of(7), 'ordinary').accepted).toBe(true);
-    expect(aModem.pending).toHaveLength(2); // DATA and the final TURN_END.
+    expect(aModem.pending).toHaveLength(3); // DATA, parity, and final TURN_END.
     aModem.releaseNext(); await Promise.resolve();
+    expect(timers.count(candidate.ackTimeoutMs)).toBe(beforeAckTimer);
+    aModem.releaseNext(); await Promise.resolve(); await Promise.resolve();
     expect(timers.count(candidate.ackTimeoutMs)).toBe(beforeAckTimer);
     aModem.releaseNext(); await Promise.resolve(); await Promise.resolve();
     expect(timers.count(candidate.ackTimeoutMs)).toBe(beforeAckTimer + 1);
@@ -660,6 +726,7 @@ describe('AcousticSession priority, backpressure, heartbeat, degraded recovery, 
     late.start(); await settlePair(late, latePeer);
     lateA.defer = true;
     expect(late.enqueuePacket(Uint8Array.of(9), 'ordinary').accepted).toBe(true);
+    lateA.releaseNext(); await Promise.resolve();
     lateA.releaseNext(); await Promise.resolve();
     late.reset(2);
     const afterResetTimers = lateTimers.count(candidate.ackTimeoutMs);

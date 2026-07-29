@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ACOUSTIC_PROFILES,
   canonicalizeSettings,
+  createParityUnits,
   FAS1_HEADER_BYTES,
   FAS1_MAX_BODY_BYTES,
   FAS1_MAX_PACKET_BYTES,
@@ -14,6 +15,7 @@ import {
   digestSettings,
   encodeFas1,
   fragmentPacket,
+  recoverFragmentWithParity,
   reassemblePacket,
   resolveAcousticProfile,
 } from './acoustic-protocol.js';
@@ -27,10 +29,10 @@ function validUnit(type: Fas1UnitType) {
     flags: Fas1Sender.A,
     sessionId: type === Fas1UnitType.Hello ? 0n : SESSION,
     sequence: 7,
-    packetId: type === Fas1UnitType.Data || type === Fas1UnitType.Ack ? 99 : 0,
+    packetId: type === Fas1UnitType.Data || type === Fas1UnitType.Parity || type === Fas1UnitType.Ack ? 99 : 0,
     fragmentIndex: 0,
-    fragmentCount: type === Fas1UnitType.Data ? 1 : 0,
-    packetLength: type === Fas1UnitType.Data ? 1 : 0,
+    fragmentCount: type === Fas1UnitType.Data || type === Fas1UnitType.Parity ? 1 : 0,
+    packetLength: type === Fas1UnitType.Data || type === Fas1UnitType.Parity ? 1 : 0,
     body: bodyless ? new Uint8Array() : Uint8Array.of(type),
   };
 }
@@ -136,6 +138,33 @@ describe('FAS1 binary protocol', () => {
     nonCanonical[0] = { ...nonCanonical[0]!, body: nonCanonical[0]!.body.slice(0, 95) };
     nonCanonical[1] = { ...nonCanonical[1]!, body: Uint8Array.of(7, ...nonCanonical[1]!.body) };
     expect(() => reassemblePacket(nonCanonical, 96)).toThrow();
+  });
+
+  it('recovers exactly one erased DATA frame per XOR parity group, including the short final fragment', () => {
+    const packet = Uint8Array.from({ length: FAS1_MAX_PACKET_BYTES }, (_, index) => (index * 17) & 0xff);
+    const fragments = fragmentPacket({ packet, sessionId: SESSION, sequenceStart: 20, packetId: 77, sender: Fas1Sender.A, payloadBytes: 96 });
+    const parity = createParityUnits(fragments, 96);
+    expect(parity).toHaveLength(4);
+    expect(parity.every((unit) => unit.type === Fas1UnitType.Parity)).toBe(true);
+
+    const withoutSecond = fragments.filter((fragment) => fragment.fragmentIndex !== 1);
+    const recoveredSecond = recoverFragmentWithParity(withoutSecond, parity[0]!, 96);
+    expect(recoveredSecond).toEqual(fragments[1]);
+    expect(reassemblePacket([...withoutSecond, recoveredSecond!], 96)).toEqual(packet);
+
+    const withoutFinal = fragments.filter((fragment) => fragment.fragmentIndex !== fragments.length - 1);
+    const recoveredFinal = recoverFragmentWithParity(withoutFinal, parity.at(-1)!, 96);
+    expect(recoveredFinal?.body).toHaveLength(13);
+    expect(reassemblePacket([...withoutFinal, recoveredFinal!], 96)).toEqual(packet);
+  });
+
+  it('fails closed when parity geometry is malformed or a group has more than one erasure', () => {
+    const fragments = fragmentPacket({ packet: new Uint8Array(385).fill(0xa5), sessionId: SESSION, sequenceStart: 0, packetId: 4, sender: Fas1Sender.A, payloadBytes: 96 });
+    const parity = createParityUnits(fragments, 96);
+    expect(recoverFragmentWithParity(fragments, parity[0]!, 96)).toBeUndefined();
+    expect(recoverFragmentWithParity(fragments.filter((fragment) => fragment.fragmentIndex !== 1 && fragment.fragmentIndex !== 2), parity[0]!, 96)).toBeUndefined();
+    expect(() => encodeFas1({ ...parity[0]!, fragmentIndex: 1 })).toThrow();
+    expect(() => recoverFragmentWithParity(fragments, { ...parity[0]!, body: parity[0]!.body.slice(0, -1) }, 96)).toThrow();
   });
 
   it('serializes directional settings in one canonical A-to-B then B-to-A order', async () => {

@@ -11,6 +11,7 @@ import {
   encodeControlFrame,
   encodeFragment,
   fragmentCase,
+  resolveQuietTransmissionSettings,
   type CorpusCase,
 } from './quiet-client.js';
 
@@ -95,6 +96,16 @@ describe('Quiet lifecycle and FWAV reset boundary', () => {
     releaseFirst();
     await Promise.all([first, second]);
     expect(events).toEqual(['start:first', 'finish:first', 'start:second', 'finish:second']);
+  });
+
+  it('captures redundant ceremony settings without mutating the selected data candidate', () => {
+    const selected = { playbackGain: 1, repetition: 1, guardMs: 100 };
+    const ceremony = resolveQuietTransmissionSettings(selected, 'ceremony');
+    selected.playbackGain = 2;
+    selected.repetition = 3;
+    selected.guardMs = 750;
+    expect(ceremony).toEqual({ playbackGain: 1, repetition: 2, guardMs: 250 });
+    expect(resolveQuietTransmissionSettings(selected, 'data')).toEqual({ playbackGain: 2, repetition: 3, guardMs: 750 });
   });
 
   it('invalidates queued prior-generation transmissions on reset before accepting fresh work', async () => {

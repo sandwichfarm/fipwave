@@ -1,13 +1,14 @@
-import { decodeFas1, digestSettings, encodeFas1, Fas1Sender, Fas1UnitType, fragmentPacket, reassemblePacket, resolveAcousticProfile, type AcousticSettings, type DirectionalSettings, type Fas1Unit } from './acoustic-protocol.js';
+import { createParityUnits, decodeFas1, digestSettings, encodeFas1, FAS1_PARITY_GROUP_SIZE, Fas1Sender, Fas1UnitType, fragmentPacket, reassemblePacket, recoverFragmentWithParity, resolveAcousticProfile, type AcousticSettings, type DirectionalSettings, type Fas1Unit } from './acoustic-protocol.js';
 
 export type AcousticRole = 'A' | 'B';
 export type AcousticSessionState = 'Idle' | 'Listening' | 'HelloSent' | 'HelloAckSent' | 'CapsSent' | 'CalibratingAToB' | 'CalibratingBToA' | 'Committing' | 'AwaitingHeartbeat' | 'Ready' | 'Degraded' | 'Recovering' | 'Error';
 export type AcousticTrafficClass = 'control' | 'heartbeat' | 'ordinary';
+export type AcousticTransmitMode = 'ceremony' | 'data';
 export interface AcousticQueueResult { readonly accepted: boolean; readonly reason?: string; readonly packetId?: number; }
 export interface AcousticDeliveryResult { readonly delivered: boolean; readonly reason?: string; readonly packetId?: number; }
 
 export interface AcousticModem {
-  send(unit: Uint8Array): void | Promise<void>;
+  send(unit: Uint8Array, mode?: AcousticTransmitMode): void | Promise<void>;
   onUnit(handler: (unit: Uint8Array) => void): () => void;
   /** Applies the candidate before its numbered probe or subsequent transmit. */
   applyCandidate?(candidate: AcousticCandidate): void;
@@ -49,11 +50,11 @@ export interface AcousticSessionSnapshot {
   readonly settingsDigest?: Uint8Array;
   /** Local monotonic/clock evidence of the accepted current-session heartbeat. */
   readonly lastHeartbeatAtMs?: number;
-  readonly counters: Readonly<{ retries: number; dropped: number; duplicates: number; queuedPackets: number; queuedBytes: number; deliveredPackets: number; }>;
+  readonly counters: Readonly<{ retries: number; dropped: number; duplicates: number; queuedPackets: number; queuedBytes: number; deliveredPackets: number; deliveredBytesTx: number; deliveredBytesRx: number; parityFramesTx: number; parityFramesRx: number; recoveredFragments: number; warmResumes: number; }>;
 }
 
-interface PendingPacket { readonly packetId: number; readonly packet: Uint8Array; readonly fragments: readonly Fas1Unit[]; readonly trafficClass: AcousticTrafficClass; readonly expiresAt: number; attempts: number; acknowledged: number; }
-interface InboundAssembly { readonly packetId: number; readonly fragmentCount: number; readonly packetLength: number; readonly fragments: Map<number, Fas1Unit>; readonly expiresAt: number; }
+interface PendingPacket { readonly packetId: number; readonly packet: Uint8Array; readonly fragments: readonly Fas1Unit[]; readonly parity: readonly Fas1Unit[]; readonly trafficClass: AcousticTrafficClass; readonly expiresAt: number; attempts: number; acknowledged: number; paritySent: number; }
+interface InboundAssembly { readonly packetId: number; readonly fragmentCount: number; readonly packetLength: number; readonly fragments: Map<number, Fas1Unit>; readonly parity: Map<number, Fas1Unit>; readonly expiresAt: number; }
 
 interface Handshake { readonly role: AcousticRole; readonly identity: string; readonly expectedPeer: string; readonly nonce: Uint8Array; readonly echoedNonce?: Uint8Array; readonly profiles: readonly string[]; readonly ranges: AcousticCapabilityRange; readonly epoch: number; readonly sessionId?: bigint; }
 
@@ -78,10 +79,18 @@ const MAX_DELIVERED_IDS = 32;
 // finite while allowing that legitimate slow-link work to finish.
 const MAX_PACKET_AGE_MS = 600_000;
 const MAX_ATTEMPTS = 3;
-const WINDOW_SIZE = 4;
+const WINDOW_SIZE = 8;
 const HANDSHAKE_RETRY_MS = 2_500;
 const PROBE_RETRY_MS = 1_500;
 const COMMIT_RETRY_MS = 2_000;
+const CEREMONY_TYPES = new Set([
+  Fas1UnitType.Hello,
+  Fas1UnitType.HelloAck,
+  Fas1UnitType.Caps,
+  Fas1UnitType.Commit,
+  Fas1UnitType.CommitAck,
+  Fas1UnitType.Reset,
+]);
 
 function invalid(message: string): never { throw new Error(`acoustic session ${message}`); }
 function validInteger(value: number, minimum: number, maximum: number): boolean { return Number.isSafeInteger(value) && value >= minimum && value <= maximum; }
@@ -104,6 +113,17 @@ function toSessionId(nonce: Uint8Array): bigint {
 }
 function sameProfiles(left: readonly string[], right: readonly string[]): boolean { return left.length === right.length && left.every((value, index) => value === right[index]); }
 function validRange(value: AcousticCapabilityRange): boolean { return validInteger(value.minPayloadBytes, 1, 217) && validInteger(value.maxPayloadBytes, value.minPayloadBytes, 217); }
+function sameDirectionalSettings(left: DirectionalSettings, right: DirectionalSettings): boolean {
+  return left.profileId === right.profileId
+    && left.payloadBytes === right.payloadBytes
+    && left.repetition === right.repetition
+    && left.guardMs === right.guardMs
+    && left.playbackGain === right.playbackGain
+    && left.ackTimeoutMs === right.ackTimeoutMs;
+}
+function copySettings(settings: AcousticSettings): AcousticSettings {
+  return { aToB: { ...settings.aToB }, bToA: { ...settings.bToA } };
+}
 
 /** Compact strict control payload: never exposes a permissive JSON parsing boundary to acoustic input. */
 function encodeHandshake(value: Handshake): Uint8Array {
@@ -204,7 +224,22 @@ export class AcousticSession {
   #awaitingAck = false;
   #recoveryAttempts = 0;
   #retiredSessionIds = new Set<bigint>();
-  #counters = { retries: 0, dropped: 0, duplicates: 0, deliveredPackets: 0 };
+  #provenSettings: AcousticSettings | undefined;
+  #provenDigest: Uint8Array | undefined;
+  #peerResumeDigest: Uint8Array | undefined;
+  #resuming = false;
+  #counters = {
+    retries: 0,
+    dropped: 0,
+    duplicates: 0,
+    deliveredPackets: 0,
+    deliveredBytesTx: 0,
+    deliveredBytesRx: 0,
+    parityFramesTx: 0,
+    parityFramesRx: 0,
+    recoveredFragments: 0,
+    warmResumes: 0,
+  };
 
   constructor(private readonly options: AcousticSessionOptions) {
     if (!options.identity || !options.expectedPeer || options.identity === options.expectedPeer || !validRange(options.ranges) || options.profiles.length < 1 || options.profiles.length > MAX_PROFILES || options.candidates.length < 1 || options.candidates.length > options.calibration.maxCandidates || !validInteger(options.calibration.probesPerDirection, 1, 4) || !validInteger(options.calibration.deadlineMs, 1, 120_000) || typeof options.measureProbe !== 'function') invalid('options are invalid');
@@ -253,8 +288,20 @@ export class AcousticSession {
     if (this.queueLength() + (this.#active ? 1 : 0) >= MAX_QUEUED_PACKETS) return { accepted: false, reason: 'acoustic_queue_full' };
     const packetId = this.nextPacketId();
     const copied = packet.slice();
-    const pending: PendingPacket = { packetId, packet: copied, fragments: fragmentPacket({ sessionId: this.#sessionId, sequenceStart: this.#sequence, packetId, packet: copied, sender: senderFlag(this.options.role), payloadBytes: this.outboundSettings().payloadBytes }), trafficClass, expiresAt: this.options.clock.now() + MAX_PACKET_AGE_MS, attempts: 0, acknowledged: 0 };
-    this.#sequence += pending.fragments.length;
+    const fragments = fragmentPacket({ sessionId: this.#sessionId, sequenceStart: this.#sequence, packetId, packet: copied, sender: senderFlag(this.options.role), payloadBytes: this.outboundSettings().payloadBytes });
+    const parity = createParityUnits(fragments, this.outboundSettings().payloadBytes);
+    const pending: PendingPacket = {
+      packetId,
+      packet: copied,
+      fragments,
+      parity,
+      trafficClass,
+      expiresAt: this.options.clock.now() + MAX_PACKET_AGE_MS,
+      attempts: 0,
+      acknowledged: 0,
+      paritySent: 0,
+    };
+    this.#sequence += pending.fragments.length + pending.parity.length;
     this.#queues[trafficClass].push(pending);
     this.driveTurn();
     return { accepted: true, packetId };
@@ -272,7 +319,12 @@ export class AcousticSession {
 
   reset(epoch: number): void {
     if (!validInteger(epoch, 0, 0xffff_ffff)) invalid('epoch is invalid');
-    if (epoch !== this.#epoch) this.#retiredSessionIds.clear();
+    const sameEpoch = epoch === this.#epoch;
+    if (!sameEpoch) {
+      this.#retiredSessionIds.clear();
+      this.#provenSettings = undefined;
+      this.#provenDigest = undefined;
+    }
     else if (this.#sessionId !== undefined) {
       this.#retiredSessionIds.add(this.#sessionId);
       while (this.#retiredSessionIds.size > 8) this.#retiredSessionIds.delete(this.#retiredSessionIds.values().next().value!);
@@ -283,7 +335,7 @@ export class AcousticSession {
     this.clearCommitRetry();
     if (this.#deliveryTimer !== undefined) this.options.timers.clearTimeout(this.#deliveryTimer);
     this.clearHeartbeatTimers(); this.#generation += 1;
-    this.#timer = undefined; this.#deliveryTimer = undefined; this.#epoch = epoch; this.#sessionId = undefined; this.#localNonce = undefined; this.#peerNonce = undefined; this.#sequence = 1; this.#reason = undefined; this.#ledger = []; this.#sentProbes = { AtoB: 0, BtoA: 0 }; this.#receivedReports = { AtoB: 0, BtoA: 0 }; this.#receivedProbes = { AtoB: 0, BtoA: 0 }; this.#lastProbeReport = {}; this.#selected = {}; this.#settings = undefined; this.#settingsDigest = undefined; this.#lastHeartbeatAtMs = undefined; this.#turnOwner = undefined; this.#heartbeatDue = false; this.#queues = { control: [], heartbeat: [], ordinary: [] }; this.#active = undefined; this.#inbound = undefined; this.#lastAck = undefined; this.#delivered.clear(); this.#awaitingAck = false; this.#recoveryAttempts = 0; this.#work = Promise.resolve(); this.#state = this.options.role === 'A' ? 'Idle' : 'Listening';
+    this.#timer = undefined; this.#deliveryTimer = undefined; this.#epoch = epoch; this.#sessionId = undefined; this.#localNonce = undefined; this.#peerNonce = undefined; this.#sequence = 1; this.#reason = undefined; this.#ledger = []; this.#sentProbes = { AtoB: 0, BtoA: 0 }; this.#receivedReports = { AtoB: 0, BtoA: 0 }; this.#receivedProbes = { AtoB: 0, BtoA: 0 }; this.#lastProbeReport = {}; this.#selected = {}; this.#settings = undefined; this.#settingsDigest = undefined; this.#peerResumeDigest = undefined; this.#resuming = false; this.#lastHeartbeatAtMs = undefined; this.#turnOwner = undefined; this.#heartbeatDue = false; this.#queues = { control: [], heartbeat: [], ordinary: [] }; this.#active = undefined; this.#inbound = undefined; this.#lastAck = undefined; this.#delivered.clear(); this.#awaitingAck = false; this.#recoveryAttempts = 0; this.#work = Promise.resolve(); this.#state = this.options.role === 'A' ? 'Idle' : 'Listening';
   }
 
   dispose(): void { this.reset(this.#epoch); this.#unsubscribe(); }
@@ -322,6 +374,7 @@ export class AcousticSession {
       else if (unit.type === Fas1UnitType.CommitAck) this.onCommitAck(unit.sessionId, unit.body);
       else if (unit.type === Fas1UnitType.Heartbeat) this.onHeartbeat(unit.sessionId);
       else if (unit.type === Fas1UnitType.Data) this.onData(unit);
+      else if (unit.type === Fas1UnitType.Parity) this.onParity(unit);
       else if (unit.type === Fas1UnitType.TurnEnd) this.onTurnEnd(unit.sessionId);
       else if (unit.type === Fas1UnitType.Ack) this.onAck(unit.sessionId, unit.packetId, unit.sequence);
       else if (unit.type === Fas1UnitType.Reset) this.onReset(unit.sessionId);
@@ -367,6 +420,10 @@ export class AcousticSession {
     this.#commitTimer = this.options.timers.setTimeout(() => {
       this.#commitTimer = undefined;
       if (epoch !== this.#epoch || sessionId !== this.#sessionId || generation !== this.#generation || (this.#state !== 'Committing' && this.#state !== 'AwaitingHeartbeat') || !this.#settingsDigest) return;
+      if (this.#resuming && this.#commitAttempts >= MAX_ATTEMPTS) {
+        this.invalidateAndRestartResume();
+        return;
+      }
       this.#commitAttempts += 1;
       this.#counters.retries += 1;
       const completion = this.send(Fas1UnitType.Commit, sessionId, this.#settingsDigest);
@@ -495,6 +552,13 @@ export class AcousticSession {
     pending.attempts += 1; this.#awaitingAck = true;
     const generation = this.#generation; const sessionId = this.#sessionId; const attempt = pending.attempts;
     const completions = missing.map((unit) => this.sendUnit(unit));
+    const groupStarts = new Set(missing.map((unit) => unit.fragmentIndex - (unit.fragmentIndex % FAS1_PARITY_GROUP_SIZE)));
+    for (const parity of pending.parity) {
+      const groupBit = 1 << (parity.fragmentIndex / FAS1_PARITY_GROUP_SIZE);
+      if (!groupStarts.has(parity.fragmentIndex) || (pending.paritySent & groupBit) !== 0) continue;
+      pending.paritySent |= groupBit;
+      completions.push(this.sendUnit(parity));
+    }
     completions.push(this.send(Fas1UnitType.TurnEnd, this.#sessionId, new Uint8Array()));
     const armTimeout = () => {
       if (this.#generation !== generation || this.#sessionId !== sessionId || this.#state !== 'Ready' || this.#turnOwner !== this.options.role || !this.#awaitingAck || this.#active !== pending || pending.attempts !== attempt) return;
@@ -550,29 +614,76 @@ export class AcousticSession {
     this.expireWork();
     if (this.#state !== 'Ready' || unit.sessionId !== this.#sessionId || this.#turnOwner !== complement(this.options.role)) return;
     if (this.#delivered.has(unit.packetId)) { this.#counters.duplicates += 1; this.#lastAck = { packetId: unit.packetId, bitmap: (1 << unit.fragmentCount) - 1 }; return; }
-    const existing = this.#inbound;
-    if (existing && (existing.packetId !== unit.packetId || existing.fragmentCount !== unit.fragmentCount || existing.packetLength !== unit.packetLength)) { this.#counters.dropped += 1; return; }
     const expectedCount = Math.ceil(unit.packetLength / this.inboundPayloadBytes());
     const expectedLength = unit.fragmentIndex === expectedCount - 1 ? unit.packetLength - this.inboundPayloadBytes() * (expectedCount - 1) : this.inboundPayloadBytes();
     if (unit.fragmentCount !== expectedCount || unit.body.byteLength !== expectedLength) { this.#counters.dropped += 1; return; }
-    if (!existing || existing.packetId !== unit.packetId) this.#lastAck = undefined;
-    const inbound = existing ?? { packetId: unit.packetId, fragmentCount: unit.fragmentCount, packetLength: unit.packetLength, fragments: new Map<number, Fas1Unit>(), expiresAt: this.options.clock.now() + MAX_PACKET_AGE_MS };
-    this.#inbound = inbound;
+    const inbound = this.inboundFor(unit);
+    if (!inbound) return;
     if (inbound.fragments.has(unit.fragmentIndex)) { this.#counters.duplicates += 1; }
     else inbound.fragments.set(unit.fragmentIndex, { ...unit, body: unit.body.slice() });
-    let bitmap = 0; for (const index of inbound.fragments.keys()) bitmap |= 1 << index;
-    this.#lastAck = { packetId: unit.packetId, bitmap };
+    this.refreshInbound(inbound);
+  }
+  private onParity(unit: Fas1Unit): void {
+    this.expireWork();
+    if (this.#state !== 'Ready' || unit.sessionId !== this.#sessionId || this.#turnOwner !== complement(this.options.role)) return;
+    this.#counters.parityFramesRx += 1;
+    if (this.#delivered.has(unit.packetId)) {
+      this.#counters.duplicates += 1;
+      this.#lastAck = { packetId: unit.packetId, bitmap: (1 << unit.fragmentCount) - 1 };
+      return;
+    }
+    const expectedCount = Math.ceil(unit.packetLength / this.inboundPayloadBytes());
+    if (unit.fragmentCount !== expectedCount) { this.#counters.dropped += 1; return; }
+    const inbound = this.inboundFor(unit);
+    if (!inbound) return;
+    if (inbound.parity.has(unit.fragmentIndex)) this.#counters.duplicates += 1;
+    else {
+      inbound.parity.set(unit.fragmentIndex, { ...unit, body: unit.body.slice() });
+    }
+    this.refreshInbound(inbound);
+  }
+  private inboundFor(unit: Fas1Unit): InboundAssembly | undefined {
+    const existing = this.#inbound;
+    if (existing && (existing.packetId !== unit.packetId || existing.fragmentCount !== unit.fragmentCount || existing.packetLength !== unit.packetLength)) {
+      this.#counters.dropped += 1;
+      return undefined;
+    }
+    if (!existing || existing.packetId !== unit.packetId) this.#lastAck = undefined;
+    const inbound = existing ?? {
+      packetId: unit.packetId,
+      fragmentCount: unit.fragmentCount,
+      packetLength: unit.packetLength,
+      fragments: new Map<number, Fas1Unit>(),
+      parity: new Map<number, Fas1Unit>(),
+      expiresAt: this.options.clock.now() + MAX_PACKET_AGE_MS,
+    };
+    this.#inbound = inbound;
+    return inbound;
+  }
+  private refreshInbound(inbound: InboundAssembly): void {
+    for (const parity of inbound.parity.values()) {
+      const recovered = recoverFragmentWithParity([...inbound.fragments.values()], parity, this.inboundPayloadBytes());
+      if (!recovered || inbound.fragments.has(recovered.fragmentIndex)) continue;
+      inbound.fragments.set(recovered.fragmentIndex, recovered);
+      this.#counters.recoveredFragments += 1;
+    }
+    let bitmap = 0;
+    for (const index of inbound.fragments.keys()) bitmap |= 1 << index;
+    this.#lastAck = { packetId: inbound.packetId, bitmap };
     if (inbound.fragments.size !== inbound.fragmentCount) return;
     let packet: Uint8Array;
     try { packet = reassemblePacket([...inbound.fragments.values()], this.inboundPayloadBytes()); } catch { this.#inbound = undefined; this.#counters.dropped += 1; return; }
-    if (packet.byteLength !== inbound.packetLength || this.#delivered.has(unit.packetId)) return;
-    this.#delivered.set(unit.packetId, this.options.clock.now() + MAX_PACKET_AGE_MS);
+    if (packet.byteLength !== inbound.packetLength || this.#delivered.has(inbound.packetId)) return;
+    this.#delivered.set(inbound.packetId, this.options.clock.now() + MAX_PACKET_AGE_MS);
     while (this.#delivered.size > MAX_DELIVERED_IDS) this.#delivered.delete(this.#delivered.keys().next().value!);
-    this.#inbound = undefined; this.#counters.deliveredPackets += 1;
-    this.options.onPacket?.(packet.slice(), { delivered: true, packetId: unit.packetId });
+    this.#inbound = undefined;
+    this.#counters.deliveredPackets += 1;
+    this.#counters.deliveredBytesRx += packet.byteLength;
+    this.options.onPacket?.(packet.slice(), { delivered: true, packetId: inbound.packetId });
   }
   private onTurnEnd(sessionId: bigint): void {
     if (this.#state !== 'Ready' || sessionId !== this.#sessionId || this.#turnOwner !== complement(this.options.role)) return;
+    if (this.#inbound) this.refreshInbound(this.#inbound);
     // An ACK is meaningful only for a DATA packet.  Empty turns transfer
     // ownership without creating an unbound packet acknowledgement.
     if (this.#lastAck) {
@@ -591,7 +702,7 @@ export class AcousticSession {
   private sendAck(packetId: number, bitmap: number): void {
     if (!this.#sessionId) return;
     const raw = encodeFas1({ type: Fas1UnitType.Ack, flags: senderFlag(this.options.role), sessionId: this.#sessionId, sequence: bitmap >>> 0, packetId, fragmentIndex: 0, fragmentCount: 0, packetLength: 0, body: new Uint8Array() });
-    void this.options.modem.send(raw);
+    void this.options.modem.send(raw, 'data');
   }
   private onAck(sessionId: bigint, packetId: number, bitmap: number): void {
     if (this.#state !== 'Ready' || sessionId !== this.#sessionId || !this.#active || !this.#awaitingAck || packetId !== this.#active.packetId) return;
@@ -605,6 +716,7 @@ export class AcousticSession {
     this.#awaitingAck = false; this.clearDeliveryTimer();
     if (pending.acknowledged === legalMask) {
       this.#active = undefined;
+      this.#counters.deliveredBytesTx += pending.packet.byteLength;
       // Complete the two-step handoff: DATA/TURN_END → ACK → TURN_END. The
       // receiver remains passive until this explicit yield arrives.
       this.send(Fas1UnitType.TurnEnd, this.#sessionId, new Uint8Array());
@@ -615,7 +727,10 @@ export class AcousticSession {
     this.#turnOwner = this.options.role;
     this.schedule(() => this.driveTurn(), this.guardMs());
   }
-  private sendUnit(unit: Fas1Unit): void | Promise<void> { return this.options.modem.send(encodeFas1(unit)); }
+  private sendUnit(unit: Fas1Unit): void | Promise<void> {
+    if (unit.type === Fas1UnitType.Parity) this.#counters.parityFramesTx += 1;
+    return this.options.modem.send(encodeFas1(unit), 'data');
+  }
   private degrade(reason: string): void { if (this.#state === 'Error' || this.#state === 'Degraded') return; this.clearDeliveryTimer(); this.#awaitingAck = false; this.#state = 'Degraded'; this.#reason = reason; this.schedule(() => this.beginRecovery(), this.guardMs()); }
 
   private onHello(headerSessionId: bigint, body: Uint8Array): void {
@@ -647,10 +762,30 @@ export class AcousticSession {
   private onCaps(sessionId: bigint, body: Uint8Array): void {
     const expectedA = this.options.role === 'A' ? this.#localNonce : this.#peerNonce;
     const expectedB = this.options.role === 'B' ? this.#localNonce : this.#peerNonce;
-    if (sessionId !== this.#sessionId || !expectedA || !expectedB || body.byteLength !== 32 || !equal(body.slice(0, 16), expectedA) || !equal(body.slice(16), expectedB)) return;
+    if (sessionId !== this.#sessionId || !expectedA || !expectedB || (body.byteLength !== 33 && body.byteLength !== 65) || !equal(body.slice(0, 16), expectedA) || !equal(body.slice(16, 32), expectedB)) return;
+    const resumeFlag = body[32]!;
+    if ((resumeFlag === 0 && body.byteLength !== 33) || (resumeFlag === 1 && body.byteLength !== 65) || resumeFlag > 1) return;
+    this.#peerResumeDigest = resumeFlag === 1 ? body.slice(33) : undefined;
+    const canResume = this.#peerResumeDigest !== undefined && equal(this.#peerResumeDigest, this.resumeDigest());
     if (this.options.role === 'B' && this.#state === 'HelloAckSent') {
       this.clearHandshakeRetry();
-      this.#state = 'CalibratingAToB'; this.armDeadline(); this.send(Fas1UnitType.Caps, sessionId, this.capsBody()); return;
+      if (canResume && this.prepareResume()) {
+        const completion = this.send(Fas1UnitType.Caps, sessionId, this.capsBody());
+        void Promise.resolve(completion).then(() => this.queueResumeCommit(), () => this.invalidateAndRestartResume());
+      } else {
+        this.#state = 'CalibratingAToB';
+        this.armDeadline();
+        this.send(Fas1UnitType.Caps, sessionId, this.capsBody());
+      }
+      return;
+    }
+    if (this.options.role === 'B' && this.#state === 'Committing' && this.#resuming && canResume && this.#settingsDigest) {
+      this.#counters.duplicates += 1;
+      const completion = this.send(Fas1UnitType.Caps, sessionId, this.capsBody());
+      void Promise.resolve(completion).then(() => {
+        if (this.#state === 'Committing' && this.#sessionId === sessionId && this.#settingsDigest) this.send(Fas1UnitType.Commit, sessionId, this.#settingsDigest);
+      });
+      return;
     }
     if (this.options.role === 'B' && this.#state === 'CalibratingAToB') {
       // A remains CapsSent until it receives B's capability reply. If that
@@ -660,15 +795,74 @@ export class AcousticSession {
       this.send(Fas1UnitType.Caps, sessionId, this.capsBody());
       return;
     }
-    if (this.options.role === 'A' && this.#state === 'CapsSent') { this.clearHandshakeRetry(); this.#state = 'CalibratingAToB'; this.armDeadline(); this.driveProbe('AtoB'); }
+    if (this.options.role === 'A' && this.#state === 'CapsSent') {
+      this.clearHandshakeRetry();
+      if (canResume && this.prepareResume()) return;
+      this.#state = 'CalibratingAToB';
+      this.armDeadline();
+      this.driveProbe('AtoB');
+    }
   }
 
   private capsBody(): Uint8Array {
-    const body = new Uint8Array(32);
+    const resumeDigest = this.resumeDigest();
+    const body = new Uint8Array(resumeDigest ? 65 : 33);
     const aNonce = this.options.role === 'A' ? this.#localNonce! : this.#peerNonce!;
     const bNonce = this.options.role === 'B' ? this.#localNonce! : this.#peerNonce!;
     body.set(aNonce, 0); body.set(bNonce, 16);
+    body[32] = resumeDigest ? 1 : 0;
+    if (resumeDigest) body.set(resumeDigest, 33);
     return body;
+  }
+  private resumeDigest(): Uint8Array | undefined {
+    if (!this.#provenSettings || !this.#provenDigest || !this.candidateFor(this.#provenSettings.aToB) || !this.candidateFor(this.#provenSettings.bToA)) return undefined;
+    return this.#provenDigest;
+  }
+  private candidateFor(settings: DirectionalSettings): AcousticCandidate | undefined {
+    return this.options.candidates.find((candidate) => sameDirectionalSettings(candidate, settings));
+  }
+  private prepareResume(): boolean {
+    if (!this.#provenSettings || !this.#provenDigest) return false;
+    const aToB = this.candidateFor(this.#provenSettings.aToB);
+    const bToA = this.candidateFor(this.#provenSettings.bToA);
+    if (!aToB || !bToA) return false;
+    this.#selected = { AtoB: aToB, BtoA: bToA };
+    this.#settings = copySettings(this.#provenSettings);
+    this.#settingsDigest = this.#provenDigest.slice();
+    this.#resuming = true;
+    this.#state = 'Committing';
+    this.#counters.warmResumes += 1;
+    this.applyOutboundCandidate();
+    return true;
+  }
+  private queueResumeCommit(): void {
+    if (this.options.role !== 'B' || !this.#resuming || this.#state !== 'Committing' || !this.#sessionId || !this.#settingsDigest) return;
+    this.#work = this.#work.then(async () => {
+      if (!this.#resuming || this.#state !== 'Committing' || !this.#sessionId || !this.#settingsDigest) return;
+      await Promise.resolve(this.send(Fas1UnitType.Commit, this.#sessionId, this.#settingsDigest));
+      this.armCommitRetry();
+    }).catch(() => this.invalidateAndRestartResume());
+  }
+  private invalidateProvenSettings(): void {
+    this.#provenSettings = undefined;
+    this.#provenDigest = undefined;
+    this.#peerResumeDigest = undefined;
+    this.#resuming = false;
+  }
+  private invalidateAndRestartResume(): void {
+    this.invalidateProvenSettings();
+    if (this.options.role !== 'B' || !this.#sessionId) {
+      this.restartSession();
+      return;
+    }
+    const epoch = this.#epoch;
+    const sessionId = this.#sessionId;
+    const restart = (): void => {
+      if (epoch === this.#epoch && sessionId === this.#sessionId) this.reset(epoch);
+    };
+    const completion = this.send(Fas1UnitType.Reset, sessionId, new Uint8Array());
+    if (completion instanceof Promise) void completion.then(restart, restart);
+    else restart();
   }
   private armDeadline(): void {
     if (this.#timer !== undefined) return;
@@ -826,6 +1020,11 @@ export class AcousticSession {
     if (this.options.role === 'B') this.clearCommitRetry();
     this.clearDeliveryTimer(); this.#state = 'Ready'; this.#lastHeartbeatAtMs = this.options.clock.now(); this.armHeartbeatTimers();
     this.#recoveryAttempts = 0;
+    if (this.#settings && this.#settingsDigest) {
+      this.#provenSettings = copySettings(this.#settings);
+      this.#provenDigest = this.#settingsDigest.slice();
+      this.#resuming = false;
+    }
     if (reply && this.options.role === 'B') {
       // A initiates both bootstrap and bounded recovery. B's single response
       // prevents symmetric recovery waits. Wait for the negotiated acoustic
@@ -848,5 +1047,8 @@ export class AcousticSession {
   }
   private fail(reason: string): void { if (this.#timer !== undefined) this.options.timers.clearTimeout(this.#timer); this.#timer = undefined; this.clearHandshakeRetry(); this.clearProbeRetry(); this.clearCommitRetry(); this.clearHeartbeatTimers(); this.#state = 'Error'; this.#reason = reason; }
   private mutualRange(peer: AcousticCapabilityRange): boolean { return peer.minPayloadBytes <= this.options.ranges.maxPayloadBytes && peer.maxPayloadBytes >= this.options.ranges.minPayloadBytes; }
-  private send(type: Fas1UnitType, sessionId: bigint, body: Uint8Array): void | Promise<void> { const raw = encodeFas1({ type, flags: senderFlag(this.options.role), sessionId, sequence: this.#sequence++, packetId: 0, fragmentIndex: 0, fragmentCount: 0, packetLength: 0, body }); return this.options.modem.send(raw); }
+  private send(type: Fas1UnitType, sessionId: bigint, body: Uint8Array): void | Promise<void> {
+    const raw = encodeFas1({ type, flags: senderFlag(this.options.role), sessionId, sequence: this.#sequence++, packetId: 0, fragmentIndex: 0, fragmentCount: 0, packetLength: 0, body });
+    return this.options.modem.send(raw, CEREMONY_TYPES.has(type) ? 'ceremony' : 'data');
+  }
 }
