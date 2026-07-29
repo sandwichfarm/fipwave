@@ -7,8 +7,8 @@ current_phase_name: prove-the-sound-only-fips-ping
 status: planning
 stopped_at: Completed 04-02-PLAN.md
 last_updated: "2026-07-24T10:39:57.475Z"
-last_activity: 2026-07-24
-last_activity_desc: Phase 03 software verified; physical acceptance deferred
+last_activity: 2026-07-29
+last_activity_desc: Completed quick task 260729-2ly; open-air performance check remains
 progress:
   total_phases: 4
   completed_phases: 2
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-07-24)
 Phase: 04 (prove-the-sound-only-fips-ping) — IN PROGRESS
 Plan: 2 of 5
 Status: Executing remaining plans
-Last activity: 2026-07-24 — Phase 03 software verified; physical acceptance deferred
+Last activity: 2026-07-29 — Completed quick task 260729-2ly; open-air performance check remains
 
 Progress: [█████████░] 86%
 
@@ -140,6 +140,9 @@ Recent decisions affecting current work:
 - [Phase ?]: Phase 3: The built browser's two-role FAS1 seam is Fixture-only evidence and cannot claim Loopback or Open air.
 - [Phase ?]: Phase 4 Plan 1: FIPS proof observation permits only fixed peers/links/transports Unix-socket queries, and the controller requires an explicit configured B target before process launch.
 - [Phase ?]: Phase 4 Plan 2: Role B is strictly Sound-only; FIPS control remains a private Unix socket over an internal named volume, and remote Sound proof stays human_needed until the two-laptop gate.
+- [Quick 260729-2ly]: Acoustic DATA uses eight-fragment bursts with one XOR parity frame per four DATA fragments; CRC-valid parity may recover exactly one erased frame per group before bitmap retransmission.
+- [Quick 260729-2ly]: Automatic same-epoch reconnects always create a fresh nonce-bound session, but mutually matching proven settings digests skip calibration and retain normal COMMIT/heartbeat readiness gates.
+- [Quick 260729-2ly]: Quiet remains the single modem runtime; only small ceremony units use captured redundant transmission settings, while ggwave/alternative frequencies remain an exact-hardware experiment.
 
 ### Pending Todos
 
@@ -156,6 +159,12 @@ None yet.
 
 None for continued implementation. Final physical qualification remains
 explicitly deferred below and still gates the final Open air claim.
+
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Status | Directory |
+|---|-------------|------|--------|--------|-----------|
+| 260729-2ly | Improve acoustic connection speed and reliability with erasure correction, fast same-epoch resume, robust ceremony transmission, and live throughput | 2026-07-29 | d244fb8 | Needs Review | [260729-2ly-improve-acoustic-connection-speed-and-re](./quick/260729-2ly-improve-acoustic-connection-speed-and-re/) |
 
 ## Deferred Verification
 
