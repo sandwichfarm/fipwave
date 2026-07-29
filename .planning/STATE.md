@@ -8,7 +8,7 @@ status: planning
 stopped_at: Completed 04-02-PLAN.md
 last_updated: "2026-07-24T10:39:57.475Z"
 last_activity: 2026-07-29
-last_activity_desc: Completed quick task 260729-2ly; open-air performance check remains
+last_activity_desc: Completed quick task 260729-382; open-air performance check remains
 progress:
   total_phases: 4
   completed_phases: 2
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-07-24)
 Phase: 04 (prove-the-sound-only-fips-ping) — IN PROGRESS
 Plan: 2 of 5
 Status: Executing remaining plans
-Last activity: 2026-07-29 — Completed quick task 260729-2ly; open-air performance check remains
+Last activity: 2026-07-29 — Completed quick task 260729-382; open-air performance check remains
 
 Progress: [█████████░] 86%
 
@@ -143,6 +143,7 @@ Recent decisions affecting current work:
 - [Quick 260729-2ly]: Acoustic DATA uses eight-fragment bursts with one XOR parity frame per four DATA fragments; CRC-valid parity may recover exactly one erased frame per group before bitmap retransmission.
 - [Quick 260729-2ly]: Automatic same-epoch reconnects always create a fresh nonce-bound session, but mutually matching proven settings digests skip calibration and retain normal COMMIT/heartbeat readiness gates.
 - [Quick 260729-2ly]: Quiet remains the single modem runtime; only small ceremony units use captured redundant transmission settings, while ggwave/alternative frequencies remain an exact-hardware experiment.
+- [Quick 260729-382]: The runner supplies an explicit reciprocal `peerMachineId` to the browser, and FAS1 validates that identity rather than assuming `fipwave-a`/`fipwave-b`; legacy callers retain a role-derived compatibility default.
 
 ### Pending Todos
 
@@ -165,6 +166,7 @@ explicitly deferred below and still gates the final Open air claim.
 | # | Description | Date | Commit | Status | Directory |
 |---|-------------|------|--------|--------|-----------|
 | 260729-2ly | Improve acoustic connection speed and reliability with erasure correction, fast same-epoch resume, robust ceremony transmission, and live throughput | 2026-07-29 | d244fb8 | Needs Review | [260729-2ly-improve-acoustic-connection-speed-and-re](./quick/260729-2ly-improve-acoustic-connection-speed-and-re/) |
+| 260729-382 | Make the acoustic peer identity explicit across runner configuration so documented arbitrary machine IDs can complete the FAS1 handshake | 2026-07-29 | b31ddf8 | Verified | [260729-382-make-the-acoustic-peer-identity-explicit](./quick/260729-382-make-the-acoustic-peer-identity-explicit/) |
 
 ## Deferred Verification
 
