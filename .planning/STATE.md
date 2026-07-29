@@ -8,7 +8,7 @@ status: planning
 stopped_at: Completed 04-02-PLAN.md
 last_updated: "2026-07-24T10:39:57.475Z"
 last_activity: 2026-07-29
-last_activity_desc: Completed quick task 260729-382; open-air performance check remains
+last_activity_desc: Completed quick task 260729-3d7; gated physical loopback passed, open-air performance check remains
 progress:
   total_phases: 4
   completed_phases: 2
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-07-24)
 Phase: 04 (prove-the-sound-only-fips-ping) — IN PROGRESS
 Plan: 2 of 5
 Status: Executing remaining plans
-Last activity: 2026-07-29 — Completed quick task 260729-382; open-air performance check remains
+Last activity: 2026-07-29 — Completed quick task 260729-3d7; gated physical loopback passed, open-air performance check remains
 
 Progress: [█████████░] 86%
 
@@ -144,6 +144,7 @@ Recent decisions affecting current work:
 - [Quick 260729-2ly]: Automatic same-epoch reconnects always create a fresh nonce-bound session, but mutually matching proven settings digests skip calibration and retain normal COMMIT/heartbeat readiness gates.
 - [Quick 260729-2ly]: Quiet remains the single modem runtime; only small ceremony units use captured redundant transmission settings, while ggwave/alternative frequencies remain an exact-hardware experiment.
 - [Quick 260729-382]: The runner supplies an explicit reciprocal `peerMachineId` to the browser, and FAS1 validates that identity rather than assuming `fipwave-a`/`fipwave-b`; legacy callers retain a role-derived compatibility default.
+- [Quick 260729-3d7]: Physical corpus playback waits for both FAS1 sessions to commit settings and observe a heartbeat; the local built-in speaker/microphone loopback reached Ready in about 35 seconds and exchanged one byte-perfect 256-byte message in each direction.
 
 ### Pending Todos
 
@@ -167,6 +168,7 @@ explicitly deferred below and still gates the final Open air claim.
 |---|-------------|------|--------|--------|-----------|
 | 260729-2ly | Improve acoustic connection speed and reliability with erasure correction, fast same-epoch resume, robust ceremony transmission, and live throughput | 2026-07-29 | d244fb8 | Needs Review | [260729-2ly-improve-acoustic-connection-speed-and-re](./quick/260729-2ly-improve-acoustic-connection-speed-and-re/) |
 | 260729-382 | Make the acoustic peer identity explicit across runner configuration so documented arbitrary machine IDs can complete the FAS1 handshake | 2026-07-29 | b31ddf8 | Verified | [260729-382-make-the-acoustic-peer-identity-explicit](./quick/260729-382-make-the-acoustic-peer-identity-explicit/) |
+| 260729-3d7 | Gate the physical self-loop corpus behind real FAS1 acoustic readiness and capture readiness failures for handshake diagnosis | 2026-07-29 | 70958ea | Verified | [260729-3d7-gate-the-physical-self-loop-corpus-behin](./quick/260729-3d7-gate-the-physical-self-loop-corpus-behin/) |
 
 ## Deferred Verification
 
