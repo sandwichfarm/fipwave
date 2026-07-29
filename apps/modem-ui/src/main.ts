@@ -265,7 +265,7 @@ function configureAcousticSession(config: Readonly<RunnerConfig>): void {
     applyCandidate(candidate: { playbackGain: number; repetition: number; guardMs: number }): void { quiet.configureAcousticCandidate(candidate); },
   };
   const session = new AcousticSession({
-    role: config.role, identity: config.machineId, expectedPeer: config.role === 'A' ? 'fipwave-b' : 'fipwave-a', modem,
+    role: config.role, identity: config.machineId, expectedPeer: config.peerMachineId, modem,
     clock: { now: () => Date.now() }, timers: { setTimeout: (callback, delay) => window.setTimeout(callback, delay) as unknown as ReturnType<typeof setTimeout>, clearTimeout: (handle) => window.clearTimeout(handle as unknown as number) },
     nonce: () => crypto.getRandomValues(new Uint8Array(16)), profiles: acousticConfig.profiles, ranges: acousticConfig.ranges,
     // Preserve the exact runner allowlist and order.  Warm-start selection is

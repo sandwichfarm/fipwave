@@ -166,6 +166,7 @@ On **Laptop A**:
 ```sh
 npm run qualification:serve -- \
   --machine-id laptop-a \
+  --peer-machine-id laptop-b \
   --role A \
   --port 4173 \
   --report .artifacts/qualification/laptop-a.json \
@@ -178,6 +179,7 @@ On **Laptop B**:
 ```sh
 npm run qualification:serve -- \
   --machine-id laptop-b \
+  --peer-machine-id laptop-a \
   --role B \
   --port 4173 \
   --report .artifacts/qualification/laptop-b.json \
@@ -200,6 +202,7 @@ tab and verify:
 | Field | Laptop A | Laptop B |
 |---|---|---|
 | `machineId` | `laptop-a` | `laptop-b` |
+| `peerMachineId` | `laptop-b` | `laptop-a` |
 | `role` | `A` | `B` |
 | `evidenceClass` | `Open air` | `Open air` |
 | `tunEvidenceSource` | `exact_host` | `exact_host` |

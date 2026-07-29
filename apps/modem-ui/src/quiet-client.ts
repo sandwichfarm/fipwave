@@ -13,6 +13,7 @@ export type EvidenceClass = 'Fixture' | 'Loopback' | 'Open air';
 
 export interface RunnerConfig {
   machineId: string;
+  peerMachineId: string;
   role: Role;
   fipsNetwork?: Readonly<{ localPublicKey: string; peerPublicKey: string; localIpv6: string; peerIpv6: string }>;
   reportTarget: string;
@@ -163,10 +164,12 @@ export async function fetchRunnerConfig(): Promise<Readonly<RunnerConfig>> {
   // Local audio preflight/bridge UI predates the acoustic calibration contract
   // and remains valid without an acoustic peer.  If a runner supplies the
   // acoustic projection it must still pass the exact fail-closed schema above.
-  if (!value.machineId || (value.role !== 'A' && value.role !== 'B') || !value.reportTarget || !value.tunEvidence || !evidenceClass || !['Fixture', 'Loopback', 'Open air'].includes(evidenceClass) || value.evidenceMode !== evidenceClass || (acoustic !== undefined && !validAcoustic) || (fipsNetwork !== undefined && !validFipsNetwork)) throw new Error('runner qualification configuration is invalid');
+  const machineId = typeof value.machineId === 'string' && /^[A-Za-z0-9._/-]+$/.test(value.machineId) && !value.machineId.includes('..') ? value.machineId : undefined;
+  const peerMachineId = typeof value.peerMachineId === 'string' && /^[A-Za-z0-9._/-]+$/.test(value.peerMachineId) && !value.peerMachineId.includes('..') && value.peerMachineId !== machineId ? value.peerMachineId : undefined;
+  if (!machineId || !peerMachineId || (value.role !== 'A' && value.role !== 'B') || !value.reportTarget || !value.tunEvidence || !evidenceClass || !['Fixture', 'Loopback', 'Open air'].includes(evidenceClass) || value.evidenceMode !== evidenceClass || (acoustic !== undefined && !validAcoustic) || (fipsNetwork !== undefined && !validFipsNetwork)) throw new Error('runner qualification configuration is invalid');
   const publicAcoustic = validAcoustic ? Object.freeze({ profiles: ['quiet-audible-7k-v1'] as ['quiet-audible-7k-v1'], ranges: Object.freeze({ ...(acoustic as NonNullable<RunnerConfig['acoustic']>).ranges }), candidates: Object.freeze((acoustic as NonNullable<RunnerConfig['acoustic']>).candidates.map((candidate) => Object.freeze({ ...candidate }))), calibration: Object.freeze({ ...(acoustic as NonNullable<RunnerConfig['acoustic']>).calibration }) }) : undefined;
   const publicFipsNetwork = validFipsNetwork ? Object.freeze({ ...fipsNetwork }) : undefined;
-  return Object.freeze({ machineId: value.machineId, role: value.role, reportTarget: value.reportTarget, tunEvidence: value.tunEvidence, evidenceMode: evidenceClass, evidenceClass, ...(publicFipsNetwork ? { fipsNetwork: publicFipsNetwork } : {}), ...(publicAcoustic ? { acoustic: publicAcoustic } : {}) });
+  return Object.freeze({ machineId, peerMachineId, role: value.role, reportTarget: value.reportTarget, tunEvidence: value.tunEvidence, evidenceMode: evidenceClass, evidenceClass, ...(publicFipsNetwork ? { fipsNetwork: publicFipsNetwork } : {}), ...(publicAcoustic ? { acoustic: publicAcoustic } : {}) });
 }
 
 export function directionForRole(role: Role): LiteralDirection { return role === 'A' ? 'A → B' : 'B → A'; }

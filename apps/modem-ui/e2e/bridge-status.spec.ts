@@ -40,7 +40,7 @@ async function mockBrowserAudio(page: import('@playwright/test').Page, microphon
 }
 
 test('uses stable runner identity readiness while preserving the displayed role description', async ({ page }) => {
-  await page.route('**/qualification-config', (route) => route.fulfill({ json: { machineId: 'fipwave-a', role: 'A', reportTarget: '/tmp/report.json', tunEvidence: 'none', evidenceMode: 'Loopback', evidenceClass: 'Loopback' } }));
+  await page.route('**/qualification-config', (route) => route.fulfill({ json: { machineId: 'fipwave-a', peerMachineId: 'fipwave-b', role: 'A', reportTarget: '/tmp/report.json', tunEvidence: 'none', evidenceMode: 'Loopback', evidenceClass: 'Loopback' } }));
   await page.goto('http://127.0.0.1:5173/');
 
   const liveStatus = page.locator('header').getByRole('status');
@@ -80,7 +80,7 @@ test('keeps long safe content and diagnostic tables inside the viewport', async 
 
 test('keeps recovery visible and disabled during reset, then restores retry after failure', async ({ page }) => {
   await mockBrowserAudio(page, 'Built-in microphone', true);
-  await page.route('**/qualification-config', (route) => route.fulfill({ json: { machineId: 'fipwave-a', role: 'A', reportTarget: '/tmp/report.json', tunEvidence: 'none', evidenceMode: 'Loopback', evidenceClass: 'Loopback' } }));
+  await page.route('**/qualification-config', (route) => route.fulfill({ json: { machineId: 'fipwave-a', peerMachineId: 'fipwave-b', role: 'A', reportTarget: '/tmp/report.json', tunEvidence: 'none', evidenceMode: 'Loopback', evidenceClass: 'Loopback' } }));
   await page.goto('http://127.0.0.1:5173/');
   await page.getByRole('button', { name: 'Arm modem' }).click();
   const recovery = page.getByRole('button', { name: 'Reset and reconnect' });

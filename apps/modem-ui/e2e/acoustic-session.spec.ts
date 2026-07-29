@@ -13,7 +13,7 @@ let runner: Awaited<ReturnType<typeof startProductionRunner>>;
 let reportDirectory = '';
 test.beforeAll(async () => {
   reportDirectory = await mkdtemp(path.join(tmpdir(), 'fipwave-acoustic-fixture-'));
-  runner = await startProductionRunner({ machineId: 'fipwave-a', role: 'A', port: 0, report: path.join(reportDirectory, 'report.json'), tunEvidence: 'none', evidenceMode: 'Fixture', uiDir: path.resolve('dist/modem-ui') });
+  runner = await startProductionRunner({ machineId: 'laptop-a', peerMachineId: 'laptop-b', role: 'A', port: 0, report: path.join(reportDirectory, 'report.json'), tunEvidence: 'none', evidenceMode: 'Fixture', uiDir: path.resolve('dist/modem-ui') });
 });
 test.afterAll(async () => { await runner?.close(); await rm(reportDirectory, { recursive: true, force: true }); });
 
@@ -32,4 +32,10 @@ test('built browser reports Fixture-status acoustic readiness as fail-closed bef
   await expect(page.getByText(/Not started — microphone preflight does not claim an acoustic peer or FIPS readiness/)).toBeVisible();
   await expect(page.getByText(/Evidence: Fixture/)).toBeVisible();
   await expect.poll(() => page.evaluate(() => window.__fipwaveAcousticFixture)).toEqual({ evidenceClass: 'Fixture', aReady: true, bReady: true, aToBBytes: 1_357, bToABytes: 1_357 });
+});
+
+test('runner projects the configured peer identity for the FAS1 handshake', async ({ request }) => {
+  const response = await request.get(`http://127.0.0.1:${runner.port}/qualification-config`);
+  expect(response.ok()).toBe(true);
+  await expect(response.json()).resolves.toMatchObject({ machineId: 'laptop-a', peerMachineId: 'laptop-b', role: 'A' });
 });

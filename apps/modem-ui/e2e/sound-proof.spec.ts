@@ -12,7 +12,7 @@ const readyProof = (result: unknown = undefined) => ({
 });
 
 async function configureProofPage(page: import('@playwright/test').Page, role: 'A' | 'B') {
-  await page.route('**/qualification-config', (route) => route.fulfill({ json: { machineId: role === 'A' ? 'fipwave-a' : 'fipwave-b', role, reportTarget: '/tmp/report.json', tunEvidence: 'none', evidenceMode: 'Loopback', evidenceClass: 'Loopback' } }));
+  await page.route('**/qualification-config', (route) => route.fulfill({ json: { machineId: role === 'A' ? 'fipwave-a' : 'fipwave-b', peerMachineId: role === 'A' ? 'fipwave-b' : 'fipwave-a', role, reportTarget: '/tmp/report.json', tunEvidence: 'none', evidenceMode: 'Loopback', evidenceClass: 'Loopback' } }));
   await page.goto('http://127.0.0.1:5173/?debug=1');
 }
 

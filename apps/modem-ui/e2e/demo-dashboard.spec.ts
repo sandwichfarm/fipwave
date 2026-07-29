@@ -9,6 +9,7 @@ async function loadDemo(page: import('@playwright/test').Page, role: 'A' | 'B') 
   await page.route('**/qualification-config', (route) => route.fulfill({
     json: {
       machineId: role === 'A' ? 'fipwave-a' : 'fipwave-b',
+      peerMachineId: role === 'A' ? 'fipwave-b' : 'fipwave-a',
       role,
       reportTarget: '/tmp/report.json',
       tunEvidence: 'none',

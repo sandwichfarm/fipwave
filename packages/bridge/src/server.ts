@@ -56,6 +56,8 @@ export interface RunnerAcousticCalibration {
 }
 export interface RunnerQualificationConfig {
   machineId: string;
+  /** Exact FAS1 identity accepted during the acoustic HELLO exchange. */
+  peerMachineId: string;
   role: 'A' | 'B';
   fipsNetwork?: Readonly<{ localPublicKey: string; peerPublicKey: string; localIpv6: string; peerIpv6: string }>;
   reportTarget: string;

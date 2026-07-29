@@ -245,6 +245,7 @@ function startRunner(spec, options, recorder) {
   const args = [
     runnerPath,
     '--machine-id', spec.machineId,
+    '--peer-machine-id', spec.peerMachineId,
     '--role', spec.role,
     '--port', String(spec.port),
     '--report', relativeReport,
@@ -512,6 +513,7 @@ async function main() {
     A: {
       role: 'A',
       machineId: 'self-loop-a',
+      peerMachineId: 'self-loop-b',
       port: options.portA,
       reportPath: path.join(runDirectory, 'role-a.json'),
       runDirectory,
@@ -519,6 +521,7 @@ async function main() {
     B: {
       role: 'B',
       machineId: 'self-loop-b',
+      peerMachineId: 'self-loop-a',
       port: options.portB,
       reportPath: path.join(runDirectory, 'role-b.json'),
       runDirectory,

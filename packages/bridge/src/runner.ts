@@ -31,7 +31,7 @@ function findProjectRoot(from: string): string {
 const PROJECT_ROOT = findProjectRoot(path.dirname(fileURLToPath(import.meta.url)));
 interface BuildIdentity { commit: string; os: string; architecture: string; dirty: boolean; }
 export interface ProductionRunnerOptions {
-  machineId: string; role?: 'A' | 'B'; port?: number; host?: typeof LOOPBACK_HOST | '0.0.0.0'; report: string; tunEvidence: string;
+  machineId: string; peerMachineId?: string; role?: 'A' | 'B'; port?: number; host?: typeof LOOPBACK_HOST | '0.0.0.0'; report: string; tunEvidence: string;
   fastGuardMs?: number;
   demoConfig?: DemoConfig;
   evidenceMode?: 'Fixture' | 'Loopback'; physicalOpenAir?: boolean; uiDir?: string; codecAssetDir?: string; codecAssets?: readonly CodecAsset[];
@@ -179,6 +179,9 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
   };
   const demoConfig = options.demoConfig ?? (roleInput ? resolveDemoConfig(roleInput, Object.keys(demoOverride).length ? demoOverride : undefined) : fail('role must be literal A or B'));
   if (options.role && options.role !== demoConfig.role) fail('role does not match resolved config');
+  const peerMachineId = options.peerMachineId ?? (demoConfig.role === 'A' ? 'fipwave-b' : 'fipwave-a');
+  assertText(peerMachineId, 'peer machine ID');
+  if (peerMachineId === options.machineId) fail('peer machine ID must differ from machine ID');
   const fipsConfig = options.fipsConfigOutput ? renderFipsConfig(demoConfig) : undefined;
   const runtimePort = options.demoConfig ? demoConfig.bridge.browserPort : options.port;
   if (typeof runtimePort !== 'number' || !Number.isInteger(runtimePort) || runtimePort < 0 || runtimePort > 65_535) fail('port is invalid');
@@ -202,7 +205,7 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
   const calibrationCandidates = demoConfig.calibrationCandidates.map((candidate) => ({ id: candidate.id, profileId: candidate.profileId, payloadBytes: candidate.payloadBytes, repetition: candidate.repetition, guardMs: candidate.guardMs, playbackGain: candidate.playbackGain, ackTimeoutMs: candidate.ackTimeoutMs }));
   const peerIpv6 = resolveDemoConfig(demoConfig.role === 'A' ? 'b' : 'a').fips.ipv6Address;
   const config = Object.freeze({
-    machineId: options.machineId, role: demoConfig.role, reportTarget: options.report, tunEvidence: options.tunEvidence, tunEvidenceSource: tunEvidence.source, evidenceMode, evidenceClass: evidenceMode, buildCommit: build.commit, codec: { ...QUIET_CODEC }, qualification,
+    machineId: options.machineId, peerMachineId, role: demoConfig.role, reportTarget: options.report, tunEvidence: options.tunEvidence, tunEvidenceSource: tunEvidence.source, evidenceMode, evidenceClass: evidenceMode, buildCommit: build.commit, codec: { ...QUIET_CODEC }, qualification,
     fipsNetwork: { localPublicKey: demoConfig.identity.publicKey, peerPublicKey: demoConfig.peer.publicKey, localIpv6: demoConfig.fips.ipv6Address, peerIpv6 },
     // The browser receives this exact public projection of demo-config.  It
     // cannot invent, reorder, or truncate acoustic candidates at runtime.
@@ -370,13 +373,14 @@ function parseCli(argv: string[]): ProductionRunnerOptions {
   const values = new Map<string, string>(); let physicalOpenAir = false;
   for (let index = 0; index < argv.length; index += 1) {
     const key = argv[index]!; if (key === '--physical-open-air') { physicalOpenAir = true; continue; }
-    const value = argv[index + 1]; if (!['--machine-id', '--role', '--port', '--report', '--tun-evidence', '--evidence-mode', '--fips-config', '--bind-host', '--fast-guard-ms'].includes(key) || !value) fail('usage: --machine-id ID --role A|B --port PORT --report PATH --tun-evidence PATH [--evidence-mode Fixture|Loopback] [--fips-config PATH] [--bind-host 127.0.0.1|0.0.0.0] [--fast-guard-ms 50..1500] [--physical-open-air]');
+    const value = argv[index + 1]; if (!['--machine-id', '--peer-machine-id', '--role', '--port', '--report', '--tun-evidence', '--evidence-mode', '--fips-config', '--bind-host', '--fast-guard-ms'].includes(key) || !value) fail('usage: --machine-id ID --peer-machine-id ID --role A|B --port PORT --report PATH --tun-evidence PATH [--evidence-mode Fixture|Loopback] [--fips-config PATH] [--bind-host 127.0.0.1|0.0.0.0] [--fast-guard-ms 50..1500] [--physical-open-air]');
     values.set(key, value); index += 1;
   }
   const evidenceMode = values.get('--evidence-mode') as 'Fixture' | 'Loopback' | undefined; if (evidenceMode && evidenceMode !== 'Fixture' && evidenceMode !== 'Loopback') fail('deterministic evidence mode must be Fixture or Loopback');
   const host = values.get('--bind-host');
   if (host !== undefined && host !== LOOPBACK_HOST && host !== '0.0.0.0') fail('bind host is invalid');
-  const parsed: ProductionRunnerOptions = { machineId: values.get('--machine-id') ?? '', role: values.get('--role') as 'A' | 'B', port: Number(values.get('--port')), report: values.get('--report') ?? '', tunEvidence: values.get('--tun-evidence') ?? '', physicalOpenAir, ...(host ? { host } : {}) };
+  const configuredPeerMachineId = values.get('--peer-machine-id');
+  const parsed: ProductionRunnerOptions = { machineId: values.get('--machine-id') ?? '', role: values.get('--role') as 'A' | 'B', port: Number(values.get('--port')), report: values.get('--report') ?? '', tunEvidence: values.get('--tun-evidence') ?? '', physicalOpenAir, ...(host ? { host } : {}), ...(configuredPeerMachineId ? { peerMachineId: configuredPeerMachineId } : {}) };
   const fastGuard = values.get('--fast-guard-ms');
   if (fastGuard !== undefined) parsed.fastGuardMs = Number(fastGuard);
   if (evidenceMode !== undefined) parsed.evidenceMode = evidenceMode;
