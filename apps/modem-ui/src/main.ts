@@ -14,6 +14,7 @@ import { CyrinxQualificationSession, type CyrinxSessionSnapshot } from './qualif
 import { safeConfigReason, safeUiReason } from './ui-errors.js';
 import { reduceProofState, type ProofState } from './proof-state.js';
 import { DEMO_IMAGE_DATA_URL, DEMO_IMAGE_HEIGHT, DEMO_IMAGE_WIDTH, decodeBand, demoImageRaster, type ImageTransferSnapshot } from './demo-image.js';
+import { formatBitRate, ThroughputTracker, type ThroughputRate } from './throughput.js';
 import {
   QUIET_PROFILE,
   QuietClient,
@@ -103,6 +104,8 @@ let acousticTx = 0;
 let acousticRx = 0;
 let acousticFramesTx = 0;
 let acousticFramesRx = 0;
+const throughputTracker = new ThroughputTracker();
+let acousticThroughput: ThroughputRate = Object.freeze({ txBitsPerSecond: 0, rxBitsPerSecond: 0 });
 type DemoStageTiming = Readonly<{ label: string; durationMs: number }>;
 let activeDemoStage: { label: string; startedAtMs: number } | undefined;
 let completedDemoStages: DemoStageTiming[] = [];
@@ -220,6 +223,8 @@ function sendAcousticControl(type: 12 | 13, controlEpoch: number): boolean {
 function configureAcousticSession(config: Readonly<RunnerConfig>): void {
   acousticAdapter?.invalidate();
   acousticSession?.dispose();
+  throughputTracker.reset();
+  acousticThroughput = Object.freeze({ txBitsPerSecond: 0, rxBitsPerSecond: 0 });
   const acousticConfig = config.acoustic;
   // Local bridge/audio facts remain usable without a peer or a calibration
   // projection. Only the acoustic/FIPS path is unavailable in that mode.
@@ -227,12 +232,12 @@ function configureAcousticSession(config: Readonly<RunnerConfig>): void {
   let adapter: AcousticSessionAdapter | undefined;
   let transmit = Promise.resolve();
   const modem = {
-    send(unit: Uint8Array): Promise<void> {
+    send(unit: Uint8Array, mode: 'ceremony' | 'data' = 'data'): Promise<void> {
       const queuedEpoch = epoch;
       acousticFramesTx += 1;
       // Quiet's Promise is local playback completion plus guard only. The
       // session's remote ACK and heartbeat remain the delivery/readiness proof.
-      transmit = transmit.then(() => quiet.sendUnit(unit, queuedEpoch)).then(() => undefined, () => {
+      transmit = transmit.then(() => quiet.sendUnit(unit, queuedEpoch, mode)).then(() => undefined, () => {
         adapter?.markDegraded();
       });
       return transmit;
@@ -1074,6 +1079,8 @@ function renderDemo(): void {
     activity.append(demoStatus(`Heartbeat: ${acoustic.currentHeartbeat ? `Current · ${new Date(acousticSnapshot?.lastHeartbeatAtMs ?? 0).toLocaleTimeString()}` : 'Waiting'}`, Boolean(acoustic.currentHeartbeat)));
     activity.append(demoStatus(`Acoustic frames TX / RX: ${acousticFramesTx} / ${acousticFramesRx}`));
     activity.append(demoStatus(`FIPS packets TX / RX: ${acoustic.txPackets} / ${acoustic.rxPackets}`));
+    activity.append(demoStatus(`Payload rate TX / RX: ${formatBitRate(acousticThroughput.txBitsPerSecond)} / ${formatBitRate(acousticThroughput.rxBitsPerSecond)}`));
+    activity.append(demoStatus(`Parity TX / RX / recovered: ${acousticSnapshot?.counters.parityFramesTx ?? 0} / ${acousticSnapshot?.counters.parityFramesRx ?? 0} / ${acousticSnapshot?.counters.recoveredFragments ?? 0}`));
     activity.append(demoStatus(`Retries / loss: ${acoustic.retries} / ${acoustic.dropped}`));
     activity.append(demoStatus(`FIPS proof: ${proofState.mode === 'ready' ? 'Ready' : proofState.message}`));
   }
@@ -1260,6 +1267,7 @@ function render(): void {
   else {
     acousticCard.append(element('p', `${acoustic.phase} · evidence: ${acoustic.evidenceClass} · FIPS ${acoustic.ready ? 'ready' : 'disarmed'}`));
     acousticCard.append(element('p', `Commit acknowledgement: ${acoustic.commitAcknowledged ? 'yes' : 'no'} · current heartbeat: ${acoustic.currentHeartbeat ? 'yes' : 'no'} · packets TX/RX: ${acoustic.txPackets}/${acoustic.rxPackets}`));
+    acousticCard.append(element('p', `Payload rate TX/RX: ${formatBitRate(acousticThroughput.txBitsPerSecond)} / ${formatBitRate(acousticThroughput.rxBitsPerSecond)} · parity TX/RX/recovered: ${acousticSession?.snapshot.counters.parityFramesTx ?? 0}/${acousticSession?.snapshot.counters.parityFramesRx ?? 0}/${acousticSession?.snapshot.counters.recoveredFragments ?? 0}`));
     if (acoustic.reason) acousticCard.append(element('p', `Safe reason: ${acoustic.reason}`));
   }
   grid.append(acousticCard);
@@ -1529,5 +1537,15 @@ window.setInterval(() => {
   observedDemoState = current;
   render();
 }, 250);
+window.setInterval(() => {
+  const counters = acousticSession?.snapshot.counters;
+  const next = throughputTracker.sample(performance.now(), {
+    txBytes: counters?.deliveredBytesTx ?? 0,
+    rxBytes: counters?.deliveredBytesRx ?? 0,
+  });
+  const changed = next.txBitsPerSecond !== acousticThroughput.txBitsPerSecond || next.rxBitsPerSecond !== acousticThroughput.rxBitsPerSecond;
+  acousticThroughput = next;
+  if (changed) render();
+}, 500);
 window.setInterval(() => { if (!debugMode && !fipsPeerRequest) void refreshFipsPeerStatus(); }, 1_500);
 window.setInterval(() => { if (!debugMode) void refreshImageTransfer(); }, 750);
