@@ -900,5 +900,9 @@ describe('AcousticSession priority, backpressure, heartbeat, degraded recovery, 
     });
     expect(a.snapshot.sessionId).toBe(b.snapshot.sessionId);
     expect(a.snapshot.sessionId).not.toBe(originalSessionId);
+    expect(a.snapshot.ledger).toHaveLength(0);
+    expect(b.snapshot.ledger).toHaveLength(0);
+    expect(a.snapshot.counters.warmResumes).toBe(1);
+    expect(b.snapshot.counters.warmResumes).toBe(1);
   });
 });
