@@ -16,6 +16,7 @@ const DEFAULTS = Object.freeze({
   portA: 4174,
   portB: 4175,
   startupTimeoutMs: 60_000,
+  sessionReadyTimeoutMs: 60_000,
   directionTimeoutMs: 12 * 60_000,
 });
 const FIRST_CASE = Object.freeze({
@@ -35,6 +36,7 @@ function usage() {
     '  --port-a 1024..65535          role A runner port (default: 4174)',
     '  --port-b 1024..65535          role B runner port (default: 4175)',
     '  --startup-timeout-ms N        runner/browser startup timeout (default: 60000)',
+    '  --session-ready-timeout-ms N  FAS1-ready timeout before corpus traffic (default: 60000)',
     '  --direction-timeout-ms N      timeout for each full corpus (default: 720000)',
     '  --help                        show this help',
   ].join('\n');
@@ -58,6 +60,7 @@ export function parseArgs(values) {
     ['--port-a', ['portA', 1024, 65_535]],
     ['--port-b', ['portB', 1024, 65_535]],
     ['--startup-timeout-ms', ['startupTimeoutMs', 1_000, 60 * 60_000]],
+    ['--session-ready-timeout-ms', ['sessionReadyTimeoutMs', 1_000, 60 * 60_000]],
     ['--direction-timeout-ms', ['directionTimeoutMs', 1_000, 60 * 60_000]],
   ]);
   for (let index = 0; index < values.length; index += 1) {
@@ -434,6 +437,35 @@ async function operatorText(page) {
   return page.locator('.operator-card').innerText();
 }
 
+async function acousticSessionText(page) {
+  if (page.isClosed()) return 'page closed';
+  return page.getByRole('heading', { name: 'Acoustic session', exact: true }).locator('..').innerText();
+}
+
+function acousticSessionReady(copy) {
+  return /^Ready · evidence: Loopback · FIPS ready/m.test(copy);
+}
+
+async function waitForAcousticReady(pages, options, recorder, signal) {
+  const deadline = Date.now() + options.sessionReadyTimeoutMs;
+  let last = '';
+  while (Date.now() < deadline) {
+    if (signal.aborted) throw signal.reason;
+    const [a, b] = await Promise.all([acousticSessionText(pages.A), acousticSessionText(pages.B)]);
+    const serialized = JSON.stringify({ A: a, B: b });
+    if (serialized !== last) {
+      recorder.event('acoustic-readiness-progress', { A: a, B: b, message: 'waiting for both FAS1 sessions to become ready' }, true);
+      last = serialized;
+    }
+    if (acousticSessionReady(a) && acousticSessionReady(b)) {
+      recorder.event('acoustic-ready', { A: a, B: b, message: 'both FAS1 sessions are ready before corpus traffic' }, true);
+      return { A: a, B: b };
+    }
+    await delay(500, signal);
+  }
+  throw new Error(`FAS1 acoustic readiness did not complete within ${options.sessionReadyTimeoutMs} ms; last state ${last || 'unavailable'}`);
+}
+
 async function sendDirection(input) {
   const {
     direction,
@@ -656,6 +688,8 @@ async function main() {
     validatePageAudio('B', audioB, summary.hardware.input.name);
     summary.browserAudio = { A: audioA, B: audioB };
     recorder.event('quiet-armed', { epoch, browserAudio: summary.browserAudio, message: `both roles listening at epoch ${epoch}` }, true);
+
+    summary.acousticReadiness = await waitForAcousticReady(pages, options, recorder, abortController.signal);
 
     const [initialA, initialB] = await Promise.all([
       readJsonIfPresent(specs.A.reportPath),

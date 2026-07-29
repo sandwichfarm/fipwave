@@ -10,6 +10,7 @@ describe('self-loop smoke harness', () => {
       '--messages-per-direction', '5',
       '--port-a', '4180',
       '--port-b', '4181',
+      '--session-ready-timeout-ms', '90000',
       '--direction-timeout-ms', '120000',
     ])).toMatchObject({
       help: false,
@@ -19,6 +20,7 @@ describe('self-loop smoke harness', () => {
       messagesPerDirection: 5,
       portA: 4180,
       portB: 4181,
+      sessionReadyTimeoutMs: 90_000,
       directionTimeoutMs: 120_000,
     });
   });
@@ -26,6 +28,7 @@ describe('self-loop smoke harness', () => {
   it('rejects unsafe or ambiguous options', () => {
     expect(() => parseArgs(['--output-volume', '101'])).toThrow('0 through 100');
     expect(() => parseArgs(['--messages-per-direction', '0'])).toThrow('1 through 25');
+    expect(() => parseArgs(['--session-ready-timeout-ms', '999'])).toThrow('1000 through');
     expect(() => parseArgs(['--port-a', '4174', '--port-b', '4174'])).toThrow('must differ');
     expect(() => parseArgs(['--unknown', 'value'])).toThrow('usage:');
   });
