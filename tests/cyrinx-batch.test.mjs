@@ -57,6 +57,27 @@ test('pinned Cyrinx batch binary has exact geometry and byte-perfect 256/1536 di
   }
 });
 
+test('pinned Cyrinx control profile carries a full 256-byte startup unit in a 597 ms waveform', () => {
+  const payload = Buffer.alloc(256, 0x5c);
+  const encoded = run('encode-control', request(metadata(payload), payload));
+  assert.equal(encoded.status, 0, encoded.stderr?.toString());
+  assert.equal(encoded.stdout.byteLength, 28_672 * 4);
+
+  // The browser capture window permits bounded listener-start skew after
+  // this 597 ms waveform. The native receiver must scan that padded capture.
+  const decoded = run('decode-control', Buffer.concat([
+    encoded.stdout,
+    Buffer.alloc((49_152 - 28_672) * Float32Array.BYTES_PER_ELEMENT),
+  ]));
+  assert.equal(decoded.status, 0, decoded.stderr?.toString());
+  assert.equal(decoded.stdout.toString('ascii', 0, 4), 'CYRR');
+  assert.equal(decoded.stdout.readUInt32LE(5), payload.byteLength);
+  assert.equal(decoded.stdout.readUInt32LE(9), 2);
+  assert.equal(decoded.stdout.readUInt32LE(13), 2);
+  assert.equal(decoded.stdout.readUInt32LE(21), 598);
+  assert.deepEqual(decoded.stdout.subarray(289), payload);
+});
+
 test('build fails closed for missing or altered pinned assets without touching the verified cache', async () => {
   const isolated = await mkdtemp(path.join(tmpdir(), 'fipwave-cyrinx-assets-'));
   const script = path.join(root, 'scripts', 'build-cyrinx.mjs');

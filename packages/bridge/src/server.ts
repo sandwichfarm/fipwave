@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
 import manifest from '../../../fixtures/corpus/manifest.json' with { type: 'json' };
 import type { CyrinxCase, CyrinxCaseMode, CyrinxResult } from './cyrinx-worker.js';
+import type { CyrinxPacketTransport } from './cyrinx-transport.js';
 import { ACOUSTIC_DISARM_CAPABILITY_BYTES, ACOUSTIC_READINESS_FRESHNESS_MS, FIPS_PACKET_ADMISSION_ACCEPTED, FIPS_PACKET_ADMISSION_QUEUE_FULL, decodeAcousticReadinessProof, decodeFipsPacketAdmission, decodeFrame, encodeFrame, MessageType, RESET_ACK_FLAG, type FwavFrame } from './protocol.js';
 import {
   CyrinxQualificationSession,
@@ -110,6 +111,13 @@ export interface CyrinxWorkerRuntime {
   receiveCapture(encoded: Buffer): Promise<CyrinxResult | undefined>;
   reset(): void;
 }
+export interface CyrinxPacketTransportRuntime {
+  readonly receiving: boolean;
+  encode(packet: Uint8Array, epoch: number): Promise<Buffer>;
+  beginReceive(epoch: number): void;
+  receiveCapture(encoded: Buffer): Promise<Uint8Array | undefined>;
+  reset(): void;
+}
 export interface CyrinxTimer {
   set(callback: () => void, delayMs: number): unknown;
   clear(handle: unknown): void;
@@ -141,6 +149,8 @@ export interface BridgeServerOptions {
   cyrinxDigital?: (context: CyrinxDigitalContext) => Promise<void>;
   /** Runner-owned native batch worker. The browser never receives this authority. */
   cyrinxWorker?: CyrinxWorkerRuntime;
+  /** Fast packet modem used by the production acoustic session, never browser-controlled. */
+  cyrinxTransport?: CyrinxPacketTransportRuntime;
   cyrinxTimer?: CyrinxTimer;
   cyrinxSettle?: (delayMs: number) => Promise<void>;
   /** Runner-owned proof surface; absence is explicit 503 rather than inferred readiness. */
@@ -458,6 +468,7 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
   let operationGeneration = 1; let operationAbort = new AbortController(); let settleAbort: AbortController | undefined; let shuttingDown = false;
   let cyrinxExpiryTimer: unknown;
   const sequenceTrackers = new Set<{ value: bigint }>();
+  options.cyrinxTransport?.beginReceive(state.epoch);
   const browserConnections = new Set<BrowserConnectionState>();
   const safeStatus = () => {
     const queue = state.packetQueues.browserToFips;
@@ -975,7 +986,9 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
     }
     clearCyrinxTimer();
     if (!alreadyPreempted) abortCyrinxOperation();
+    options.cyrinxTransport?.reset();
     generation += 1; state.epoch += 1; audio = undefined; results = new Map(); failureReasons = new Set(cyrinxSession?.fallbackReason ? [cyrinxSession.fallbackReason] : []);
+    options.cyrinxTransport?.beginReceive(state.epoch);
     state.stampedResults = []; state.overflowedQueues = []; state.discontinuities = 0; state.rejectedFrames = 0;
     state.packetCounters = { browserToFips: 0, fipsToBrowser: 0 }; state.packetReadiness = { browser: false, fips: false }; state.lastError = null; localAudioPreflight = false; state.acousticReady = false;
     state.lastAcceptedAtMs = null;
@@ -1325,8 +1338,34 @@ export async function createBridgeServer(options: BridgeServerOptions): Promise<
         state.packetReadiness.fips = true;
         return;
       }
+      if (frame.type === MessageType.ACOUSTIC_UNIT) {
+        if (frame.flags !== 0 || frame.payload.byteLength < 1 || frame.payload.byteLength > 253 || !options.cyrinxTransport) fail('acoustic_unit_invalid');
+        const playback = await options.cyrinxTransport.encode(frame.payload, state.epoch);
+        if (socket.readyState === socket.OPEN) socket.send(playback);
+        return;
+      }
+      if (frame.type === MessageType.ACOUSTIC_LISTEN) {
+        if (frame.flags !== 0 || frame.payload.byteLength !== 0 || !options.cyrinxTransport) fail('acoustic_listen_invalid');
+        options.cyrinxTransport.beginReceive(state.epoch);
+        if (socket.readyState === socket.OPEN) socket.send(encodeFrame({ type: MessageType.ACOUSTIC_LISTEN, epoch: state.epoch, sequence: frame.sequence, payload: Buffer.alloc(0) }));
+        return;
+      }
       if (frame.type === MessageType.PCM_CAPTURE && cyrinxSession?.codec === 'cyrinx') {
         await acceptCyrinxCapture(socket, encoded);
+        return;
+      }
+      if (frame.type === MessageType.PCM_CAPTURE && options.cyrinxTransport) {
+        const unit = await options.cyrinxTransport.receiveCapture(encoded);
+        // The capture window is deliberately one-shot. Re-arm after every
+        // complete window, including ordinary silence, so a modem retry never
+        // depends on the timing of a native decode process.
+        if (!options.cyrinxTransport.receiving) {
+          options.cyrinxTransport.beginReceive(state.epoch);
+          if (socket.readyState === socket.OPEN) {
+            if (unit) socket.send(encodeFrame({ type: MessageType.ACOUSTIC_UNIT, epoch: state.epoch, sequence: frame.sequence, payload: Buffer.from(unit) }));
+            socket.send(encodeFrame({ type: MessageType.ACOUSTIC_LISTEN, epoch: state.epoch, sequence: frame.sequence, payload: Buffer.alloc(0) }));
+          }
+        }
         return;
       }
       if ([MessageType.QUALIFICATION_CASE, MessageType.QUALIFICATION_RESULT, MessageType.ERROR].includes(frame.type)) {

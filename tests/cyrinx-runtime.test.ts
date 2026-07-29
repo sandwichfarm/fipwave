@@ -11,6 +11,7 @@ import {
   CyrinxBatchWorker,
   type CyrinxCase,
 } from '../packages/bridge/src/cyrinx-worker.js';
+import { CYRINX_CONTROL_CAPTURE_WINDOW_SAMPLES, CYRINX_CONTROL_FRAME_SAMPLES, CYRINX_CONTROL_INITIAL_DECODE_SAMPLES, CyrinxPacketTransport } from '../packages/bridge/src/cyrinx-transport.js';
 import { NativeCommandCodecAdapter, runPinnedCommand, type PinnedCommandRunner } from '../packages/bridge/src/codecs/command.js';
 import {
   CYRINX_PCM_PLAYBACK_FLAG,
@@ -29,6 +30,8 @@ const secondCase: CyrinxCase = { ...qualificationCase, id: 'a-to-b-256-02' };
 const EPOCH = 4;
 const BATCH_SAMPLES = 2_048;
 const BATCH_COUNT = CYRINX_CAPTURE_WINDOW_SAMPLES / BATCH_SAMPLES;
+const CONTROL_BATCH_COUNT = CYRINX_CONTROL_CAPTURE_WINDOW_SAMPLES / BATCH_SAMPLES;
+const CONTROL_FRAME_BATCH_COUNT = Math.ceil(CYRINX_CONTROL_INITIAL_DECODE_SAMPLES / BATCH_SAMPLES);
 
 function caseMetadata(value = qualificationCase, epoch = EPOCH): Buffer {
   const output = Buffer.alloc(256);
@@ -113,6 +116,53 @@ function listenRunner(value = qualificationCase, epoch = EPOCH): PinnedCommandRu
 }
 
 describe('bounded Cyrinx worker', () => {
+  it('carries an opaque packet through the short Cyrinx transport window', async () => {
+    const packet = new Uint8Array([1, 2, 3, 4, 5]);
+    const packetDigest = createHash('sha256').update(packet).digest();
+    const run: PinnedCommandRunner = vi.fn(async ({ command, payload: input }) => {
+      if (command === 'encode-control') return { exitCode: 0, stdout: Buffer.alloc(CYRINX_CONTROL_FRAME_SAMPLES * 4), stderr: '', timedOut: false };
+      expect(command).toBe('decode-control');
+      expect(input.byteLength).toBe(CONTROL_FRAME_BATCH_COUNT * BATCH_SAMPLES * 4);
+      const output = Buffer.alloc(289 + packet.byteLength);
+      output.write('CYRR', 0, 'ascii'); output.writeUInt8(1, 4); output.writeUInt32LE(packet.byteLength, 5); output.writeUInt32LE(7, 9); output.writeUInt32LE(7, 13);
+      output.write('CYRX', 33, 'ascii'); output.writeUInt8(1, 37); output.writeUInt32LE(EPOCH, 38); output.writeUInt32LE(packet.byteLength, 108); packetDigest.copy(output, 112); Buffer.from(packet).copy(output, 289);
+      return { exitCode: 0, stdout: output, stderr: '', timedOut: false };
+    });
+    const transport = new CyrinxPacketTransport({ executable: '/pinned/cyrinx', run });
+    const playback = await transport.encode(packet, EPOCH);
+    expect(decodeFrame(playback)).toMatchObject({ type: MessageType.PCM_PLAYBACK, epoch: EPOCH });
+    transport.beginReceive(EPOCH);
+    for (let index = 0; index < CONTROL_FRAME_BATCH_COUNT - 1; index += 1) expect(await transport.receiveCapture(capture({ sequence: BigInt(index), firstSampleIndex: BigInt(index * BATCH_SAMPLES) }))).toBeUndefined();
+    expect(await transport.receiveCapture(capture({ sequence: BigInt(CONTROL_FRAME_BATCH_COUNT - 1), firstSampleIndex: BigInt((CONTROL_FRAME_BATCH_COUNT - 1) * BATCH_SAMPLES) }))).toEqual(packet);
+    expect(transport.receiving).toBe(false);
+  });
+
+  it('treats a complete silent capture as a retryable no-packet result', async () => {
+    const transport = new CyrinxPacketTransport({
+      executable: '/pinned/cyrinx',
+      run: async ({ command }) => command === 'decode-control'
+        ? { exitCode: 1, stdout: Buffer.alloc(0), stderr: '', timedOut: false }
+        : { exitCode: 0, stdout: Buffer.alloc(CYRINX_CONTROL_FRAME_SAMPLES * 4), stderr: '', timedOut: false },
+    });
+    transport.beginReceive(EPOCH);
+    for (let index = 0; index < CONTROL_BATCH_COUNT - 1; index += 1) await transport.receiveCapture(capture({ sequence: BigInt(index), firstSampleIndex: BigInt(index * BATCH_SAMPLES) }));
+    await expect(transport.receiveCapture(capture({ sequence: BigInt(CONTROL_BATCH_COUNT - 1), firstSampleIndex: BigInt((CONTROL_BATCH_COUNT - 1) * BATCH_SAMPLES) }))).resolves.toBeUndefined();
+    expect(transport.receiving).toBe(false);
+  });
+
+  it('discards stale queued capture batches until a re-armed browser starts at zero', async () => {
+    const run = vi.fn<PinnedCommandRunner>(async ({ command }) => {
+      if (command !== 'decode-control') throw new Error('unexpected command');
+      return { exitCode: 1, stdout: Buffer.alloc(0), stderr: '', timedOut: false };
+    });
+    const transport = new CyrinxPacketTransport({ executable: '/pinned/cyrinx', run });
+    transport.beginReceive(EPOCH);
+    await expect(transport.receiveCapture(capture({ sequence: 1n, firstSampleIndex: 32_768n }))).resolves.toBeUndefined();
+    expect(run).not.toHaveBeenCalled();
+    await expect(transport.receiveCapture(capture({ sequence: 2n, firstSampleIndex: 0n }))).resolves.toBeUndefined();
+    expect(transport.receiving).toBe(true);
+  });
+
   it('separates transmit playback from listen capture and reports only independent receiver evidence', async () => {
     const transmitterRun = encodeRunner();
     const transmitter = new CyrinxBatchWorker({ executable: '/pinned/cyrinx', run: transmitterRun });
@@ -200,7 +250,7 @@ describe('bounded Cyrinx worker', () => {
     expect(secondFrame.sequence).toBe(1n);
   });
 
-  it('requires an exact 131072-sample relative-zero capture window and keeps pending queue evidence separate from decode memory', async () => {
+  it('requires an exact 96256-sample relative-zero capture window and keeps pending queue evidence separate from decode memory', async () => {
     const run = listenRunner();
     const worker = new CyrinxBatchWorker({ executable: '/pinned/cyrinx', run });
     await worker.begin(qualificationCase, EPOCH, 'listen');

@@ -8,6 +8,8 @@ export const MAX_PAYLOAD_BYTES = MAX_MESSAGE_BYTES - HEADER_BYTES;
 export const PCM_SAMPLE_INDEX_BYTES = 8;
 /** Exact fixed-geometry Cyrinx playback; the browser adds the documented local guard tail. */
 export const CYRINX_PCM_PLAYBACK_FLAG = 0x0001;
+/** Short authenticated Cyrinx control waveform used only during peer startup. */
+export const CYRINX_CONTROL_PCM_PLAYBACK_FLAG = 0x0002;
 /** RESET acknowledgements are bridge-originated and must never be echoed back as requests. */
 export const RESET_ACK_FLAG = 0x0001;
 /** Exact browser → bridge → Rust projection of a committed acoustic session. */
@@ -48,6 +50,10 @@ export enum MessageType {
   ACOUSTIC_DISARM = 13,
   /** Browser acknowledgement that it admitted one FIPS packet into its acoustic queue. */
   FIPS_PACKET_ADMISSION = 14,
+  /** One CRC-bound FAS1 acoustic unit; waveform conversion remains runner-owned. */
+  ACOUSTIC_UNIT = 15,
+  /** Server-authorized cue for the browser to begin one Cyrinx receive window. */
+  ACOUSTIC_LISTEN = 16,
 }
 
 export const FIPS_PACKET_ADMISSION_ACCEPTED = 1;
@@ -128,7 +134,7 @@ function fail(message: string): never {
 }
 
 function isMessageType(value: number): value is MessageType {
-  return value >= MessageType.HELLO && value <= MessageType.FIPS_PACKET_ADMISSION;
+  return value >= MessageType.HELLO && value <= MessageType.ACOUSTIC_LISTEN;
 }
 
 export function decodeFipsPacketAdmission(payload: Buffer): FipsPacketAdmission {

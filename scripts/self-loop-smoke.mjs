@@ -8,6 +8,8 @@ import { chromium } from '@playwright/test';
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+/** Measured from both pages being Quiet-armed to both FIPS bridges reporting ready. */
+export const FIPS_CONNECT_BUDGET_MS = 5_000;
 const DEFAULTS = Object.freeze({
   outputVolume: 65,
   inputVolume: 90,
@@ -18,6 +20,7 @@ const DEFAULTS = Object.freeze({
   startupTimeoutMs: 60_000,
   sessionReadyTimeoutMs: 60_000,
   directionTimeoutMs: 12 * 60_000,
+  connectOnly: false,
 });
 const FIRST_CASE = Object.freeze({
   'A → B': 'a-to-b-256-01',
@@ -38,6 +41,7 @@ function usage() {
     '  --startup-timeout-ms N        runner/browser startup timeout (default: 60000)',
     '  --session-ready-timeout-ms N  FAS1-ready timeout before corpus traffic (default: 60000)',
     '  --direction-timeout-ms N      timeout for each full corpus (default: 720000)',
+    '  --connect-only                verify the physical FAS1 bootstrap only',
     '  --help                        show this help',
   ].join('\n');
 }
@@ -66,6 +70,7 @@ export function parseArgs(values) {
   for (let index = 0; index < values.length; index += 1) {
     const key = values[index];
     if (key === '--help') return { help: true, ...options };
+    if (key === '--connect-only') { options.connectOnly = true; continue; }
     const definition = definitions.get(key);
     const value = values[index + 1];
     if (!definition || value === undefined || value.startsWith('--')) throw new Error(usage());
@@ -427,6 +432,19 @@ async function waitForQuiet(page, spec, options) {
   return epoch;
 }
 
+async function waitForCyrinxPacketTransport(page, spec, options) {
+  const locator = page.getByText(/^Cyrinx packet transport listening · epoch (\d+)$/);
+  await locator.waitFor({ state: 'visible', timeout: options.startupTimeoutMs });
+  const text = await locator.textContent();
+  const epoch = Number(text?.match(/epoch (\d+)/)?.[1]);
+  if (!Number.isSafeInteger(epoch)) throw new Error(`role ${spec.role} Cyrinx transport epoch could not be read`);
+  await page.getByText(`Bridge delivery: Cyrinx packet transport armed for epoch ${epoch}`, { exact: true }).waitFor({
+    state: 'visible',
+    timeout: options.startupTimeoutMs,
+  });
+  return epoch;
+}
+
 async function pageStatus(page) {
   if (page.isClosed()) return 'closed';
   return (await page.locator('.status').textContent())?.trim() ?? 'unknown';
@@ -671,14 +689,30 @@ async function main() {
     ]);
     recorder.event('audio-preflight-complete', { message: 'both roles armed at epoch 1' }, true);
 
-    await Promise.all([
-      pages.A.getByRole('button', { name: 'Start Cyrinx qualification', exact: true }).click(),
-      pages.B.getByRole('button', { name: 'Start Cyrinx qualification', exact: true }).click(),
-    ]);
-    const [epochA, epochB] = await Promise.all([
-      waitForQuiet(pages.A, specs.A, options),
-      waitForQuiet(pages.B, specs.B, options),
-    ]);
+    let acousticStartedAtMs;
+    let epochA;
+    let epochB;
+    if (options.connectOnly) {
+      // Role B must own a complete receive window before Role A emits the
+      // first physical frame. This mirrors two laptops already armed at the
+      // demo table and avoids measuring a browser start-order race as modem
+      // airtime.
+      await pages.B.getByRole('button', { name: 'Start Cyrinx packet transport', exact: true }).click();
+      epochB = await waitForCyrinxPacketTransport(pages.B, specs.B, options);
+      acousticStartedAtMs = Date.now();
+      await pages.A.getByRole('button', { name: 'Start Cyrinx packet transport', exact: true }).click();
+      epochA = await waitForCyrinxPacketTransport(pages.A, specs.A, options);
+    } else {
+      acousticStartedAtMs = Date.now();
+      await Promise.all([
+        pages.A.getByRole('button', { name: 'Start Cyrinx qualification', exact: true }).click(),
+        pages.B.getByRole('button', { name: 'Start Cyrinx qualification', exact: true }).click(),
+      ]);
+      [epochA, epochB] = await Promise.all([
+        waitForQuiet(pages.A, specs.A, options),
+        waitForQuiet(pages.B, specs.B, options),
+      ]);
+    }
     if (epochA !== epochB) throw new Error(`Quiet epoch mismatch: role A is ${epochA}, role B is ${epochB}`);
     const epoch = epochA;
     summary.epoch = epoch;
@@ -687,9 +721,18 @@ async function main() {
     validatePageAudio('A', audioA, summary.hardware.input.name);
     validatePageAudio('B', audioB, summary.hardware.input.name);
     summary.browserAudio = { A: audioA, B: audioB };
-    recorder.event('quiet-armed', { epoch, browserAudio: summary.browserAudio, message: `both roles listening at epoch ${epoch}` }, true);
+    recorder.event(options.connectOnly ? 'cyrinx-armed' : 'quiet-armed', { epoch, browserAudio: summary.browserAudio, message: `both roles listening at epoch ${epoch}` }, true);
 
     summary.acousticReadiness = await waitForAcousticReady(pages, options, recorder, abortController.signal);
+    summary.acousticConnectMs = Date.now() - acousticStartedAtMs;
+    recorder.event('acoustic-session-connected', { elapsedMs: summary.acousticConnectMs, budgetMs: FIPS_CONNECT_BUDGET_MS, message: 'both acoustic sessions are ready through the physical link' }, true);
+    if (summary.acousticConnectMs >= FIPS_CONNECT_BUDGET_MS) throw new Error(`acoustic session exceeded the ${FIPS_CONNECT_BUDGET_MS} ms startup budget: ${summary.acousticConnectMs} ms`);
+
+    if (options.connectOnly) {
+      summary.success = true;
+      recorder.event('run-succeeded', { epoch, message: 'physical Cyrinx FAS1 bootstrap completed' }, true);
+      return;
+    }
 
     const [initialA, initialB] = await Promise.all([
       readJsonIfPresent(specs.A.reportPath),

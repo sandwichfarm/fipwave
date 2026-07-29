@@ -5,7 +5,8 @@ export const QUIET_CLAMP_FRAME = true;
 export const QUIET_FRAME_BYTES = 253;
 export const QUIET_ENVELOPE_BYTES = 32;
 export const QUIET_DATA_BYTES = QUIET_FRAME_BYTES - QUIET_ENVELOPE_BYTES;
-export const QUIET_GUARD_MS = 750;
+/** onFinish fires after the audible frame; this is tail separation, not a second frame. */
+export const QUIET_GUARD_MS = 20;
 
 export type Role = 'A' | 'B';
 export type LiteralDirection = 'A → B' | 'B → A';
@@ -49,8 +50,10 @@ export function resolveQuietTransmissionSettings(candidate: QuietTransmissionSet
   if (mode !== 'ceremony' && mode !== 'data') throw new Error('Quiet transmission mode is invalid');
   return Object.freeze({
     playbackGain: candidate.playbackGain,
-    repetition: mode === 'ceremony' ? Math.max(2, candidate.repetition) : candidate.repetition,
-    guardMs: mode === 'ceremony' ? Math.max(250, candidate.guardMs) : candidate.guardMs,
+    // Quiet supplies FEC and bootstrap retries are bounded. Repeating every
+    // control frame creates conspicuous silence and defeats the startup SLA.
+    repetition: candidate.repetition,
+    guardMs: candidate.guardMs,
   });
 }
 
@@ -178,7 +181,7 @@ export function peerRole(role: Role): Role { return role === 'A' ? 'B' : 'A'; }
 
 export function encodeControlFrame(input: { type: number; epoch: number; sequence: bigint; payload?: Uint8Array }): ArrayBuffer {
   const payload = input.payload ?? new Uint8Array();
-  if (!Number.isInteger(input.type) || input.type < 1 || input.type > 14) throw new Error('FWAV control type is invalid');
+  if (!Number.isInteger(input.type) || input.type < 1 || input.type > 16) throw new Error('FWAV control type is invalid');
   if (!Number.isInteger(input.epoch) || input.epoch < 0 || input.epoch > 0xffff_ffff) throw new Error('FWAV control epoch is invalid');
   if (input.sequence < 0n || input.sequence > 0xffff_ffff_ffff_ffffn) throw new Error('FWAV control sequence is invalid');
   if (payload.byteLength > 256 * 1024 - FWAV_HEADER_BYTES) throw new Error('FWAV control payload is too large');
@@ -389,7 +392,7 @@ export class QuietClient {
    * represented as a frequency change.
    */
   configureAcousticCandidate(candidate: QuietAcousticCandidate): void {
-    if (!Number.isFinite(candidate.playbackGain) || candidate.playbackGain < 1 || candidate.playbackGain > 2 || !Number.isInteger(candidate.repetition) || candidate.repetition < 1 || candidate.repetition > 3 || !Number.isInteger(candidate.guardMs) || candidate.guardMs < 1 || candidate.guardMs > 5_000) throw new Error('Quiet acoustic candidate is invalid');
+    if (!Number.isFinite(candidate.playbackGain) || candidate.playbackGain < 1 || candidate.playbackGain > 2 || !Number.isInteger(candidate.repetition) || candidate.repetition < 1 || candidate.repetition > 3 || !Number.isInteger(candidate.guardMs) || candidate.guardMs < 20 || candidate.guardMs > 5_000) throw new Error('Quiet acoustic candidate is invalid');
     this.#playbackGain = candidate.playbackGain;
     this.#acousticRepetition = candidate.repetition;
     this.#acousticGuardMs = candidate.guardMs;

@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { isBytePerfectResult, parseArgs } from '../scripts/self-loop-smoke.mjs';
+import { FIPS_CONNECT_BUDGET_MS, isBytePerfectResult, parseArgs } from '../scripts/self-loop-smoke.mjs';
 
 describe('self-loop smoke harness', () => {
+  it('makes the sub-five-second FIPS connection budget explicit', () => {
+    expect(FIPS_CONNECT_BUDGET_MS).toBe(5_000);
+  });
   it('parses bounded audio and runner options', () => {
     expect(parseArgs([
       '--output-volume', '45',

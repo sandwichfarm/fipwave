@@ -13,9 +13,9 @@ const configuredPort = Number(process.env.FIPWAVE_DEMO_PORT ?? '4310');
 if (!Number.isSafeInteger(configuredPort) || configuredPort < 1024 || configuredPort > 65_535) {
   throw new Error('FIPWAVE_DEMO_PORT must be an integer from 1024 through 65535');
 }
-const configuredFastGuardMs = Number(process.env.FIPWAVE_GUARD_MS ?? '250');
-if (!Number.isSafeInteger(configuredFastGuardMs) || configuredFastGuardMs < 50 || configuredFastGuardMs > 1_500) {
-  throw new Error('FIPWAVE_GUARD_MS must be an integer from 50 through 1500');
+const configuredFastGuardMs = Number(process.env.FIPWAVE_GUARD_MS ?? '20');
+if (!Number.isSafeInteger(configuredFastGuardMs) || configuredFastGuardMs < 20 || configuredFastGuardMs > 1_500) {
+  throw new Error('FIPWAVE_GUARD_MS must be an integer from 20 through 1500');
 }
 const BROWSER_PORT = configuredPort;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -264,11 +264,27 @@ async function launchOwnedBrowser(plan, recorder) {
   await page.goto(plan.origin, { waitUntil: 'domcontentloaded', timeout: 60_000 });
   await recorder.event('browser-opened', { headed: true, fakeMedia: false, muted: false, origin: plan.origin });
 
-  const start = page.getByRole('button', { name: /^(Start( demo| \/ Connect)?|Arm modem)$/i }).first();
+  const start = page.getByRole('button', { name: /^Start \/ Connect$/i });
   try {
     await start.waitFor({ state: 'visible', timeout: 60_000 });
+    const initialEpoch = await page.evaluate(async () => {
+      const response = await fetch('/bridge-status', { cache: 'no-store' });
+      if (!response.ok) throw new Error(`bridge status returned HTTP ${response.status}`);
+      const status = await response.json();
+      if (!Number.isInteger(status.epoch)) throw new Error('bridge status did not contain an integer epoch');
+      return status.epoch;
+    });
     await start.click();
-    await recorder.event('demo-started', { automaticTrustedClick: true });
+    await page.waitForFunction(async (previousEpoch) => {
+      const response = await fetch('/bridge-status', { cache: 'no-store' });
+      if (!response.ok) return false;
+      const status = await response.json();
+      return status.browserAudio === 'armed'
+        && status.localBridge === 'ready'
+        && Number.isInteger(status.epoch)
+        && status.epoch > previousEpoch;
+    }, initialEpoch, { timeout: 60_000 });
+    await recorder.event('demo-started', { automaticTrustedClick: true, transport: 'cyrinx' });
   } catch (error) {
     await browser.close().catch(() => undefined);
     throw new Error(`demo Start control was unavailable: ${boundedError(error)}`);

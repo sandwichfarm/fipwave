@@ -7,7 +7,7 @@ export const CYRINX_QUALIFICATION_WINDOW_MS = 90 * 60 * 1_000;
 export const MAX_COMMAND_INPUT_BYTES = 576 * 1024;
 export const MAX_COMMAND_OUTPUT_BYTES = 576 * 1024;
 export const MAX_COMMAND_STDERR_BYTES = 8 * 1024;
-export const CYRINX_COMMANDS = ['geometry', 'encode', 'decode'] as const;
+export const CYRINX_COMMANDS = ['geometry', 'encode', 'decode', 'encode-control', 'decode-control'] as const;
 export type CyrinxCommand = typeof CYRINX_COMMANDS[number];
 
 export interface CommandResult { exitCode: number; stdout: Uint8Array; stderr: string; timedOut: boolean; }

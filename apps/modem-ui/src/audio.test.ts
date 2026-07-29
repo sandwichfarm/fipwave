@@ -3,6 +3,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   armAudio,
   canBufferPcmCaptureFrame,
+  CYRINX_CONTROL_FRAME_SAMPLES,
+  CYRINX_CONTROL_GUARD_SAMPLES,
+  CYRINX_CONTROL_PCM_PLAYBACK_FLAG,
   configureAudioEnvironmentForTests,
   createPlaybackQueue,
   enqueuePcmPlayback,
@@ -260,6 +263,36 @@ describe('PCM playback boundary', () => {
     expect(metrics).toMatchObject({
       highWaterBytes: 249_864,
       highWaterDurationMs: (62_464 + 14_400) / 48,
+      scheduledSources: 1,
+    });
+  });
+
+  it('renders the short Cyrinx control waveform with its own local zero guard', async () => {
+    const harness = audioHarness();
+    await armAudio(1);
+    const modem = new Float32Array(CYRINX_CONTROL_FRAME_SAMPLES);
+    modem[0] = 0.18;
+    modem[14_336] = -0.18;
+    modem[CYRINX_CONTROL_FRAME_SAMPLES - 1] = 0.125;
+
+    const metrics = enqueuePcmPlayback(validatePcmPlaybackFrame(playbackFrame({
+      flags: CYRINX_CONTROL_PCM_PLAYBACK_FLAG,
+      sequence: 21n,
+      payload: modem,
+    }), 1));
+
+    expect(harness.context.createBuffer).toHaveBeenCalledWith(
+      2,
+      CYRINX_CONTROL_FRAME_SAMPLES + CYRINX_CONTROL_GUARD_SAMPLES,
+      48_000,
+    );
+    const [left, right] = harness.buffers[0]!;
+    expect(left!.subarray(0, modem.length)).toEqual(modem);
+    expect(left!.subarray(modem.length).every((sample) => sample === 0)).toBe(true);
+    expect(right!.every((sample) => sample === 0)).toBe(true);
+    expect(metrics).toMatchObject({
+      highWaterBytes: CYRINX_CONTROL_FRAME_SAMPLES * Float32Array.BYTES_PER_ELEMENT + 8,
+      highWaterDurationMs: (CYRINX_CONTROL_FRAME_SAMPLES + CYRINX_CONTROL_GUARD_SAMPLES) / 48,
       scheduledSources: 1,
     });
   });

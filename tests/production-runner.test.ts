@@ -178,7 +178,8 @@ describe('production runner', () => {
     expect(rendered).toContain('after_secs: 3600');
     expect(rendered).toContain('after_messages: 65536');
     expect(rendered).toContain('handshake_timeout_secs: 300');
-    expect(rendered).toContain('handshake_resend_interval_ms: 15000');
+    expect(rendered).toContain('handshake_resend_interval_ms: 1500');
+    expect(rendered).toContain('handshake_resend_backoff: 1.0');
     expect(rendered).toContain('mode: minimal');
     expect(rendered).toContain('control:');
     expect(rendered).toContain('socket_path: "/run/fips/control.sock"');
@@ -432,7 +433,7 @@ describe('production runner', () => {
     expect(acceptedCases).toBe(52);
     expect(settleDelays).toHaveLength(52);
     expect(settleDelays.every((delayMs) => delayMs === CYRINX_TRANSMIT_SETTLE_MS)).toBe(true);
-    expect(CYRINX_TRANSMIT_SETTLE_MS).toBeGreaterThan(Math.ceil(131_072 / 48_000 * 1_000) + 1_300);
+    expect(CYRINX_TRANSMIT_SETTLE_MS).toBeGreaterThan(Math.ceil(96_256 / 48_000 * 1_000) + 900);
     expect(worker.begin.mock.calls.slice(0, 4).map((call) => [call[0].id, call[2]])).toEqual([
       ['cyrinx-cold-a-to-b', 'transmit'],
       ['cyrinx-cold-b-to-a', 'listen'],

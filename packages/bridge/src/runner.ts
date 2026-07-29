@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { lstat, readFile, realpath, rename, unlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, realpath, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -10,6 +10,7 @@ import { resolveDemoConfig, toPublicDemoConfig, type DemoConfig, type PublicDemo
 import { ResourceOwner } from './resource-owner.js';
 import { NativeCommandCodecAdapter } from './codecs/command.js';
 import { CyrinxBatchWorker } from './cyrinx-worker.js';
+import { CyrinxPacketTransport } from './cyrinx-transport.js';
 import { cyrinxDigitalCases } from './qualification-session.js';
 import { CYRINX_DEADLINE_MS, QUIET_CODEC, TUN_EVIDENCE_CHECKS, validateTunEvidence, type MachineReport, type TunEvidence } from './report.js';
 import { createFipsControlClient } from './fips-control-client.js';
@@ -100,12 +101,11 @@ export function renderFipsConfig(config: DemoConfig): string {
     '  identity:',
     `    nsec: "${config.identity.nsec}"`,
     // FIPS defaults target ordinary network links (10 s heartbeat, 30 s dead
-    // timeout, 1 s handshake resend). A complete packet can legitimately take
-    // longer than that over the audible stop-and-wait transport, so those
-    // defaults otherwise remove a correctly authenticated peer mid-demo.
+    // timeout, 1 s handshake resend). Retain generous liveness limits for
+    // the audible half-duplex link without delaying its initial connection.
     '  heartbeat_interval_secs: 60',
     '  link_dead_timeout_secs: 600',
-    // The default 120-second rekey begins while the first slow acoustic data
+    // The default 120-second rekey begins while the first acoustic data
     // packet is still crossing the room. Keep rekey enabled, but move its
     // timer outside the rehearsed demo window so it cannot starve user data.
     '  rekey:',
@@ -114,8 +114,11 @@ export function renderFipsConfig(config: DemoConfig): string {
     '    after_messages: 65536',
     '  rate_limit:',
     '    handshake_timeout_secs: 300',
-    '    handshake_resend_interval_ms: 15000',
-    '    handshake_resend_backoff: 2.0',
+    // One Cyrinx packet occupies about 1.3 seconds. Retry only after one
+    // complete acoustic receive turn, rather than preserving Quiet's former
+    // 15-second floor that made the startup objective impossible.
+    '    handshake_resend_interval_ms: 1500',
+    '    handshake_resend_backoff: 1.0',
     '    handshake_max_resends: 8',
     '  mmp:',
     '    mode: minimal',
@@ -172,7 +175,7 @@ export async function publishFipsConfig(output: string, content: string): Promis
 export async function startProductionRunner(options: ProductionRunnerOptions): Promise<ProductionRunner> {
   assertText(options.machineId, 'machine ID'); assertText(options.report, 'report target');
   const roleInput = options.role === 'A' ? 'a' : options.role === 'B' ? 'b' : undefined;
-  if (options.fastGuardMs !== undefined && (!Number.isSafeInteger(options.fastGuardMs) || options.fastGuardMs < 50 || options.fastGuardMs > 1_500)) fail('fast guard must be an integer from 50 through 1500 milliseconds');
+  if (options.fastGuardMs !== undefined && (!Number.isSafeInteger(options.fastGuardMs) || options.fastGuardMs < 20 || options.fastGuardMs > 1_500)) fail('fast guard must be an integer from 20 through 1500 milliseconds');
   const demoOverride = {
     ...(options.fipsConfigOutput && options.port ? { bridge: { browserPort: options.port, fipsPort: options.port, fipsUrl: `ws://${LOOPBACK_HOST}:${options.port}/bridge/fips` } } : {}),
     ...(options.fastGuardMs !== undefined ? { acoustic: { fastGuardMs: options.fastGuardMs } } : {}),
@@ -223,6 +226,19 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
     executable: cyrinxExecutable,
     ...(options.nowForTests ? { now: options.nowForTests } : {}),
   });
+  const diagnosticCaptureDirectory = process.env.FIPWAVE_CYRINX_DIAGNOSTIC_DIR;
+  let diagnosticCaptureIndex = 0;
+  const cyrinxTransport = new CyrinxPacketTransport({
+    executable: cyrinxExecutable,
+    ...(diagnosticCaptureDirectory ? {
+      onCapture: async (capture: Uint8Array, captureEpoch: number): Promise<void> => {
+        const directory = path.resolve(diagnosticCaptureDirectory);
+        await mkdir(directory, { recursive: true });
+        const filename = `control-${demoConfig.role.toLowerCase()}-epoch-${captureEpoch}-${diagnosticCaptureIndex++}.f32le`;
+        await writeFile(path.join(directory, filename), capture, { mode: 0o600 });
+      },
+    } : {}),
+  });
   const cyrinxDigital: NonNullable<BridgeServerOptions['cyrinxDigital']> = options.cyrinxDigitalForTests ?? (async (context): Promise<void> => {
     const adapter = new NativeCommandCodecAdapter({ executable: cyrinxExecutable });
     for (const value of cyrinxDigitalCases()) {
@@ -258,6 +274,7 @@ export async function startProductionRunner(options: ProductionRunnerOptions): P
     cyrinxBuild: options.cyrinxBuildForTests ?? (async ({ signal }) => { await execFileAsync(process.execPath, [path.join(PROJECT_ROOT, 'scripts', 'build-cyrinx.mjs')], { cwd: PROJECT_ROOT, timeout: 60_000, killSignal: 'SIGKILL', signal }); }),
     cyrinxDigital,
     cyrinxWorker,
+    cyrinxTransport,
     ...(options.cyrinxTimerForTests ? { cyrinxTimer: options.cyrinxTimerForTests } : {}),
     ...(options.cyrinxSettleForTests ? { cyrinxSettle: options.cyrinxSettleForTests } : {}),
   };
@@ -373,7 +390,7 @@ function parseCli(argv: string[]): ProductionRunnerOptions {
   const values = new Map<string, string>(); let physicalOpenAir = false;
   for (let index = 0; index < argv.length; index += 1) {
     const key = argv[index]!; if (key === '--physical-open-air') { physicalOpenAir = true; continue; }
-    const value = argv[index + 1]; if (!['--machine-id', '--peer-machine-id', '--role', '--port', '--report', '--tun-evidence', '--evidence-mode', '--fips-config', '--bind-host', '--fast-guard-ms'].includes(key) || !value) fail('usage: --machine-id ID --peer-machine-id ID --role A|B --port PORT --report PATH --tun-evidence PATH [--evidence-mode Fixture|Loopback] [--fips-config PATH] [--bind-host 127.0.0.1|0.0.0.0] [--fast-guard-ms 50..1500] [--physical-open-air]');
+    const value = argv[index + 1]; if (!['--machine-id', '--peer-machine-id', '--role', '--port', '--report', '--tun-evidence', '--evidence-mode', '--fips-config', '--bind-host', '--fast-guard-ms'].includes(key) || !value) fail('usage: --machine-id ID --peer-machine-id ID --role A|B --port PORT --report PATH --tun-evidence PATH [--evidence-mode Fixture|Loopback] [--fips-config PATH] [--bind-host 127.0.0.1|0.0.0.0] [--fast-guard-ms 20..1500] [--physical-open-air]');
     values.set(key, value); index += 1;
   }
   const evidenceMode = values.get('--evidence-mode') as 'Fixture' | 'Loopback' | undefined; if (evidenceMode && evidenceMode !== 'Fixture' && evidenceMode !== 'Loopback') fail('deterministic evidence mode must be Fixture or Loopback');

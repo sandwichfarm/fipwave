@@ -98,13 +98,13 @@ describe('Quiet lifecycle and FWAV reset boundary', () => {
     expect(events).toEqual(['start:first', 'finish:first', 'start:second', 'finish:second']);
   });
 
-  it('captures redundant ceremony settings without mutating the selected data candidate', () => {
+  it('keeps ceremony settings compact without mutating the selected data candidate', () => {
     const selected = { playbackGain: 1, repetition: 1, guardMs: 100 };
     const ceremony = resolveQuietTransmissionSettings(selected, 'ceremony');
     selected.playbackGain = 2;
     selected.repetition = 3;
     selected.guardMs = 750;
-    expect(ceremony).toEqual({ playbackGain: 1, repetition: 2, guardMs: 250 });
+    expect(ceremony).toEqual({ playbackGain: 1, repetition: 1, guardMs: 100 });
     expect(resolveQuietTransmissionSettings(selected, 'data')).toEqual({ playbackGain: 2, repetition: 3, guardMs: 750 });
   });
 

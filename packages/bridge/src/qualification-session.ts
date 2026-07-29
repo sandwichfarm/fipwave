@@ -21,11 +21,12 @@ export type CyrinxStage =
 export type CyrinxSessionCodec = 'idle' | 'cyrinx' | 'quiet' | 'unqualified';
 export type CyrinxInstructionAction = 'transmit' | 'listen';
 /**
- * 131072 samples at 48 kHz (2731 ms), plus the viable ~1.3 s cold-start skew
+ * 96256 samples at 48 kHz (2005 ms), comprising one 1.3 s frame and 700 ms
+ * of listener-start skew, plus native/browser scheduling headroom. This prevents consecutive
  * and native/browser scheduling headroom. This prevents consecutive
  * same-direction frames from overlapping the peer's capture window.
  */
-export const CYRINX_TRANSMIT_SETTLE_MS = 4_500;
+export const CYRINX_TRANSMIT_SETTLE_MS = 3_000;
 
 export interface CyrinxQualificationCase {
   id: string;

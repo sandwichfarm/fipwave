@@ -39,7 +39,7 @@ test('demo plans derive every runtime input from the role', () => {
     ROLE: 'A',
     MACHINE_ID: 'fipwave-a',
     BROWSER_PORT: '4310',
-    FAST_GUARD_MS: '250',
+    FAST_GUARD_MS: '20',
     DEMO_ARTIFACT_DIR: a.artifactDirectory,
   });
   assert.match(a.artifactDirectory, /\/\.artifacts\/demo\/20260724T100000000Z-a$/);

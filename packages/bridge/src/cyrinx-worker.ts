@@ -14,7 +14,8 @@ import type { LiteralDirection } from './report.js';
 
 export const CYRINX_FRAME_SAMPLES = 62_464;
 export const CYRINX_GUARD_SAMPLES = 14_400;
-export const CYRINX_CAPTURE_WINDOW_SAMPLES = 131_072;
+/** One 62,464-sample Cyrinx frame plus 700 ms of listener-start skew, aligned to 2048-sample capture batches. */
+export const CYRINX_CAPTURE_WINDOW_SAMPLES = 96_256;
 export const CYRINX_SAMPLE_RATE = 48_000;
 const PCM_BYTES = CYRINX_FRAME_SAMPLES * Float32Array.BYTES_PER_ELEMENT;
 const METADATA_BYTES = 256;

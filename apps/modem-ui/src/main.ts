@@ -100,6 +100,13 @@ const quiet = new QuietClient((received) => { void appendQuietEvidence(received)
 const quietCorpusLimit = requestedCorpusLimit();
 let acousticSession: AcousticSession | undefined;
 let acousticAdapter: AcousticSessionAdapter | undefined;
+let cyrinxTransportActive = false;
+let cyrinxUnitReceiver: ((unit: Uint8Array) => void) | undefined;
+/** Must mirror CyrinxBatchWorker's qualification capture window. */
+const CYRINX_QUALIFICATION_CAPTURE_WINDOW_SAMPLES = 96_256;
+/** Must mirror CyrinxPacketTransport's short QAM-16 control receive window. */
+const CYRINX_CONTROL_CAPTURE_WINDOW_SAMPLES = 61_440;
+const CYRINX_CONTROL_TRANSMIT_MS = 700;
 let acousticTx = 0;
 let acousticRx = 0;
 let acousticFramesTx = 0;
@@ -237,13 +244,27 @@ function configureAcousticSession(config: Readonly<RunnerConfig>): void {
       acousticFramesTx += 1;
       // Quiet's Promise is local playback completion plus guard only. The
       // session's remote ACK and heartbeat remain the delivery/readiness proof.
-      transmit = transmit.then(() => quiet.sendUnit(unit, queuedEpoch, mode)).then(() => undefined, () => {
+      const send = () => {
+        if (!cyrinxTransportActive) return quiet.sendUnit(unit, queuedEpoch, mode);
+        const socket = bridge;
+        if (!socket || socket.readyState !== WebSocket.OPEN) return Promise.reject(new Error('FIPS bridge is disconnected'));
+        clearCyrinxCapture();
+        socket.send(encodeControlFrame({ type: 15, epoch: queuedEpoch, sequence: bridgeSequence++, payload: unit }));
+        // The short Cyrinx control waveform plus its local guard is under 700 ms.
+        // Keep the half-duplex scheduler honest: only re-arm capture after
+        // its local speaker has finished the waveform.
+        return new Promise<void>((resolve) => window.setTimeout(() => {
+          if (cyrinxTransportActive && epoch === queuedEpoch) requestCyrinxTransportListen();
+          resolve();
+        }, CYRINX_CONTROL_TRANSMIT_MS));
+      };
+      transmit = transmit.then(send).then(() => undefined, () => {
         adapter?.markDegraded();
       });
       return transmit;
     },
     onUnit(handler: (unit: Uint8Array) => void): () => void {
-      return quiet.onUnit((unit) => {
+      const receive = (unit: Uint8Array) => {
         acousticFramesRx += 1;
         // Quiet has already delivered a modem frame.  A FAS1 parse gives us an
         // actual current-generation integrity observation; it does not invent
@@ -260,7 +281,13 @@ function configureAcousticSession(config: Readonly<RunnerConfig>): void {
           // A corrupt codec payload never becomes a calibration observation.
         }
         handler(unit); adapter?.refresh();
-      });
+      };
+      cyrinxUnitReceiver = receive;
+      const disposeQuiet = quiet.onUnit(receive);
+      return () => {
+        disposeQuiet();
+        if (cyrinxUnitReceiver === receive) cyrinxUnitReceiver = undefined;
+      };
     },
     applyCandidate(candidate: { playbackGain: number; repetition: number; guardMs: number }): void { quiet.configureAcousticCandidate(candidate); },
   };
@@ -268,10 +295,11 @@ function configureAcousticSession(config: Readonly<RunnerConfig>): void {
     role: config.role, identity: config.machineId, expectedPeer: config.peerMachineId, modem,
     clock: { now: () => Date.now() }, timers: { setTimeout: (callback, delay) => window.setTimeout(callback, delay) as unknown as ReturnType<typeof setTimeout>, clearTimeout: (handle) => window.clearTimeout(handle as unknown as number) },
     nonce: () => crypto.getRandomValues(new Uint8Array(16)), profiles: acousticConfig.profiles, ranges: acousticConfig.ranges,
-    // Preserve the exact runner allowlist and order.  Warm-start selection is
-    // performed by the session only after literal A→B then B→A observations.
+    // The fixed fast candidate is prequalified for the demo laptops. A failed
+    // two-frame bootstrap falls back to this same ordered calibration set.
     candidates: acousticConfig.candidates.map((candidate) => ({ ...candidate })),
     calibration: { ...acousticConfig.calibration },
+    fastBootstrap: true,
     measureProbe: (probe) => receivedProbes.get(probeReceiptKey(
       acousticSession?.snapshot.sessionId ?? 0n,
       probe.direction === 'AtoB' ? 1 : 2,
@@ -279,6 +307,10 @@ function configureAcousticSession(config: Readonly<RunnerConfig>): void {
       probe.probeIndex,
     )) ?? Object.freeze({ received: false, bytePerfect: false, corrupt: false, missing: true, duplicate: false, discontinuity: quiet.metrics.discontinuities > 0, latencyMs: undefined, signalDb: undefined, clipping: undefined, confidence: 0 }),
     onPacket: (packet) => { acousticRx += 1; adapter?.deliver(packet, FipsTrafficClass.Ordinary); },
+    // Fast bootstrap completes after the incoming modem callback returns.
+    // Project that asynchronous Ready transition immediately; otherwise B
+    // remains FIPS-disarmed even though it has authenticated the sound link.
+    onReady: () => { adapter?.refresh(); render(); },
   });
   adapter = new AcousticSessionAdapter({
     session,
@@ -491,10 +523,35 @@ function armCyrinxCapture(caseId: string, direction: 'A → B' | 'B → A'): voi
       bridgeSequence += 1n;
       socket.send(frame);
       active.nextSampleIndex += value.samples.length;
-      if (active.nextSampleIndex === 131_072) clearCyrinxCapture();
+      if (active.nextSampleIndex === CYRINX_QUALIFICATION_CAPTURE_WINDOW_SAMPLES) clearCyrinxCapture();
     }
     catch { cyrinxCaseWatchdog.fail(active); }
   });
+}
+
+function armCyrinxTransportCapture(): void {
+  const active = { epoch, generation: ++captureGeneration, baseSampleIndex: undefined as number | undefined, nextSampleIndex: 0 };
+  setPcmCaptureHandler((batch: unknown) => {
+    const value = batch as { type?: unknown; epoch?: unknown; firstSampleIndex?: unknown; sampleRate?: unknown; channelCount?: unknown; encoding?: unknown; discontinuity?: unknown; samples?: unknown };
+    if (!cyrinxTransportActive || active.generation !== captureGeneration || value.type !== 'PCM_CAPTURE' || value.epoch !== active.epoch || value.sampleRate !== 48_000 || value.channelCount !== 1 || value.encoding !== 'Float32LE' || !(value.samples instanceof Float32Array) || value.samples.length !== 2048 || value.discontinuity === true) return;
+    if (active.baseSampleIndex === undefined) active.baseSampleIndex = typeof value.firstSampleIndex === 'number' ? value.firstSampleIndex : Number.NaN;
+    const offset = typeof value.firstSampleIndex === 'number' ? value.firstSampleIndex - active.baseSampleIndex : Number.NaN;
+    const socket = bridge;
+    if (!Number.isInteger(offset) || offset !== active.nextSampleIndex || !socket || socket.readyState !== WebSocket.OPEN) return;
+    try {
+      const frame = pcmCaptureFrame({ epoch: active.epoch, sequence: bridgeSequence++, firstSampleIndex: BigInt(offset), samples: value.samples });
+      if (!canBufferPcmCaptureFrame(socket.bufferedAmount, frame.byteLength)) return;
+      socket.send(frame); active.nextSampleIndex += value.samples.length;
+      if (active.nextSampleIndex === CYRINX_CONTROL_CAPTURE_WINDOW_SAMPLES) clearCyrinxCapture();
+    } catch { /* a later reset/capture window owns recovery */ }
+  });
+}
+
+function requestCyrinxTransportListen(): void {
+  const socket = bridge;
+  if (!cyrinxTransportActive || !socket || socket.readyState !== WebSocket.OPEN) return;
+  try { socket.send(encodeControlFrame({ type: 16, epoch, sequence: bridgeSequence++ })); }
+  catch { /* the bridge close path owns recovery */ }
 }
 
 function rejectPending(reason: Error): void {
@@ -507,6 +564,7 @@ function rejectPending(reason: Error): void {
 function failBridge(socket: WebSocket, reason: Error): void {
   if (bridge !== socket) return;
   acousticAdapter?.invalidate(); fipsPackets.invalidate(); browserPacketReady = false; packetGeneration += 1;
+  cyrinxTransportActive = false;
   clearCyrinxCase();
   bridge = undefined;
   rejectPending(reason);
@@ -562,6 +620,16 @@ function handleBridgeMessage(socket: WebSocket, generation: number, event: Messa
         sendFipsPacketAdmission(socket, epoch, envelope.sequence, accepted.accepted);
         if (!accepted.accepted) bridgeDelivery = `FIPS packet rejected — ${accepted.reason}`;
         render();
+        return;
+      }
+      if (type === 15) {
+        const bytes = new Uint8Array(event.data.slice(32));
+        if (bytes.byteLength < 1 || bytes.byteLength > 253) throw new Error('Local bridge sent an invalid acoustic unit');
+        cyrinxUnitReceiver?.(bytes);
+        return;
+      }
+      if (type === 16) {
+        if (cyrinxTransportActive) armCyrinxTransportCapture();
         return;
       }
       if (type !== 4) throw new Error(`Local bridge sent unsupported binary FWAV type ${type}`);
@@ -723,7 +791,10 @@ async function openFreshBridge(): Promise<WebSocket> {
 }
 
 async function reportToBridge(value: AppliedAudioEvidence): Promise<void> {
-  const socket = await openFreshBridge();
+  // A reset is acknowledged on the owning browser socket. Reopening here
+  // would put the new owner into the bridge's mandatory recovery-reset state
+  // and cause this otherwise valid settings frame to be rejected.
+  const socket = bridge?.readyState === WebSocket.OPEN ? bridge : await openFreshBridge();
   const accepted = new Promise<void>((resolve, reject) => {
     const timer = window.setTimeout(() => {
       pendingSettings = undefined;
@@ -796,10 +867,9 @@ async function requestBridgeReset(): Promise<number> {
   const nextEpoch = await accepted;
   bridgeState = reduceBridgeState(bridgeState, { type: 'reset-ack', epoch: nextEpoch });
   bridgeDelivery = `RESET accepted at epoch ${nextEpoch}`;
-  if (bridge === socket) {
-    bridge = undefined;
-    socket.close();
-  }
+  // Preserve this reset-acknowledged owner through the immediate audio
+  // settings and acoustic-listen frames. A reconnect has to reset again by
+  // design, so closing it here makes every fast transport start fail closed.
   bridgeSequence = 0n;
   return nextEpoch;
 }
@@ -944,11 +1014,10 @@ function demoStatus(value: string, active = false): HTMLParagraphElement {
 async function startDemo(): Promise<void> {
   if (uiState === 'idle') resetDemoStageTimings();
   if (uiState === 'idle') await arm();
-  // The production runner's acoustic projection is the fixed demo authority:
-  // enter the already-qualified audible Quiet path immediately instead of
-  // putting an audience run behind the 90-minute Cyrinx qualification gate.
-  // Debug mode retains the full qualification workflow and evidence controls.
-  if (uiState === 'ready' && runnerConfig?.acoustic) await startQuietFallback();
+  // The audience path uses the prebuilt Cyrinx waveform directly for opaque
+  // FIPS units. It is physically much shorter than Quiet's fixed 16-second
+  // bursts and keeps the browser as the only microphone/speaker owner.
+  if (uiState === 'ready' && runnerConfig?.acoustic) await startCyrinxTransport();
   else if (uiState === 'ready' && developmentDiagnostic && cyrinxSession.canRequestStart) startQualification();
 }
 
@@ -1178,6 +1247,7 @@ function render(): void {
   }
   if (uiState === 'ready' && !resetInFlight) {
     if (!bridgeNeedsRecovery && cyrinxSession.canRequestStart) operator.append(control('Start Cyrinx qualification', startQualification));
+    if (!bridgeNeedsRecovery && runnerConfig?.acoustic) operator.append(control('Start Cyrinx packet transport', startCyrinxTransport));
     if (!bridgeNeedsRecovery && quietCorpusSendState === 'ready' && runnerConfig && cyrinxSession.snapshot.codec === 'quiet') {
       operator.append(control(`Send Quiet ${directionForRole(runnerConfig.role)} corpus`, sendQuietCorpus));
     }
@@ -1414,6 +1484,7 @@ async function startQuietFallback(): Promise<void> {
   try {
     // Stop browser capture/playback before RESET so a late same-epoch callback
     // cannot be accepted by the runner after it changes ownership.
+    cyrinxTransportActive = false;
     clearCyrinxCase();
     await quiet.reset();
     await resetAudio();
@@ -1440,6 +1511,44 @@ async function startQuietFallback(): Promise<void> {
     quietRuntime = `Quiet failed · epoch ${quietEpoch}`;
     reportQuietRuntimeFailure(quietEpoch);
     try { cyrinxSession.markQuietFailed(); } catch { /* terminal state is already authoritative */ }
+  }
+  render();
+}
+
+async function startCyrinxTransport(): Promise<void> {
+  const config = runnerConfig;
+  if (!config) return;
+  let transportEpoch = epoch;
+  quietCorpusSendState = 'unavailable';
+  try {
+    // Reset isolates this transport generation before audio callbacks can send
+    // an old capture window. Cyrinx owns the normal browser PCM path; Quiet is
+    // retained only as the explicit diagnostic fallback.
+    cyrinxTransportActive = false;
+    clearCyrinxCase();
+    await quiet.reset();
+    await resetAudio();
+    transportEpoch = await requestBridgeReset();
+    epoch = transportEpoch;
+    evidence = await armAudio(epoch);
+    await reportToBridge(evidence);
+    configureAcousticSession(config);
+    cyrinxTransportActive = true;
+    acousticAdapter!.reset(epoch);
+    requestCyrinxTransportListen();
+    if (config.role === 'A') acousticSession!.start();
+    acousticAdapter!.refresh();
+    bridgeDelivery = `Cyrinx packet transport armed for epoch ${epoch}`;
+    quietRuntime = `Cyrinx packet transport listening · epoch ${epoch}`;
+    uiState = 'ready';
+  } catch (error) {
+    const message = safeUiReason(error, 'local modem operation was unavailable');
+    if (epoch !== transportEpoch) return;
+    cyrinxTransportActive = false;
+    clearCyrinxCase();
+    uiState = message.includes('bridge') || message.includes('RESET') ? 'disconnected' : 'failed';
+    failure = message;
+    quietRuntime = `Cyrinx transport failed · epoch ${transportEpoch}`;
   }
   render();
 }
@@ -1481,6 +1590,7 @@ async function reset(): Promise<void> {
   uiState = 'requesting'; failure = ''; resetFailure = ''; render();
   try {
     acousticAdapter?.invalidate(); fipsPackets.invalidate(); browserPacketReady = false; packetGeneration += 1;
+    cyrinxTransportActive = false;
     clearCyrinxCase();
     for (const incomplete of quiet.flushIncomplete()) await appendQuietEvidence(incomplete);
     const nextEpoch = await requestBridgeReset();

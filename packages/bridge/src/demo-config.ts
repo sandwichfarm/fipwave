@@ -79,9 +79,9 @@ const DEFAULTS = Object.freeze({
   codecCapabilities: Object.freeze(['quiet'] as const),
   audioDefaults: Object.freeze({ sampleRate: 48_000 as const, channels: 1 as const, echoCancellation: false as const, noiseSuppression: false as const, autoGainControl: false as const }),
   calibrationCandidates: Object.freeze([
-    Object.freeze({ id: 'quiet-bootstrap-robust-v1', profileId: 'quiet-audible-7k-v1' as const, codec: 'quiet' as const, profile: 'audible-7k-channel-0' as const, payloadBytes: 96, repetition: 1 as const, guardMs: 750, playbackGain: 1, ackTimeoutMs: 4_000 as const }),
-    Object.freeze({ id: 'quiet-full-frame-fast-v1', profileId: 'quiet-audible-7k-v1' as const, codec: 'quiet' as const, profile: 'audible-7k-channel-0' as const, payloadBytes: 217, repetition: 1 as const, guardMs: 100, playbackGain: 1, ackTimeoutMs: 4_000 as const }),
-    Object.freeze({ id: 'quiet-bootstrap-loud-v1', profileId: 'quiet-audible-7k-v1' as const, codec: 'quiet' as const, profile: 'audible-7k-channel-0' as const, payloadBytes: 96, repetition: 1 as const, guardMs: 500, playbackGain: 2, ackTimeoutMs: 4_000 as const }),
+    Object.freeze({ id: 'quiet-bootstrap-robust-v1', profileId: 'quiet-audible-7k-v1' as const, codec: 'quiet' as const, profile: 'audible-7k-channel-0' as const, payloadBytes: 96, repetition: 1 as const, guardMs: 75, playbackGain: 1, ackTimeoutMs: 4_000 as const }),
+    Object.freeze({ id: 'quiet-full-frame-fast-v1', profileId: 'quiet-audible-7k-v1' as const, codec: 'quiet' as const, profile: 'audible-7k-channel-0' as const, payloadBytes: 217, repetition: 1 as const, guardMs: 20, playbackGain: 1, ackTimeoutMs: 4_000 as const }),
+    Object.freeze({ id: 'quiet-bootstrap-loud-v1', profileId: 'quiet-audible-7k-v1' as const, codec: 'quiet' as const, profile: 'audible-7k-channel-0' as const, payloadBytes: 96, repetition: 1 as const, guardMs: 50, playbackGain: 2, ackTimeoutMs: 4_000 as const }),
   ]),
   acoustic: Object.freeze({ protocol: Object.freeze({ maximumBodyBytes: 217 as const, maximumPacketBytes: 1_357 as const, maxFragments: 16 as const }), arq: Object.freeze({ windowSize: 4 as const, maxAttempts: 3 as const, maxQueuedPackets: 16 as const, deliveredIdHistory: 32 as const }), calibration: Object.freeze({ maxCandidates: 3 as const, probesPerDirection: 1 as const, deadlineMs: 120_000 as const, maximumPlaybackGain: 2 as const }) }),
   retries: Object.freeze({ maxAttempts: 3, minDelayMs: 500, maxDelayMs: 2_000 }),
@@ -133,7 +133,7 @@ function retryOverride(value: unknown): { maxAttempts?: number; minDelayMs?: num
 function acousticOverride(value: unknown): { fastGuardMs?: number } {
   const override = record(value, 'acoustic_override_invalid');
   exactKeys(override, ['fastGuardMs'], 'acoustic_override_unknown_key');
-  return 'fastGuardMs' in override ? { fastGuardMs: integer(override.fastGuardMs, 'fast_guard_invalid', 50, 1_500) } : {};
+  return 'fastGuardMs' in override ? { fastGuardMs: integer(override.fastGuardMs, 'fast_guard_invalid', 20, 1_500) } : {};
 }
 function heartbeatOverride(value: unknown): { intervalMs?: number; deadLinkTimeoutMs?: number } {
   const override = record(value, 'heartbeat_override_invalid'); exactKeys(override, ['intervalMs', 'deadLinkTimeoutMs'], 'heartbeat_override_unknown_key');

@@ -4,8 +4,11 @@ export const PCM_FLOAT32_ENCODING = 1;
 export const PCM_SAMPLE_INDEX_BYTES = 8;
 export const FWAV_HEADER_BYTES = 32;
 export const CYRINX_PCM_PLAYBACK_FLAG = 1;
+export const CYRINX_CONTROL_PCM_PLAYBACK_FLAG = 2;
 export const CYRINX_FRAME_SAMPLES = 62_464;
 export const CYRINX_GUARD_SAMPLES = 14_400;
+export const CYRINX_CONTROL_FRAME_SAMPLES = 28_672;
+export const CYRINX_CONTROL_GUARD_SAMPLES = 4_800;
 export const MAX_BRIDGE_CAPTURE_BUFFER_BYTES = 256 * 1024;
 const MAX_SCHEDULED_HORIZON_MS = 2_000;
 
@@ -314,9 +317,10 @@ export function validatePcmPlaybackFrame(data: ArrayBuffer, expectedEpoch: numbe
   const payload = data.slice(FWAV_HEADER_BYTES + PCM_SAMPLE_INDEX_BYTES);
   const samples = new Float32Array(payload);
   const flags = view.getUint16(6, true);
-  if (flags !== 0 && flags !== CYRINX_PCM_PLAYBACK_FLAG) fail('PCM playback flags are unsupported');
+  if (flags !== 0 && flags !== CYRINX_PCM_PLAYBACK_FLAG && flags !== CYRINX_CONTROL_PCM_PLAYBACK_FLAG) fail('PCM playback flags are unsupported');
   if (flags === CYRINX_PCM_PLAYBACK_FLAG && samples.length !== CYRINX_FRAME_SAMPLES) fail('Cyrinx PCM frame has unexpected geometry');
-  const guardSamples = flags === CYRINX_PCM_PLAYBACK_FLAG ? CYRINX_GUARD_SAMPLES : 0;
+  if (flags === CYRINX_CONTROL_PCM_PLAYBACK_FLAG && samples.length !== CYRINX_CONTROL_FRAME_SAMPLES) fail('Cyrinx control PCM frame has unexpected geometry');
+  const guardSamples = flags === CYRINX_PCM_PLAYBACK_FLAG ? CYRINX_GUARD_SAMPLES : flags === CYRINX_CONTROL_PCM_PLAYBACK_FLAG ? CYRINX_CONTROL_GUARD_SAMPLES : 0;
   return {
     epoch,
     sequence: view.getBigUint64(16, true),

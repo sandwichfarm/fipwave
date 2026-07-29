@@ -39,9 +39,9 @@ describe('demo configuration authority', () => {
     expect(a.calibrationCandidates).toEqual(b.calibrationCandidates);
     expect(a.calibrationCandidates.map((candidate) => candidate.profileId)).toEqual(['quiet-audible-7k-v1', 'quiet-audible-7k-v1', 'quiet-audible-7k-v1']);
     expect(a.calibrationCandidates.map((candidate) => ({ id: candidate.id, payloadBytes: candidate.payloadBytes, playbackGain: candidate.playbackGain, guardMs: candidate.guardMs, ackTimeoutMs: candidate.ackTimeoutMs }))).toEqual([
-      { id: 'quiet-bootstrap-robust-v1', payloadBytes: 96, playbackGain: 1, guardMs: 750, ackTimeoutMs: 4_000 },
-      { id: 'quiet-full-frame-fast-v1', payloadBytes: 217, playbackGain: 1, guardMs: 100, ackTimeoutMs: 4_000 },
-      { id: 'quiet-bootstrap-loud-v1', payloadBytes: 96, playbackGain: 2, guardMs: 500, ackTimeoutMs: 4_000 },
+      { id: 'quiet-bootstrap-robust-v1', payloadBytes: 96, playbackGain: 1, guardMs: 75, ackTimeoutMs: 4_000 },
+      { id: 'quiet-full-frame-fast-v1', payloadBytes: 217, playbackGain: 1, guardMs: 20, ackTimeoutMs: 4_000 },
+      { id: 'quiet-bootstrap-loud-v1', payloadBytes: 96, playbackGain: 2, guardMs: 50, ackTimeoutMs: 4_000 },
     ]);
     expect(a.identity.publicKey).toBe('npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m');
     expect(b.identity.publicKey).toBe('npub1f49ke5fkzqev4x7j46uajq92f4zan6kcpty5yvm5c3g6wf2dqanqn7qsy2');
@@ -83,7 +83,7 @@ describe('demo configuration authority', () => {
       acoustic: { fastGuardMs: 150 },
     });
 
-    expect(overridden).toMatchObject({ bridge: { browserPort: 4_410 }, retries: { maxAttempts: 3 }, heartbeat: { deadLinkTimeoutMs: 8_000 }, calibrationCandidates: [{ guardMs: 750 }, { guardMs: 150 }, { guardMs: 500 }] });
+    expect(overridden).toMatchObject({ bridge: { browserPort: 4_410 }, retries: { maxAttempts: 3 }, heartbeat: { deadLinkTimeoutMs: 8_000 }, calibrationCandidates: [{ guardMs: 75 }, { guardMs: 150 }, { guardMs: 50 }] });
     expect(JSON.stringify(canonical)).toBe(before);
     expect(Object.isFrozen(overridden)).toBe(true);
     expect(Object.isFrozen(overridden.bridge)).toBe(true);

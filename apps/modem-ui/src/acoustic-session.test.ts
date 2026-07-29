@@ -282,7 +282,7 @@ describe('AcousticSession bootstrap handshake', () => {
       const body = unit.body.slice(); patch(body);
       return encodeFas1({ ...unit, body });
     };
-    const identityOffset = 2;
+    const identityOffset = 3;
     const expectedOffset = (body: Uint8Array) => identityOffset + 1 + body[identityOffset]!;
     const nonceOffset = (body: Uint8Array) => expectedOffset(body) + 1 + body[expectedOffset(body)]!;
     const profileOffset = (body: Uint8Array) => nonceOffset(body) + 16;
@@ -305,6 +305,93 @@ describe('AcousticSession bootstrap handshake', () => {
       b.receive(makeHello(mutate));
       expect(b.snapshot.state).toBe('Listening');
     }
+  });
+
+  it('brings both peers to Ready through the two-frame fast bootstrap without calibration probes', async () => {
+    const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
+    let aReady = 0; let bReady = 0;
+    const a = new AcousticSession({ ...options('A', aModem), fastBootstrap: true, onReady: () => { aReady += 1; } });
+    const b = new AcousticSession({ ...options('B', bModem), fastBootstrap: true, onReady: () => { bReady += 1; } });
+
+    a.start();
+    await Promise.all([a.settle(), b.settle()]);
+
+    expect(a.snapshot).toMatchObject({ state: 'Ready', ready: true, ledger: [] });
+    expect(b.snapshot).toMatchObject({ state: 'Ready', ready: true, ledger: [] });
+    expect({ aReady, bReady }).toEqual({ aReady: 1, bReady: 1 });
+    expect(aModem.sent.map((raw) => decodeFas1(raw).type)).toEqual([Fas1UnitType.Hello]);
+    expect(bModem.sent.map((raw) => decodeFas1(raw).type)).toEqual([Fas1UnitType.HelloAck]);
+  });
+
+  it('piggybacks fast-control acknowledgements on the three-message FIPS handshake', async () => {
+    const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
+    const receivedA: Uint8Array[] = []; const receivedB: Uint8Array[] = [];
+    let a: AcousticSession; let b: AcousticSession;
+    a = new AcousticSession({
+      ...options('A', aModem),
+      fastBootstrap: true,
+      onPacket: (packet) => {
+        receivedA.push(packet);
+        if (packet[0] === 2) a.enqueuePacket(Uint8Array.of(3), 'control');
+      },
+    });
+    b = new AcousticSession({
+      ...options('B', bModem),
+      fastBootstrap: true,
+      onPacket: (packet) => {
+        receivedB.push(packet);
+        if (packet[0] === 1) b.enqueuePacket(Uint8Array.of(2), 'control');
+      },
+    });
+
+    a.start();
+    await settlePair(a, b);
+    aModem.sent.splice(0); bModem.sent.splice(0);
+
+    expect(a.enqueuePacket(Uint8Array.of(1), 'control')).toMatchObject({ accepted: true });
+    await settlePair(a, b);
+    await Promise.resolve();
+    await settlePair(a, b);
+
+    expect(receivedA).toEqual([Uint8Array.of(2)]);
+    expect(receivedB).toEqual([Uint8Array.of(1), Uint8Array.of(3)]);
+    const units = [...aModem.sent, ...bModem.sent].map(decodeFas1);
+    expect(units.filter((unit) => unit.type === Fas1UnitType.Data)).toHaveLength(3);
+    expect(units.filter((unit) => unit.type === Fas1UnitType.Ack)).toHaveLength(0);
+    expect(units.some((unit) => unit.type === Fas1UnitType.TurnEnd)).toBe(false);
+    expect(units.filter((unit) => unit.type === Fas1UnitType.Data).every((unit) => (unit.sequence & 0x8000_0000) !== 0)).toBe(true);
+    expect(units.filter((unit) => unit.type === Fas1UnitType.Data).map((unit) => unit.sequence & 0x7fff_ffff)).toEqual([0, 1, 1]);
+  });
+
+  it('sends one bounded standalone ACK when a fast-control packet has no immediate response', async () => {
+    const timers = new FakeTimers();
+    const aModem = new FakeModem(); const bModem = new FakeModem(); aModem.peer = bModem; bModem.peer = aModem;
+    const a = new AcousticSession({ ...options('A', aModem), fastBootstrap: true });
+    const b = new AcousticSession({ ...options('B', bModem), timers, fastBootstrap: true });
+
+    a.start();
+    await settlePair(a, b);
+    aModem.sent.splice(0); bModem.sent.splice(0);
+    expect(a.enqueuePacket(Uint8Array.of(1), 'control')).toMatchObject({ accepted: true });
+    expect(bModem.sent.map(decodeFas1).filter((unit) => unit.type === Fas1UnitType.Ack)).toHaveLength(0);
+
+    timers.runAll();
+    expect(bModem.sent.map(decodeFas1).filter((unit) => unit.type === Fas1UnitType.Ack)).toHaveLength(1);
+  });
+
+  it('falls back to an ordinary calibration HELLO after bounded fast-bootstrap misses', async () => {
+    const timers = new FakeTimers(); const modem = new FakeModem();
+    const a = new AcousticSession({ ...options('A', modem), timers, fastBootstrap: true });
+
+    a.start();
+    for (let attempt = 0; attempt < 3; attempt += 1) { await a.settle(); timers.runAll(); }
+    await a.settle();
+
+    const finalHello = decodeFas1(modem.sent.at(-1)!);
+    expect(finalHello.type).toBe(Fas1UnitType.Hello);
+    // Handshake v2: byte 2 carries the explicit fast-bootstrap request.
+    expect(finalHello.body[2]).toBe(0);
+    expect(a.snapshot).toMatchObject({ state: 'HelloSent', ready: false });
   });
 
   it('does not allow duplicate or out-of-order controls to skip the legal sequence', () => {

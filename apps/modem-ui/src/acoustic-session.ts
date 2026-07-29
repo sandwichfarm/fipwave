@@ -33,8 +33,12 @@ export interface AcousticSessionOptions {
   readonly ranges: AcousticCapabilityRange;
   readonly candidates: readonly AcousticCandidate[];
   readonly calibration: Readonly<{ probesPerDirection: number; maxCandidates: number; deadlineMs: number }>;
+  /** Use the prequalified fixed candidate first; retry failures enter full calibration. */
+  readonly fastBootstrap?: boolean;
   readonly measureProbe: (probe: AcousticProbe) => AcousticProbeObservation;
   readonly onPacket?: (packet: Uint8Array, result: AcousticDeliveryResult) => void;
+  /** Called after an asynchronous fast bootstrap makes the packet boundary usable. */
+  readonly onReady?: () => void;
 }
 
 export interface AcousticSessionSnapshot {
@@ -53,10 +57,10 @@ export interface AcousticSessionSnapshot {
   readonly counters: Readonly<{ retries: number; dropped: number; duplicates: number; queuedPackets: number; queuedBytes: number; deliveredPackets: number; deliveredBytesTx: number; deliveredBytesRx: number; parityFramesTx: number; parityFramesRx: number; recoveredFragments: number; warmResumes: number; }>;
 }
 
-interface PendingPacket { readonly packetId: number; readonly packet: Uint8Array; readonly fragments: readonly Fas1Unit[]; readonly parity: readonly Fas1Unit[]; readonly trafficClass: AcousticTrafficClass; readonly expiresAt: number; attempts: number; acknowledged: number; paritySent: number; }
+interface PendingPacket { readonly packetId: number; readonly packet: Uint8Array; readonly fragments: readonly Fas1Unit[]; readonly parity: readonly Fas1Unit[]; readonly trafficClass: AcousticTrafficClass; readonly fastControl: boolean; readonly fastAckFor?: number; readonly expiresAt: number; attempts: number; acknowledged: number; paritySent: number; }
 interface InboundAssembly { readonly packetId: number; readonly fragmentCount: number; readonly packetLength: number; readonly fragments: Map<number, Fas1Unit>; readonly parity: Map<number, Fas1Unit>; readonly expiresAt: number; }
 
-interface Handshake { readonly role: AcousticRole; readonly identity: string; readonly expectedPeer: string; readonly nonce: Uint8Array; readonly echoedNonce?: Uint8Array; readonly profiles: readonly string[]; readonly ranges: AcousticCapabilityRange; readonly epoch: number; readonly sessionId?: bigint; }
+interface Handshake { readonly role: AcousticRole; readonly identity: string; readonly expectedPeer: string; readonly nonce: Uint8Array; readonly echoedNonce?: Uint8Array; readonly profiles: readonly string[]; readonly ranges: AcousticCapabilityRange; readonly epoch: number; readonly sessionId?: bigint; readonly fastBootstrap: boolean; }
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true });
@@ -80,7 +84,19 @@ const MAX_DELIVERED_IDS = 32;
 const MAX_PACKET_AGE_MS = 600_000;
 const MAX_ATTEMPTS = 3;
 const WINDOW_SIZE = 8;
+/** Marks a one-fragment bootstrap-control DATA frame without changing its CRC-bound payload. */
+const FAST_CONTROL_SEQUENCE_FLAG = 0x8000_0000;
+const FAST_CONTROL_SEQUENCE_MAX = FAST_CONTROL_SEQUENCE_FLAG - 1;
+// A local FIPS response normally appears within one event-loop turn of a
+// received Noise handshake message. Give it a tiny chance to carry the FAS1
+// acknowledgement, but retain an ordinary ACK when it does not.
+const FAST_ACK_COALESCE_MS = 75;
 const HANDSHAKE_RETRY_MS = 2_500;
+// A control waveform is 597 ms and the first browser/native encode can add
+// nearly another half second. Retrying at 400 ms lets a sender decode its own
+// retry before its peer's first acknowledgement reaches it.
+const FAST_HANDSHAKE_RETRY_MS = 1_800;
+const FAST_HANDSHAKE_ATTEMPTS = 2;
 const PROBE_RETRY_MS = 1_500;
 const COMMIT_RETRY_MS = 2_000;
 const CEREMONY_TYPES = new Set([
@@ -132,9 +148,9 @@ function encodeHandshake(value: Handshake): Uint8Array {
   if (identity.byteLength > MAX_IDENTITY_BYTES || expected.byteLength > MAX_IDENTITY_BYTES) invalid('identity is invalid');
   const profiles = value.profiles.map((profile) => encoder.encode(profile));
   if (profiles.some((profile) => profile.byteLength < 1 || profile.byteLength > MAX_PROFILE_BYTES)) invalid('profile set is invalid');
-  const output = new Uint8Array(1 + 1 + 1 + identity.byteLength + 1 + expected.byteLength + 16 + 1 + profiles.reduce((sum, profile) => sum + 1 + profile.byteLength, 0) + 4 + 4 + 4 + (value.echoedNonce ? 16 : 0) + (value.sessionId === undefined ? 0 : 8));
+  const output = new Uint8Array(1 + 1 + 1 + 1 + identity.byteLength + 1 + expected.byteLength + 16 + 1 + profiles.reduce((sum, profile) => sum + 1 + profile.byteLength, 0) + 4 + 4 + 4 + (value.echoedNonce ? 16 : 0) + (value.sessionId === undefined ? 0 : 8));
   const view = new DataView(output.buffer); let offset = 0;
-  output[offset++] = 1; output[offset++] = roleByte(value.role);
+  output[offset++] = 2; output[offset++] = roleByte(value.role); output[offset++] = value.fastBootstrap ? 1 : 0;
   output[offset++] = identity.byteLength; output.set(identity, offset); offset += identity.byteLength;
   output[offset++] = expected.byteLength; output.set(expected, offset); offset += expected.byteLength;
   output.set(value.nonce, offset); offset += 16;
@@ -155,8 +171,8 @@ function decodeHandshake(input: Uint8Array): Handshake {
     const view = new DataView(input.buffer, input.byteOffset, input.byteLength); let offset = 0;
     const byte = (): number => { if (offset >= input.byteLength) invalid('handshake is truncated'); return input[offset++]!; };
     const text = (): string => { const length = byte(); if (length < 1 || length > MAX_IDENTITY_BYTES || offset + length > input.byteLength) invalid('handshake identity is invalid'); const value = decoder.decode(input.slice(offset, offset + length)); offset += length; return value; };
-    if (byte() !== 1) invalid('handshake version is invalid');
-    const role = parseRole(byte()); const identity = text(); const expectedPeer = text();
+    if (byte() !== 2) invalid('handshake version is invalid');
+    const role = parseRole(byte()); const fastFlag = byte(); if (fastFlag !== 0 && fastFlag !== 1) invalid('handshake fast bootstrap flag is invalid'); const identity = text(); const expectedPeer = text();
     if (offset + 16 > input.byteLength) invalid('handshake nonce is invalid'); const nonce = input.slice(offset, offset + 16); offset += 16;
     const profileCount = byte(); if (profileCount < 1 || profileCount > MAX_PROFILES) invalid('handshake profile count is invalid');
     const profiles: string[] = [];
@@ -170,7 +186,7 @@ function decodeHandshake(input: Uint8Array): Handshake {
     if (hasSessionId === 1) { if (offset + 8 !== input.byteLength) invalid('handshake session ID is invalid'); sessionId = view.getBigUint64(offset, true); offset += 8; if (sessionId === 0n) invalid('handshake session ID is invalid'); } else if (hasSessionId !== 0 || offset !== input.byteLength) invalid('handshake trailing data is invalid');
     if (!identity || !expectedPeer || identity === expectedPeer || !nonZero(nonce) || !validRange(ranges)) invalid('handshake binding is invalid');
     return {
-      role, identity, expectedPeer, nonce, profiles, ranges, epoch,
+      role, identity, expectedPeer, nonce, profiles, ranges, epoch, fastBootstrap: fastFlag === 1,
       ...(echoedNonce ? { echoedNonce } : {}),
       ...(sessionId === undefined ? {} : { sessionId }),
     };
@@ -191,6 +207,8 @@ export class AcousticSession {
   #unsubscribe: () => void;
   #timer: ReturnType<typeof setTimeout> | undefined;
   #handshakeTimer: ReturnType<typeof setTimeout> | undefined;
+  #fastAckTimer: ReturnType<typeof setTimeout> | undefined;
+  #pendingFastAck: number | undefined;
   #handshakeAttempts = 0;
   #probeTimer: ReturnType<typeof setTimeout> | undefined;
   #probeRetry: { direction: 'AtoB' | 'BtoA'; ordinal: number; attempts: number } | undefined;
@@ -228,6 +246,7 @@ export class AcousticSession {
   #provenDigest: Uint8Array | undefined;
   #peerResumeDigest: Uint8Array | undefined;
   #resuming = false;
+  #fastBootstrapActive = false;
   #counters = {
     retries: 0,
     dropped: 0,
@@ -248,6 +267,7 @@ export class AcousticSession {
       if (!candidate.id || candidate.playbackGain < 1 || candidate.playbackGain > 2 || !validInteger(candidate.payloadBytes, options.ranges.minPayloadBytes, options.ranges.maxPayloadBytes) || !validInteger(candidate.repetition, 1, 3) || !validInteger(candidate.guardMs, 1, 5_000) || !validInteger(candidate.ackTimeoutMs, 4_000, 15_000)) invalid('candidate is invalid');
       resolveAcousticProfile(candidate.profileId);
     }
+    this.#fastBootstrapActive = options.fastBootstrap === true;
     this.#state = options.role === 'A' ? 'Idle' : 'Listening';
     this.#unsubscribe = options.modem.onUnit((unit) => this.receive(unit));
   }
@@ -289,13 +309,25 @@ export class AcousticSession {
     const packetId = this.nextPacketId();
     const copied = packet.slice();
     const fragments = fragmentPacket({ sessionId: this.#sessionId, sequenceStart: this.#sequence, packetId, packet: copied, sender: senderFlag(this.options.role), payloadBytes: this.outboundSettings().payloadBytes });
-    const parity = createParityUnits(fragments, this.outboundSettings().payloadBytes);
+    // FIPS's opening XK messages are one control fragment. They already have
+    // FIPS-level retransmission, while FAS1 still binds every frame with its
+    // CRC and retains a local ACK/retry. Mark only these startup controls so
+    // the receiver can hand the acoustic turn directly to its ACK instead of
+    // spending two extra, empty TURN_END waveforms per handshake message.
+    const fastControl = this.#fastBootstrapActive && trafficClass === 'control' && fragments.length === 1 && this.#sequence <= FAST_CONTROL_SEQUENCE_MAX;
+    const fastAckFor = fastControl ? this.#pendingFastAck : undefined;
+    const markedFragments = fastControl
+      ? fragments.map((fragment) => ({ ...fragment, sequence: (FAST_CONTROL_SEQUENCE_FLAG | (fastAckFor ?? 0)) >>> 0 }))
+      : fragments;
+    const parity = fastControl ? [] : createParityUnits(markedFragments, this.outboundSettings().payloadBytes);
     const pending: PendingPacket = {
       packetId,
       packet: copied,
-      fragments,
+      fragments: markedFragments,
       parity,
       trafficClass,
+      fastControl,
+      ...(fastAckFor === undefined ? {} : { fastAckFor }),
       expiresAt: this.options.clock.now() + MAX_PACKET_AGE_MS,
       attempts: 0,
       acknowledged: 0,
@@ -312,7 +344,8 @@ export class AcousticSession {
     const nonce = this.options.nonce().slice();
     if (nonce.byteLength !== 16) invalid('nonce must be 128 bits');
     this.#localNonce = nonce; this.#sessionId = toSessionId(nonce); this.#state = 'HelloSent';
-    const completion = this.send(Fas1UnitType.Hello, 0n, encodeHandshake({ role: 'A', identity: this.options.identity, expectedPeer: this.options.expectedPeer, nonce, profiles: this.options.profiles, ranges: this.options.ranges, epoch: this.#epoch, sessionId: this.#sessionId }));
+    if (this.#fastBootstrapActive) this.options.modem.applyCandidate?.(this.fastestCandidate());
+    const completion = this.send(Fas1UnitType.Hello, 0n, encodeHandshake({ role: 'A', identity: this.options.identity, expectedPeer: this.options.expectedPeer, nonce, profiles: this.options.profiles, ranges: this.options.ranges, epoch: this.#epoch, sessionId: this.#sessionId, fastBootstrap: this.#fastBootstrapActive }));
     this.continueHandshakeAfterPlayback(completion, 'HelloSent');
     return true;
   }
@@ -330,6 +363,7 @@ export class AcousticSession {
       while (this.#retiredSessionIds.size > 8) this.#retiredSessionIds.delete(this.#retiredSessionIds.values().next().value!);
     }
     if (this.#timer !== undefined) this.options.timers.clearTimeout(this.#timer);
+    this.clearFastAck();
     this.clearHandshakeRetry();
     this.clearProbeRetry();
     this.clearCommitRetry();
@@ -392,6 +426,11 @@ export class AcousticSession {
   private clearHandshakeRetry(): void {
     if (this.#handshakeTimer !== undefined) this.options.timers.clearTimeout(this.#handshakeTimer);
     this.#handshakeTimer = undefined; this.#handshakeAttempts = 0;
+  }
+  private clearFastAck(): void {
+    if (this.#fastAckTimer !== undefined) this.options.timers.clearTimeout(this.#fastAckTimer);
+    this.#fastAckTimer = undefined;
+    this.#pendingFastAck = undefined;
   }
   private clearProbeRetry(): void {
     if (this.#probeTimer !== undefined) this.options.timers.clearTimeout(this.#probeTimer);
@@ -462,18 +501,22 @@ export class AcousticSession {
     this.#handshakeTimer = this.options.timers.setTimeout(() => {
       this.#handshakeTimer = undefined;
       if (epoch !== this.#epoch || sessionId !== this.#sessionId || generation !== this.#generation || !['HelloSent', 'HelloAckSent', 'CapsSent'].includes(this.#state)) return;
+      if (this.#fastBootstrapActive && this.#state === 'HelloSent' && this.#handshakeAttempts >= FAST_HANDSHAKE_ATTEMPTS) {
+        this.restartWithCalibration();
+        return;
+      }
       this.#handshakeAttempts += 1; this.#counters.retries += 1;
       const expectedState = this.#state as 'HelloSent' | 'HelloAckSent' | 'CapsSent';
       let completion: void | Promise<void>;
       if (this.#state === 'HelloSent' && this.#localNonce && this.#sessionId) {
-        completion = this.send(Fas1UnitType.Hello, 0n, encodeHandshake({ role: 'A', identity: this.options.identity, expectedPeer: this.options.expectedPeer, nonce: this.#localNonce, profiles: this.options.profiles, ranges: this.options.ranges, epoch: this.#epoch, sessionId: this.#sessionId }));
+        completion = this.send(Fas1UnitType.Hello, 0n, encodeHandshake({ role: 'A', identity: this.options.identity, expectedPeer: this.options.expectedPeer, nonce: this.#localNonce, profiles: this.options.profiles, ranges: this.options.ranges, epoch: this.#epoch, sessionId: this.#sessionId, fastBootstrap: this.#fastBootstrapActive }));
       } else if (this.#state === 'HelloAckSent' && this.#localNonce && this.#peerNonce && this.#sessionId) {
-        completion = this.send(Fas1UnitType.HelloAck, this.#sessionId, encodeHandshake({ role: 'B', identity: this.options.identity, expectedPeer: this.options.expectedPeer, nonce: this.#localNonce, echoedNonce: this.#peerNonce, profiles: this.options.profiles, ranges: this.options.ranges, epoch: this.#epoch }));
+        completion = this.send(Fas1UnitType.HelloAck, this.#sessionId, encodeHandshake({ role: 'B', identity: this.options.identity, expectedPeer: this.options.expectedPeer, nonce: this.#localNonce, echoedNonce: this.#peerNonce, profiles: this.options.profiles, ranges: this.options.ranges, epoch: this.#epoch, fastBootstrap: this.#fastBootstrapActive }));
       } else if (this.#state === 'CapsSent' && this.#sessionId) {
         completion = this.send(Fas1UnitType.Caps, this.#sessionId, this.capsBody());
       } else return;
       this.continueHandshakeAfterPlayback(completion, expectedState);
-    }, HANDSHAKE_RETRY_MS);
+    }, this.#fastBootstrapActive ? FAST_HANDSHAKE_RETRY_MS : HANDSHAKE_RETRY_MS);
   }
   private clearHeartbeatTimers(): void {
     if (this.#heartbeatTimer !== undefined) this.options.timers.clearTimeout(this.#heartbeatTimer);
@@ -550,16 +593,19 @@ export class AcousticSession {
     const pending = this.#active; const missing = pending.fragments.filter((unit) => (pending.acknowledged & (1 << unit.fragmentIndex)) === 0).slice(0, WINDOW_SIZE);
     if (missing.length === 0) { this.#active = undefined; this.#turnOwner = complement(this.options.role); this.schedule(() => this.driveTurn(), this.guardMs()); return; }
     pending.attempts += 1; this.#awaitingAck = true;
+    if (pending.fastAckFor !== undefined && pending.fastAckFor === this.#pendingFastAck) this.clearFastAck();
     const generation = this.#generation; const sessionId = this.#sessionId; const attempt = pending.attempts;
     const completions = missing.map((unit) => this.sendUnit(unit));
-    const groupStarts = new Set(missing.map((unit) => unit.fragmentIndex - (unit.fragmentIndex % FAS1_PARITY_GROUP_SIZE)));
-    for (const parity of pending.parity) {
-      const groupBit = 1 << (parity.fragmentIndex / FAS1_PARITY_GROUP_SIZE);
-      if (!groupStarts.has(parity.fragmentIndex) || (pending.paritySent & groupBit) !== 0) continue;
-      pending.paritySent |= groupBit;
-      completions.push(this.sendUnit(parity));
+    if (!pending.fastControl) {
+      const groupStarts = new Set(missing.map((unit) => unit.fragmentIndex - (unit.fragmentIndex % FAS1_PARITY_GROUP_SIZE)));
+      for (const parity of pending.parity) {
+        const groupBit = 1 << (parity.fragmentIndex / FAS1_PARITY_GROUP_SIZE);
+        if (!groupStarts.has(parity.fragmentIndex) || (pending.paritySent & groupBit) !== 0) continue;
+        pending.paritySent |= groupBit;
+        completions.push(this.sendUnit(parity));
+      }
     }
-    completions.push(this.send(Fas1UnitType.TurnEnd, this.#sessionId, new Uint8Array()));
+    if (!pending.fastControl) completions.push(this.send(Fas1UnitType.TurnEnd, this.#sessionId, new Uint8Array()));
     const armTimeout = () => {
       if (this.#generation !== generation || this.#sessionId !== sessionId || this.#state !== 'Ready' || this.#turnOwner !== this.options.role || !this.#awaitingAck || this.#active !== pending || pending.attempts !== attempt) return;
       this.schedule(() => this.onAckTimeout(pending.packetId, attempt), this.ackTimeoutMs());
@@ -610,10 +656,59 @@ export class AcousticSession {
     this.reset(epoch);
     if (this.options.role === 'A') this.start();
   }
+  private isFastControl(unit: Fas1Unit): boolean {
+    return this.#fastBootstrapActive
+      && unit.type === Fas1UnitType.Data
+      && unit.fragmentCount === 1
+      && (unit.sequence & FAST_CONTROL_SEQUENCE_FLAG) !== 0;
+  }
+  private fastAcknowledgement(unit: Fas1Unit): number | undefined {
+    return this.isFastControl(unit) ? unit.sequence & FAST_CONTROL_SEQUENCE_MAX : undefined;
+  }
+  private prepareFastAcknowledgement(packetId: number): void {
+    if (!this.#sessionId || packetId < 1 || packetId > FAST_CONTROL_SEQUENCE_MAX) return;
+    this.#pendingFastAck = packetId;
+    this.#turnOwner = this.options.role;
+    if (this.#fastAckTimer !== undefined) return;
+    const generation = this.#generation;
+    const sessionId = this.#sessionId;
+    this.#fastAckTimer = this.options.timers.setTimeout(() => {
+      this.#fastAckTimer = undefined;
+      if (generation !== this.#generation || sessionId !== this.#sessionId || this.#state !== 'Ready' || this.#pendingFastAck !== packetId) return;
+      this.#pendingFastAck = undefined;
+      this.acknowledgeFastControl(packetId, 1);
+    }, FAST_ACK_COALESCE_MS);
+  }
   private onData(unit: Fas1Unit): void {
     this.expireWork();
-    if (this.#state !== 'Ready' || unit.sessionId !== this.#sessionId || this.#turnOwner !== complement(this.options.role)) return;
-    if (this.#delivered.has(unit.packetId)) { this.#counters.duplicates += 1; this.#lastAck = { packetId: unit.packetId, bitmap: (1 << unit.fragmentCount) - 1 }; return; }
+    const fastControl = this.isFastControl(unit);
+    const fastAcknowledgement = this.fastAcknowledgement(unit);
+    if (fastAcknowledgement && this.#active?.fastControl && this.#awaitingAck && this.#active.packetId === fastAcknowledgement) {
+      this.onAck(unit.sessionId, fastAcknowledgement, (1 << this.#active.fragments.length) - 1);
+    }
+    const legalTurn = this.#turnOwner === complement(this.options.role)
+      // If the ACK was lost, a retried fast DATA is the sender's proof that it
+      // did not receive the handoff. Re-ACK it without delivering it twice.
+      || (fastControl && this.#turnOwner === this.options.role);
+    if (this.#state !== 'Ready' || unit.sessionId !== this.#sessionId || !legalTurn) return;
+    if (fastControl && this.#turnOwner === this.options.role && this.#awaitingAck && this.#active?.fastControl) {
+      // A CRC-valid peer control frame can only be emitted after that peer
+      // accepted our immediately preceding fast turn. It therefore confirms
+      // the lost ACK without waiting for a four-second retransmit timeout.
+      const active = this.#active;
+      this.#active = undefined;
+      this.#awaitingAck = false;
+      this.clearDeliveryTimer();
+      this.#counters.deliveredBytesTx += active.packet.byteLength;
+      this.#turnOwner = complement(this.options.role);
+    }
+    if (this.#delivered.has(unit.packetId)) {
+      this.#counters.duplicates += 1;
+      const bitmap = (1 << unit.fragmentCount) - 1;
+      if (fastControl) this.prepareFastAcknowledgement(unit.packetId);
+      else this.#lastAck = { packetId: unit.packetId, bitmap };
+      return;
+    }
     const expectedCount = Math.ceil(unit.packetLength / this.inboundPayloadBytes());
     const expectedLength = unit.fragmentIndex === expectedCount - 1 ? unit.packetLength - this.inboundPayloadBytes() * (expectedCount - 1) : this.inboundPayloadBytes();
     if (unit.fragmentCount !== expectedCount || unit.body.byteLength !== expectedLength) { this.#counters.dropped += 1; return; }
@@ -621,6 +716,7 @@ export class AcousticSession {
     if (!inbound) return;
     if (inbound.fragments.has(unit.fragmentIndex)) { this.#counters.duplicates += 1; }
     else inbound.fragments.set(unit.fragmentIndex, { ...unit, body: unit.body.slice() });
+    if (fastControl) this.prepareFastAcknowledgement(unit.packetId);
     this.refreshInbound(inbound);
   }
   private onParity(unit: Fas1Unit): void {
@@ -699,10 +795,24 @@ export class AcousticSession {
     this.#turnOwner = this.options.role;
     this.schedule(() => this.driveTurn(), this.guardMs());
   }
-  private sendAck(packetId: number, bitmap: number): void {
+  private acknowledgeFastControl(packetId: number, bitmap: number): void {
+    if (!this.#sessionId) return;
+    const generation = this.#generation;
+    const sessionId = this.#sessionId;
+    const completion = this.sendAck(packetId, bitmap);
+    void Promise.resolve(completion).then(() => {
+      if (this.#generation !== generation || this.#state !== 'Ready' || this.#sessionId !== sessionId) return;
+      this.#turnOwner = this.options.role;
+      // Do not emit an empty turn after the ACK. A queued FIPS response may
+      // start immediately; otherwise a sender that missed the ACK can retry
+      // its CRC-bound DATA and receive another ACK.
+      if (this.queueLength() > 0 || this.#heartbeatDue) this.driveTurn();
+    }, () => this.degrade('acoustic_modem_playback_failed'));
+  }
+  private sendAck(packetId: number, bitmap: number): void | Promise<void> {
     if (!this.#sessionId) return;
     const raw = encodeFas1({ type: Fas1UnitType.Ack, flags: senderFlag(this.options.role), sessionId: this.#sessionId, sequence: bitmap >>> 0, packetId, fragmentIndex: 0, fragmentCount: 0, packetLength: 0, body: new Uint8Array() });
-    void this.options.modem.send(raw, 'data');
+    return this.options.modem.send(raw, 'data');
   }
   private onAck(sessionId: bigint, packetId: number, bitmap: number): void {
     if (this.#state !== 'Ready' || sessionId !== this.#sessionId || !this.#active || !this.#awaitingAck || packetId !== this.#active.packetId) return;
@@ -717,6 +827,12 @@ export class AcousticSession {
     if (pending.acknowledged === legalMask) {
       this.#active = undefined;
       this.#counters.deliveredBytesTx += pending.packet.byteLength;
+      if (pending.fastControl) {
+        // The acknowledged fast control's ACK is also the token handoff.
+        // Do not schedule an otherwise-empty TURN_END after it.
+        this.#turnOwner = complement(this.options.role);
+        return;
+      }
       // Complete the two-step handoff: DATA/TURN_END → ACK → TURN_END. The
       // receiver remains passive until this explicit yield arrives.
       this.send(Fas1UnitType.TurnEnd, this.#sessionId, new Uint8Array());
@@ -731,7 +847,10 @@ export class AcousticSession {
     if (unit.type === Fas1UnitType.Parity) this.#counters.parityFramesTx += 1;
     return this.options.modem.send(encodeFas1(unit), 'data');
   }
-  private degrade(reason: string): void { if (this.#state === 'Error' || this.#state === 'Degraded') return; this.clearDeliveryTimer(); this.#awaitingAck = false; this.#state = 'Degraded'; this.#reason = reason; this.schedule(() => this.beginRecovery(), this.guardMs()); }
+  private degrade(reason: string): void {
+    if (this.#state === 'Error' || this.#state === 'Degraded') return;
+    this.clearDeliveryTimer(); this.#awaitingAck = false; this.#state = 'Degraded'; this.#reason = reason; this.schedule(() => this.beginRecovery(), this.guardMs());
+  }
 
   private onHello(headerSessionId: bigint, body: Uint8Array): void {
     if (this.options.role !== 'B' || headerSessionId !== 0n) return;
@@ -739,22 +858,36 @@ export class AcousticSession {
     if (hello.role !== 'A' || hello.identity !== this.options.expectedPeer || hello.expectedPeer !== this.options.identity || hello.epoch !== this.#epoch || !hello.sessionId || !sameProfiles(hello.profiles, this.options.profiles) || !this.mutualRange(hello.ranges)) return;
     if (this.#retiredSessionIds.has(hello.sessionId)) return;
     if (this.#state !== 'Listening') {
-      if (hello.sessionId === this.#sessionId) return;
+      if (hello.sessionId === this.#sessionId) {
+        if (this.#fastBootstrapActive && hello.fastBootstrap && this.#localNonce && this.#peerNonce) {
+          this.send(Fas1UnitType.HelloAck, hello.sessionId, encodeHandshake({ role: 'B', identity: this.options.identity, expectedPeer: this.options.expectedPeer, nonce: this.#localNonce, echoedNonce: this.#peerNonce, profiles: this.options.profiles, ranges: this.options.ranges, epoch: this.#epoch, fastBootstrap: true }));
+        }
+        return;
+      }
       this.reset(this.#epoch);
     }
     this.clearHandshakeRetry();
     const localNonce = this.options.nonce().slice(); if (localNonce.byteLength !== 16) invalid('nonce must be 128 bits');
     this.#sessionId = hello.sessionId; this.#peerNonce = hello.nonce; this.#localNonce = localNonce; this.#state = 'HelloAckSent';
-    const completion = this.send(Fas1UnitType.HelloAck, hello.sessionId, encodeHandshake({ role: 'B', identity: this.options.identity, expectedPeer: this.options.expectedPeer, nonce: localNonce, echoedNonce: hello.nonce, profiles: this.options.profiles, ranges: this.options.ranges, epoch: this.#epoch }));
-    this.continueHandshakeAfterPlayback(completion, 'HelloAckSent');
+    this.#fastBootstrapActive = this.options.fastBootstrap === true && hello.fastBootstrap;
+    if (this.#fastBootstrapActive) this.prepareFastBootstrap();
+    const completion = this.send(Fas1UnitType.HelloAck, hello.sessionId, encodeHandshake({ role: 'B', identity: this.options.identity, expectedPeer: this.options.expectedPeer, nonce: localNonce, echoedNonce: hello.nonce, profiles: this.options.profiles, ranges: this.options.ranges, epoch: this.#epoch, fastBootstrap: this.#fastBootstrapActive }));
+    if (this.#fastBootstrapActive) this.activateFastBootstrapAfterPlayback(completion, 'HelloAckSent');
+    else this.continueHandshakeAfterPlayback(completion, 'HelloAckSent');
   }
 
   private onHelloAck(sessionId: bigint, body: Uint8Array): void {
     if (this.options.role !== 'A' || this.#state !== 'HelloSent' || sessionId !== this.#sessionId || !this.#localNonce) return;
     const ack = decodeHandshake(body);
-    if (ack.role !== 'B' || ack.identity !== this.options.expectedPeer || ack.expectedPeer !== this.options.identity || ack.epoch !== this.#epoch || !equal(ack.echoedNonce, this.#localNonce) || !sameProfiles(ack.profiles, this.options.profiles) || !this.mutualRange(ack.ranges)) return;
+    if (ack.role !== 'B' || ack.identity !== this.options.expectedPeer || ack.expectedPeer !== this.options.identity || ack.epoch !== this.#epoch || ack.fastBootstrap !== this.#fastBootstrapActive || !equal(ack.echoedNonce, this.#localNonce) || !sameProfiles(ack.profiles, this.options.profiles) || !this.mutualRange(ack.ranges)) return;
     this.clearHandshakeRetry();
-    this.#peerNonce = ack.nonce; this.#state = 'CapsSent';
+    this.#peerNonce = ack.nonce;
+    if (this.#fastBootstrapActive) {
+      this.prepareFastBootstrap();
+      this.activateFastBootstrapAfterPlayback(undefined, 'HelloSent');
+      return;
+    }
+    this.#state = 'CapsSent';
     const completion = this.send(Fas1UnitType.Caps, sessionId, this.capsBody());
     this.continueHandshakeAfterPlayback(completion, 'CapsSent');
   }
@@ -813,6 +946,34 @@ export class AcousticSession {
     body[32] = resumeDigest ? 1 : 0;
     if (resumeDigest) body.set(resumeDigest, 33);
     return body;
+  }
+  private fastestCandidate(): AcousticCandidate {
+    return [...this.options.candidates].sort((left, right) => right.payloadBytes - left.payloadBytes || left.guardMs - right.guardMs || left.playbackGain - right.playbackGain || left.id.localeCompare(right.id))[0]!;
+  }
+  private prepareFastBootstrap(): void {
+    const candidate = this.fastestCandidate();
+    this.#selected = { AtoB: candidate, BtoA: candidate };
+    this.#settings = { aToB: this.toSettings(candidate), bToA: this.toSettings(candidate) };
+    this.applyOutboundCandidate();
+    this.#work = this.#work.then(async () => { this.#settingsDigest = await digestSettings(this.#settings!); }).catch(() => this.fail('acoustic_fast_bootstrap_failed'));
+  }
+  private activateFastBootstrapAfterPlayback(completion: void | Promise<void> | undefined, expectedState: 'HelloSent' | 'HelloAckSent'): void {
+    const generation = this.#generation;
+    this.#work = this.#work.then(async () => {
+      await completion;
+      if (generation !== this.#generation || this.#state !== expectedState || !this.#settings || !this.#settingsDigest) return;
+      this.#state = 'Ready'; this.#lastHeartbeatAtMs = this.options.clock.now(); this.#turnOwner = 'A';
+      this.#provenSettings = copySettings(this.#settings); this.#provenDigest = this.#settingsDigest.slice(); this.#resuming = false;
+      this.armHeartbeatTimers();
+      try { this.options.onReady?.(); } catch { /* Readiness projection cannot revoke a proven local session. */ }
+    }).catch(() => this.fail('acoustic_fast_bootstrap_failed'));
+  }
+  private restartWithCalibration(): void {
+    const epoch = this.#epoch;
+    this.#fastBootstrapActive = false;
+    this.reset(epoch);
+    this.#fastBootstrapActive = false;
+    this.start();
   }
   private resumeDigest(): Uint8Array | undefined {
     if (!this.#provenSettings || !this.#provenDigest || !this.candidateFor(this.#provenSettings.aToB) || !this.candidateFor(this.#provenSettings.bToA)) return undefined;
